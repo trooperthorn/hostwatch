@@ -5,7 +5,7 @@ import time
 from fastapi.testclient import TestClient
 
 from hostwatch.config import Config
-from hostwatch.hub import create_app
+from hostwatch.hub import create_app, csrf_token_for
 from hostwatch.schema import Batch, Event, Sample, SourceStatus
 from hostwatch.store import Store
 
@@ -177,7 +177,9 @@ def test_default_deny_every_route_but_health(tmp_path):
     seen = []
     for route in client.app.routes:
         methods = getattr(route, "methods", None)
-        if not methods or route.path == "/internal/v1/health":
+        # Health and login are the only routes that answer without a credential. Login
+        # grants nothing without a correct password (tests/test_login.py).
+        if not methods or route.path in ("/internal/v1/health", "/api/v1/login"):
             continue
         assert "{" not in route.path, "a parameterised route needs an explicit default-deny case"
         for m in methods - {"HEAD", "OPTIONS"}:
@@ -235,7 +237,7 @@ def test_session_cookie_reads_but_cannot_ingest(tmp_path):
     client.cookies.set("hostwatch_session", token)
     assert client.get("/internal/v1/latest").status_code == 200
     r = client.post("/internal/v1/ingest", content=batch(time.time()).model_dump_json(),
-                    headers={"Content-Type": "application/json"})
+                    headers={"Content-Type": "application/json", "X-CSRF-Token": csrf_token_for(token)})
     assert r.status_code == 403
     assert store.audit_rows(actor="alice")
     store.revoke_session(token)

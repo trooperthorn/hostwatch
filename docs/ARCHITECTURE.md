@@ -303,7 +303,7 @@ drop the triggers or edit rows, so it is not tamper-proofing. The tables exist
 and the hub now enforces them as described under Hub authentication below. The
 hub is still bound to 127.0.0.1.
 
-`hostwatch/auth.py` holds the auth primitives; the hub calls the store lookups, while password login and lockout have no HTTP endpoint yet.
+`hostwatch/auth.py` holds the auth primitives; the hub calls the store lookups, while `POST /api/v1/login` calls `check_login`.
 Passwords are hashed with argon2id, with time cost, memory and parallelism read
 from config so tests can use a low cost; a login with an outdated hash is
 rehashed. `check_login` locks a user for `HOSTWATCH_LOGIN_LOCK_S` after
@@ -312,8 +312,33 @@ disabled user triggers a dummy verify so timing does not reveal whether the
 account exists. The lock is a fixed window, not an escalating backoff, and it
 is per account, so an attacker can lock out a known username (a denial of
 service trade-off accepted for now). Scopes are limited to `read:metrics`,
-`read:events`, `ingest` and `admin`. Password login and lockout become enforced controls
-when a later slice adds the login endpoint.
+`read:events`, `ingest` and `admin`. Password login and lockout are enforced
+over HTTP by the login endpoint described next.
+
+### Login, logout and CSRF (enforced)
+
+`POST /api/v1/login` takes a JSON username and password and calls
+`check_login`. On success it creates a server-side session and sets
+`hostwatch_session` with `HttpOnly`, `SameSite=Strict`, `Path=/`, a `Max-Age` of
+`HOSTWATCH_SESSION_TTL_S` and `Secure` when `HOSTWATCH_TLS=1`. Without TLS the
+cookie travels in clear text, so keep the hub on loopback. Every failure
+(unknown user, wrong password, locked, disabled) returns the same 401 body with
+no cookie; the reason and the attempted username (truncated) are written to the
+audit log as an `auth_failure` row under the actor `anonymous`. A success is a
+`login` row and a logout is a `logout` row. Passwords are never logged.
+
+`POST /api/v1/logout` needs a session and marks it revoked in the database, so
+a copied cookie stops working at once.
+
+CSRF: `SameSite=Strict` is a second layer, not the control. The enforced control
+is a token derived from the session token (SHA-256 with a fixed prefix), returned
+in the login body and also set in the script-readable `hostwatch_csrf` cookie.
+Any POST, PUT, PATCH or DELETE authenticated by a session cookie must send it in
+the `X-CSRF-Token` header, compared in constant time; otherwise the answer is
+403 and an audit row records the reason. Safe methods and bearer-key requests
+are not subject to it, since a browser does not attach those credentials
+automatically. Known limits: the lock is per account, so anyone can lock a
+known username for the lock window, and there is no per-address throttle yet.
 
 ### Hub authentication (enforced)
 
@@ -344,7 +369,7 @@ an agent can be given a scoped key holding `ingest` and `read:events` in
 ## Security model
 
 Current (enforced): the hub binds to 127.0.0.1 by default, every endpoint
-except health requires a session, a scoped API key or the ingest-only legacy token (constant time compare) and is audited, the
+except health and login requires a session, a scoped API key or the ingest-only legacy token (constant time compare) and is audited, the
 container runs non-root with a read-only rootfs, all capabilities dropped, and
 `no-new-privileges`. The host `/sys` is mounted read-only. The host `/proc` is
 never mounted. The Phase 2 event sources are read-only bind mounts and nothing
@@ -360,7 +385,7 @@ else was widened (no privileged mode, no added capability, no writable host moun
 The image installs `journalctl` from the `systemd` package. Reading the journal
 may need the `systemd-journal` group, which is recorded in `UNVERIFIED.md`.
 
-Planned (rest of Phase 3): login endpoints, lockout over HTTP, optional
+Planned (rest of Phase 3): optional
 mTLS client certificates, key management CLI and TLS serving. The bind
 address must not widen before that work lands.
 

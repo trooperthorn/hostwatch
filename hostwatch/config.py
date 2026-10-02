@@ -41,6 +41,8 @@ class Config:
     argon2_parallelism: int = field(default_factory=lambda: int(_env("HOSTWATCH_ARGON2_PARALLELISM", "4")))
     login_max_failures: int = field(default_factory=lambda: int(_env("HOSTWATCH_LOGIN_MAX_FAILURES", "5")))
     login_lock_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_LOGIN_LOCK_S", "900")))
+    session_ttl_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_SESSION_TTL_S", "28800")))
+    tls_enabled: bool = field(default_factory=lambda: _env("HOSTWATCH_TLS", "0").lower() in {"1", "true", "yes"})
     scrutiny_url: str = field(default_factory=lambda: _env("HOSTWATCH_SCRUTINY_URL", ""))
     raw_retention_days: int = field(default_factory=lambda: int(_env("HOSTWATCH_RAW_RETENTION_DAYS", "7")))
     rollup_retention_days: int = field(default_factory=lambda: int(_env("HOSTWATCH_ROLLUP_RETENTION_DAYS", "400")))

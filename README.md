@@ -20,7 +20,7 @@ Current phase: **2 (event engine)**, code complete and not yet deployed. Phase 0
 | `hostwatch/events/journal.py` | Read-only journal watcher (`HOSTWATCH_JOURNAL`, default `/host/journal`): runs `journalctl --directory` on a worker thread with a saved cursor (first read bounded to two boots, falls back to `HOSTWATCH_JOURNAL_VOLATILE`), recovers from a rotated-out cursor with a `journal.cursor_reset` event, marks a capped first read as `journal.backlog_truncated`, names unreadable journal files in the source reason, reports unreadable journals as unavailable, and turns watchdog, md degraded, e1000e, MCE, I/O error, ata link reset and thermal throttle messages into events |
 | `hostwatch/events/thresholds.py` | Edge-triggered threshold events from samples (md degraded, md sync change, source flip, Scrutiny device_status growth), seeded from stored events |
 | `hostwatch/hub.py` | Internal ingest and read API (session, scoped key or legacy ingest token on every route but health, audited, loopback only) |
-| `hostwatch/auth.py` | Auth building blocks (the hub uses the key and session lookups; login and lockout are not yet exposed over HTTP): argon2id password hashing with cost from config, login lockout with a dummy verify for unknown users, scope validation, and API key and session token generation that stores only digests |
+| `hostwatch/auth.py` | Auth building blocks (the hub uses the key and session lookups and the login endpoint calls `check_login`): argon2id password hashing with cost from config, login lockout with a dummy verify for unknown users, scope validation, and API key and session token generation that stores only digests |
 | `hostwatch/store.py` | SQLite: raw samples, hourly rollups, source availability, versioned schema with additive events, batch id and auth tables (users, sessions, API keys, audit log) |
 | `scripts/host-prep.sh` | Phase 0 host check and fixes |
 | `scripts/rapl-access.sh` | Grant RAPL read access to a dedicated group (see its header for the security trade-off) |
@@ -43,7 +43,17 @@ Enforced:
   `/var/lib/rasdaemon`. There is no privileged mode, no added capability, and
   no writable host mount.
 
-Not yet present (later slices and phases): login endpoints, the CLI that
+- Browser login: `POST /api/v1/login` with a JSON username and password sets an
+  `HttpOnly`, `SameSite=Strict` session cookie (`Secure` when `HOSTWATCH_TLS=1`,
+  lifetime `HOSTWATCH_SESSION_TTL_S`, default 28800). Every failure (unknown
+  user, wrong password, locked account) returns the same 401; the reason is in
+  the audit log only. `POST /api/v1/logout` revokes the session server side. A
+  cookie-authenticated POST, PUT, PATCH or DELETE must send the `X-CSRF-Token`
+  header, whose value the login response returns, or it is refused with 403.
+  `HOSTWATCH_TLS` only marks the cookie `Secure`; it does not start a TLS
+  listener (that arrives in a later slice).
+
+Not yet present (later slices and phases): the CLI that
 creates users and keys, TLS serving, Home Assistant and Orion endpoints. Until
 the CLI lands there is no supported way to mint a key, so the read examples
 below that use the shared token now answer 403; they need a key with the

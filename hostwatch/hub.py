@@ -5,14 +5,16 @@ check, and every authenticated request and every authentication failure is
 appended to the audit log. Credentials are tried in this order: a session
 cookie, a scoped bearer API key, an mTLS identity (a hook that is not wired to a
 TLS listener yet), and the legacy shared ingest token, which is accepted for the
-ingest scope only and is deprecated. Login endpoints, TLS serving and the Home
-Assistant and Orion endpoints arrive in later slices, so keep the hub on
-loopback until then.
+ingest scope only and is deprecated. POST /api/v1/login and /api/v1/logout manage
+browser sessions; a cookie-authenticated state-changing request must carry the
+CSRF header (see docs/ARCHITECTURE.md). TLS serving and the Home Assistant and
+Orion endpoints arrive in later slices, so keep the hub on loopback until then.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import hmac
 import logging
 from contextlib import asynccontextmanager
@@ -22,8 +24,9 @@ from typing import Callable
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
+from pydantic import BaseModel, Field
 
-from . import __version__
+from . import __version__, auth
 from .config import Config
 from .schema import Batch
 from .store import Store
@@ -31,8 +34,22 @@ from .store import Store
 log = logging.getLogger("hostwatch.hub")
 
 SESSION_COOKIE = "hostwatch_session"
+CSRF_COOKIE = "hostwatch_csrf"
+CSRF_HEADER = "x-csrf-token"
+SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 # A browser session may read but never ingest. Admin satisfies every scope except ingest.
 SESSION_SCOPES = frozenset({"read:metrics", "read:events"})
+
+
+class LoginBody(BaseModel):
+    username: str = Field(min_length=1, max_length=128)
+    password: str = Field(min_length=1, max_length=1024)
+
+
+def csrf_token_for(session_token: str) -> str:
+    """The CSRF token is derived from the session token, so the server can verify it
+    without storing it and a token from another session never matches."""
+    return hashlib.sha256(b"hostwatch-csrf:" + session_token.encode()).hexdigest()
 
 
 @dataclass
@@ -86,6 +103,7 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
         if cookie:
             sess = store.get_session(cookie)
             if sess:
+                request.state.session_token = cookie
                 return Principal(sess["username"], "session", SESSION_SCOPES)
         scheme, _, token = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() == "bearer" and token:
@@ -106,6 +124,12 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
             request.state.auth_reason = "invalid or missing credentials"
             raise HTTPException(status_code=401, detail="authentication required")
         request.state.principal = principal
+        if principal.kind == "session" and request.method not in SAFE_METHODS:
+            sent = request.headers.get(CSRF_HEADER, "")
+            expected = csrf_token_for(request.state.session_token)
+            if not hmac.compare_digest(sent.encode(), expected.encode()):
+                request.state.auth_reason = "missing or invalid CSRF token"
+                raise HTTPException(status_code=403, detail="CSRF token required")
         return principal
 
     def require_scope(scope: str):
@@ -122,23 +146,63 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
         if request.url.path == "/internal/v1/health":
             return response
         principal = getattr(request.state, "principal", None)
-        if principal is None and response.status_code != 401:
+        override = getattr(request.state, "audit", None)
+        if principal is None and override is None and response.status_code != 401:
             return response
         detail = dict(principal.detail) if principal else {}
+        if override:
+            detail.update(override["detail"])
         reason = getattr(request.state, "auth_reason", None)
         if reason:
             detail["reason"] = reason
         kind = "auth_failure" if response.status_code in (401, 403) else "access"
+        actor = principal.actor if principal else "anonymous"
+        if override:
+            actor, kind = override["actor"], override["kind"]
         if principal:
             detail["credential"] = principal.kind
         remote = request.client.host if request.client else "unknown"
         try:
-            await asyncio.to_thread(store.append_audit, principal.actor if principal else "anonymous", kind,
+            await asyncio.to_thread(store.append_audit, actor, kind,
                                     request.method, request.url.path, response.status_code, remote, detail)
         except Exception as exc:
             log.error("audit write failed: %s", exc)
             return JSONResponse(status_code=500, content={"detail": "audit unavailable"})
         return response
+
+    def _uniform_401() -> JSONResponse:
+        return JSONResponse(status_code=401, content={"detail": "invalid credentials"})
+
+    @app.post("/api/v1/login")
+    def login(body: LoginBody, request: Request):
+        """Every failure (unknown user, wrong password, locked, disabled) returns the same
+        401. The real reason goes to the audit log only."""
+        result = auth.check_login(store, cfg, body.username, body.password)
+        detail = {"username_attempted": body.username[:64], "reason": result.reason}
+        if not result.ok:
+            request.state.audit = {"actor": "anonymous", "kind": "auth_failure", "detail": detail}
+            return _uniform_401()
+        token = auth.generate_session_token(store, result.user["id"], cfg.session_ttl_s)
+        request.state.audit = {"actor": result.user["username"], "kind": "login", "detail": detail}
+        csrf = csrf_token_for(token)
+        resp = JSONResponse(content={"username": result.user["username"], "csrf_token": csrf})
+        resp.set_cookie(SESSION_COOKIE, token, max_age=int(cfg.session_ttl_s), path="/",
+                        httponly=True, secure=cfg.tls_enabled, samesite="strict")
+        # Readable by page script on purpose: the script copies it into the CSRF header.
+        resp.set_cookie(CSRF_COOKIE, csrf, max_age=int(cfg.session_ttl_s), path="/",
+                        httponly=False, secure=cfg.tls_enabled, samesite="strict")
+        return resp
+
+    @app.post("/api/v1/logout")
+    def logout(request: Request, principal: Principal = Depends(authenticate)):
+        if principal.kind != "session":
+            raise HTTPException(status_code=400, detail="logout applies to browser sessions only")
+        store.revoke_session(request.state.session_token)
+        request.state.audit = {"actor": principal.actor, "kind": "logout", "detail": {}}
+        resp = JSONResponse(content={"status": "logged out"})
+        resp.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=cfg.tls_enabled, samesite="strict")
+        resp.delete_cookie(CSRF_COOKIE, path="/", secure=cfg.tls_enabled, samesite="strict")
+        return resp
 
     @app.get("/internal/v1/health")
     def health():
