@@ -181,6 +181,10 @@ class Store:
                 self._db.execute("UPDATE users SET failed_count = ? WHERE username = ?", (count, username))
         return self.get_user(username)
 
+    def set_password_hash(self, username: str, password_hash: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("UPDATE users SET hash = ? WHERE username = ?", (password_hash, username))
+
     def reset_failures(self, username: str) -> None:
         with self._lock, self._db:
             self._db.execute("UPDATE users SET failed_count = 0, locked_until = NULL WHERE username = ?",

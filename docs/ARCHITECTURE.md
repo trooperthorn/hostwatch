@@ -303,6 +303,18 @@ drop the triggers or edit rows, so it is not tamper-proofing. The tables exist
 but nothing in the hub enforces authentication yet; that arrives in later
 Phase 3 slices, so the hub is still bound to 127.0.0.1 and uses the shared token.
 
+`hostwatch/auth.py` holds the auth primitives and is not yet called by the hub.
+Passwords are hashed with argon2id, with time cost, memory and parallelism read
+from config so tests can use a low cost; a login with an outdated hash is
+rehashed. `check_login` locks a user for `HOSTWATCH_LOGIN_LOCK_S` after
+`HOSTWATCH_LOGIN_MAX_FAILURES` consecutive failures, and an unknown, locked or
+disabled user triggers a dummy verify so timing does not reveal whether the
+account exists. The lock is a fixed window, not an escalating backoff, and it
+is per account, so an attacker can lock out a known username (a denial of
+service trade-off accepted for now). Scopes are limited to `read:metrics`,
+`read:events`, `ingest` and `admin`. These are library functions only; they
+become enforced controls when a later slice wires them into the hub.
+
 ## Security model
 
 Current (enforced): the hub binds to 127.0.0.1 by default, every endpoint
