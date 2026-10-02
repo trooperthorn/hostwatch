@@ -352,6 +352,21 @@ Assistant creates no entity for it and retires one it had published, and Prometh
 source. A not-present report older than the staleness window is treated as stale, so a silent
 agent still reads as unmeasured.
 
+Absence is only by design if the host never had the source. The hub keeps a `source_seen` row per
+host and source with the times it was first and last reported present and available. A source that
+then reports `present` false is state `disappeared`: its component is critical (status 2) with a
+reason naming when it was last seen, the group is neither not present nor unmeasured, the host's
+`overall_status` is 2 with the reason "sources disappeared", and for `mdraid` the `md_degraded`
+problem flag is true. This closes the case where md arrays fail to assemble at boot and leave a
+readable, empty `/proc/mdstat`. Orion reports the group at status 2, Prometheus keeps
+`hostwatch_source_present` at 1 with `hostwatch_source_up` 0, and Home Assistant keeps the entities
+and shows the problem sensor on. The threshold engine raises `source.disappeared` (critical) once
+on the transition and `source.returned` when the source is present and available again, and it
+does not also raise `source.unavailable`. Only the operator can declare a removal deliberate with
+`python -m hostwatch source forget HOST SOURCE`, which sets `forgotten_at`, appends an audit row of
+kind `cli`, and makes `present` false read as absent again until the source is next seen present
+and available. A source that is present but unreadable is still unmeasured, not disappeared.
+
 The `hosts` document keys each entry by a slug of the host name, for example
 `host_media_svr_name` and `host_media_svr_status`, not by position, so adding a
 host never renames another host's keys. The slug is the Home Assistant rule:
@@ -465,7 +480,7 @@ set it, so a database with version 0 is adopted as version 1. `Store._migrate()`
 applies numbered steps in a transaction, each created with `IF NOT EXISTS` so a
 repeat run changes nothing. Version 2 adds the `events` table (unique per host
 on `dedup_key`) and the `boot_state` heartbeat table; existing tables are never
-altered. Version 6 adds the `present` column to `sources` (default 1, added only when missing). Version 3 adds the `batch_ids` table (unique per host and batch id) the same way;
+altered. Version 6 adds the `present` column to `sources` (default 1, added only when missing). Version 7 adds the `source_seen` table (first seen, last seen and forgotten time per host and source). Version 3 adds the `batch_ids` table (unique per host and batch id) the same way;
 maintenance prunes ids older than the raw retention. If the stored version is newer than the code supports, the store
 refuses to start with `SchemaTooNewError` rather than risk damaging data.
 

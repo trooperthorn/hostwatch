@@ -13,12 +13,16 @@ Rules that follow the project contract:
   * A source the agent reports as not present (positively established absence, such as no md
     arrays on a ZFS host) makes its group "not present": no warning, no values, no entities.
     Unreadable is not absent; that stays unmeasured.
+  * A source that reports not present after the hub has seen it present and available is
+    "disappeared": critical, with the time it was last seen. Only `source forget` makes that
+    absence deliberate again.
   * Status codes are 0 ok, 1 warning, 2 critical, from `status_for` only.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from typing import Any, Protocol
 
 STALE_AFTER_S = 180.0
@@ -92,6 +96,7 @@ class HostSummary:
     last_seen: float | None
     unmeasured: list[str] = field(default_factory=list)
     not_present: list[str] = field(default_factory=list)
+    disappeared: list[str] = field(default_factory=list)
 
     def components(self) -> list[Component]:
         return [self.cpu, self.memory, self.package_power, *self.temperatures, *self.md_arrays,
@@ -120,6 +125,8 @@ class HostSummary:
     def overall_reason(self) -> str:
         if self.status is None:
             return "no data"
+        if self.disappeared:
+            return "sources disappeared: " + ", ".join(self.disappeared)
         if self.unmeasured:
             return "unmeasured groups: " + ", ".join(self.unmeasured)
         return ""
@@ -145,9 +152,18 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
     blocked: dict[str, str] = {}
     sources: dict[str, Component] = {}
     absent: set[str] = set()
+    gone: dict[str, str] = {}
+    seen_fn = getattr(store, "source_seen", None)
+    seen = {r["source"]: r for r in seen_fn(host)} if seen_fn else {}
     for name, r in sorted(src_rows.items()):
         age = now - r["updated"]
-        if not r.get("present", 1) and not r["available"] and age <= STALE_AFTER_S:
+        was = seen.get(name)
+        if (not r.get("present", 1) and not r["available"] and age <= STALE_AFTER_S
+                and was is not None and was["forgotten_at"] is None):
+            when = datetime.fromtimestamp(was["last_seen"], timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+            gone[name] = f"source {name} disappeared: last seen present and available at {when}"
+            sources[name] = Component(f"source.{name}", None, "", "critical", gone[name])
+        elif not r.get("present", 1) and not r["available"] and age <= STALE_AFTER_S:
             absent.add(name)
             sources[name] = Component(f"source.{name}", None, "", "not_present",
                                       f"source {name} is not present on this host")
@@ -168,6 +184,8 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
              labels: dict[str, str] | None = None) -> Component:
         """Build a component from the newest of `metric_rows`, or explain why not."""
         labels = labels or {}
+        if source in gone:
+            return Component(name, None, unit, "critical", gone[source], labels)
         if source in absent:
             return Component(name, None, unit, "not_present", f"source {source} is not present on this host", labels)
         if source in blocked:
@@ -189,7 +207,9 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
 
     total = comp("memory_used", "memory", pick("memory", "mem_total"), "B")
     avail = comp("memory_used", "memory", pick("memory", "mem_available"), "B")
-    if total.value is None or avail.value is None:
+    if "memory" in gone:
+        memory = Component("memory_used", None, "%", "critical", gone["memory"])
+    elif total.value is None or avail.value is None:
         why = total.reason if total.value is None else avail.reason
         memory = Component("memory_used", None, "%", "unknown", why)
     elif total.value <= 0:
@@ -216,6 +236,8 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
                           and now - r["ts"] <= STALE_AFTER_S for r in pick("mdraid", "sync_action", array=arr))
             c.state = "critical" if c.value > 0 else "warning" if syncing else "ok"
         md.append(c)
+    if "mdraid" in gone and not md:
+        md.append(comp("md", "mdraid", [], "count", labels={"array": "unknown"}))
 
     disks: list[Component] = []
     for r in pick("scrutiny", "device_status"):
@@ -224,6 +246,8 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
         if c.value is not None:
             c.state = "ok" if c.value == 0 else "critical"
         disks.append(c)
+    if "scrutiny" in gone and not disks:
+        disks.append(comp("disk", "scrutiny", [], ""))
     for r in pick("scrutiny", "temp"):
         lab = {k: r["labels"].get(k, "") for k in ("wwn", "device", "model")}
         temps.append(comp(f"disk_temp.{lab['wwn']}", "scrutiny", [r], "C", DISK_TEMP_C, lab))
@@ -253,7 +277,7 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
     problems: dict[str, bool | None] = {
         "md_degraded": flag(md, ("critical",)),
         "disk_failing": flag(disks, ("critical",)),
-        "source_unavailable": bool(blocked) if src_rows else None,
+        "source_unavailable": bool(blocked or gone) if src_rows else None,
         "temperature_high": flag(temps, ("warning", "critical")),
         "memory_low": None if memory.state == "unknown" else memory.state != "ok",
     }
@@ -273,4 +297,4 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
         if not src_ok or (comps and all(c.status is None for c in comps)):
             unmeasured.append(group)
     return HostSummary(host, now, cpu, memory, power, temps, md, disks, sources, problems,
-                       sorted(open_conditions), last_seen, unmeasured, not_present)
+                       sorted(open_conditions), last_seen, unmeasured, not_present, sorted(gone))

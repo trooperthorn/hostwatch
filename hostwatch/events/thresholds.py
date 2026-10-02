@@ -16,6 +16,8 @@ Rules:
   md.sync_changed         the md sync_action label changed
   source.unavailable      a source went from available to unavailable
   source.available        that source came back
+  source.disappeared      a source that was present and available reports present false (critical)
+  source.returned         that source is present and available again
   scrutiny.status_raised  Scrutiny device_status grew above its previous value
   scrutiny.status_cleared device_status returned to 0
 """
@@ -119,7 +121,24 @@ class ThresholdEngine:
         else:
             self.state[key] = value
 
+    def _presence(self, st: SourceStatus, now: float, out: list[Event]) -> None:
+        key = f"source.presence|source={st.source}"
+        was = self.state.get(key)
+        if st.present and st.available:
+            if was is False:
+                self._emit(out, key, "source.returned", "info", now,
+                           f"Source {st.source} is present and available again", True, source_id=st.source)
+            else:
+                self.state[key] = True
+        elif not st.present and was is True:
+            self._emit(out, key, "source.disappeared", "critical", now,
+                       f"Source {st.source} disappeared after it had been present", False,
+                       source_id=st.source, reason=st.reason)
+
     def _source(self, st: SourceStatus, now: float, out: list[Event]) -> None:
+        self._presence(st, now, out)
+        if not st.present:
+            return  # reported by the presence rule, not as an ordinary unavailable flip
         key = f"source|source={st.source}"
         was = self.state.get(key)
         if was is True and not st.available:

@@ -3,6 +3,7 @@
   python -m hostwatch bootstrap-admin [--username NAME]
   python -m hostwatch user create|disable|unlock|passwd USERNAME
   python -m hostwatch key create --scopes a,b [--owner NAME] | list | revoke ID
+  python -m hostwatch source forget HOST SOURCE
   python -m hostwatch cert bind SUBJECT USER | list | revoke SUBJECT
 
 These commands open the database directly, so they are for someone who already
@@ -28,7 +29,7 @@ from . import auth
 from .config import Config
 from .store import Store
 
-COMMANDS = {"user", "key", "cert", "bootstrap-admin"}
+COMMANDS = {"user", "key", "cert", "source", "bootstrap-admin"}
 MIN_PASSWORD_LEN = 12
 
 
@@ -53,6 +54,11 @@ def _parser() -> argparse.ArgumentParser:
     bind.add_argument("username")
     cert.add_parser("list")
     cert.add_parser("revoke").add_argument("subject")
+    source = sub.add_parser("source", help="manage what the hub remembers about sources").add_subparsers(
+        dest="action", required=True)
+    forget = source.add_parser("forget", help="declare that a source was removed on purpose")
+    forget.add_argument("host")
+    forget.add_argument("source")
     return p
 
 
@@ -144,6 +150,15 @@ def run(argv: list[str], cfg: Config) -> int:
             store.reset_failures(name)
             audit(0, detail)
             print(f"Cleared lockout and failure count for {name!r}.", file=sys.stderr)
+        return 0
+
+    if args.command == "source":
+        detail = {"host": args.host[:128], "source": args.source[:64]}
+        if not store.forget_source(args.host, args.source):
+            return fail("the hub has never seen that source present and available on that host", detail)
+        audit(0, detail)
+        print(f"Forgot {args.source!r} on {args.host!r}. A report of present false now reads as absent "
+              "by design until the source is seen again.", file=sys.stderr)
         return 0
 
     if args.command == "cert":

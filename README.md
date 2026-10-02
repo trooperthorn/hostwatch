@@ -104,6 +104,7 @@ python -m hostwatch user create|disable|unlock|passwd NAME   # password from a p
 python -m hostwatch key create --scopes read:metrics,read:events [--owner NAME]   # prints the key once
 python -m hostwatch key list
 python -m hostwatch key revoke ID                 # rejected on the key's next request
+python -m hostwatch source forget HOST SOURCE      # declare a removed source deliberate (audited)
 python -m hostwatch cert bind SUBJECT USER        # map a certificate subject or san:<entry> to a user
 python -m hostwatch cert list
 python -m hostwatch cert revoke SUBJECT           # rejected on the next request
@@ -125,7 +126,7 @@ Each answers flat JSON with numeric values and a numeric status per group (0 ok,
 never reported, is unavailable or is stale); `overall_unmeasured` counts those
 groups. A source that is absent by design (no md arrays on a ZFS host, no RAPL zone, no hwmon
 devices, no Scrutiny URL) is not unmeasured: its group reports `<group>_present` 0 and status 0 and
-raises no warning. An unreadable source is not absent and stays a warning. A host with no data at all reports `overall_status` 2 with the reason
+raises no warning. An unreadable source is not absent and stays a warning. A source that was reported present and available and later reports not present is critical (`disappeared`, status 2) until an operator runs `source forget HOST SOURCE`. A host with no data at all reports `overall_status` 2 with the reason
 "no data". The `hosts` list keys each entry by a slug of the host name
 (`host_<slug>_name`, `host_<slug>_status`), so a new host never renames existing
 keys; names whose slugs collide get a short hash suffix. To monitor a host in

@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS agents (
 # a database with user_version 0 is treated as version 1 once its Phase 1 tables
 # exist. Each migration step is additive: it only creates objects and is guarded
 # with IF NOT EXISTS so that running it twice changes nothing.
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 
 def _add_sources_present(db: sqlite3.Connection) -> None:
     """Add sources.present (default 1, so rows from older agents read as present) once."""
@@ -113,6 +113,14 @@ BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END""",
     ),
     # Whether a source is absent by design. Existing rows default to present.
     6: (_add_sources_present,),
+    # When each source was first and last seen present and available, and when an operator
+    # declared its removal deliberate. Additive: a new table, no existing row changes.
+    7: (
+        """CREATE TABLE IF NOT EXISTS source_seen (
+  host TEXT NOT NULL, source TEXT NOT NULL, first_seen REAL NOT NULL, last_seen REAL NOT NULL,
+  forgotten_at REAL, PRIMARY KEY (host, source)
+)""",
+    ),
 }
 
 
@@ -498,6 +506,12 @@ class Store:
                 "reason=excluded.reason, updated=excluded.updated, present=excluded.present",
                 [(batch.host, st.source, int(st.available), st.reason, batch.sent_at, int(st.present))
                  for st in batch.sources])
+            self._db.executemany(
+                "INSERT INTO source_seen (host, source, first_seen, last_seen) VALUES (?,?,?,?) "
+                "ON CONFLICT(host, source) DO UPDATE SET last_seen=MAX(last_seen, excluded.last_seen), "
+                "forgotten_at=NULL",
+                [(batch.host, st.source, batch.sent_at, batch.sent_at) for st in batch.sources
+                 if st.present and st.available])
             self._db.execute(
                 "INSERT INTO agents VALUES (?,?,?,?) ON CONFLICT(host) DO UPDATE SET "
                 "platform=excluded.platform, agent_version=excluded.agent_version, last_seen=excluded.last_seen",
@@ -530,6 +544,22 @@ class Store:
         with self._lock:
             cur = self._db.execute("SELECT host, source, available, reason, updated, present FROM sources ORDER BY host, source")
             return [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
+
+    def source_seen(self, host: str | None = None) -> list[dict]:
+        """When each source was first and last seen present and available, and when it was forgotten."""
+        sql = "SELECT host, source, first_seen, last_seen, forgotten_at FROM source_seen"
+        if host is not None:
+            return self._rows(sql + " WHERE host = ? ORDER BY source", (host,))
+        return self._rows(sql + " ORDER BY host, source")
+
+    def forget_source(self, host: str, source: str, now: float | None = None) -> bool:
+        """Record that the operator removed a source on purpose, so present false reads as absent
+        again. Returns False when the host never had that source seen present and available.
+        A later present and available report clears the mark."""
+        with self._lock, self._db:
+            return self._db.execute(
+                "UPDATE source_seen SET forgotten_at = ? WHERE host = ? AND source = ?",
+                (time.time() if now is None else now, host, source)).rowcount > 0
 
     def agents(self) -> list[dict]:
         with self._lock:

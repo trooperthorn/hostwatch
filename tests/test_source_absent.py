@@ -25,7 +25,7 @@ from hostwatch.hub import create_app
 from hostwatch.integrations import orion
 from hostwatch.integrations.summary import build_host_summary
 from hostwatch.schema import Batch, SourceStatus
-from hostwatch.store import SCHEMA_VERSION, Store
+from hostwatch.store import Store
 
 
 def seed_zfs_host(store, host=H, md_present=True, md_reason="no md arrays"):
@@ -106,6 +106,8 @@ def test_ha_retires_entity_of_source_that_became_not_present(tmp_path):
     assert pub.tick() is True
     topic = "homeassistant/binary_sensor/hostwatch_h1/source_mdraid_up/config"
     assert broker.retained[topic] != ""
+    # A source that vanishes is critical (see test_source_disappeared); only a deliberate removal retires it.
+    assert store.forget_source(H, "mdraid")
     store.ingest_batch(Batch(agent_version="t", host=H, platform="x86", sent_at=time.time() + 1,
                              sources=[SourceStatus(source="cpu", available=True),
                                       SourceStatus(source="mdraid", available=False, present=False)],
@@ -208,7 +210,8 @@ def test_migration_from_previous_version_keeps_rows(tmp_path):
     del store
     db = sqlite3.connect(p)
     db.execute("ALTER TABLE sources DROP COLUMN present")
-    db.execute(f"PRAGMA user_version = {SCHEMA_VERSION - 1}")
+    db.execute("DROP TABLE source_seen")
+    db.execute("PRAGMA user_version = 5")
     db.commit()
     db.close()
     upgraded = Store(p)
