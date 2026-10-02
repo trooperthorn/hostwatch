@@ -575,7 +575,7 @@ def _patch_client(monkeypatch):
     import hostwatch.agent as agent_mod
 
     real_client = httpx.Client
-    monkeypatch.setattr(agent_mod.httpx, "Client", lambda: real_client(
+    monkeypatch.setattr(agent_mod.httpx, "Client", lambda **_kw: real_client(
         transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))))
 
 

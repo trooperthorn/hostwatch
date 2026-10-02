@@ -13,10 +13,12 @@ import json
 from collections.abc import Callable
 import logging
 import platform as _platform
+import ssl
 import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -403,7 +405,7 @@ class Agent:
         try:
             self.detect()
             self._guarded_boot_check()
-            with httpx.Client() as client:
+            with httpx.Client(verify=hub_tls_verify(self.cfg)) as client:
                 while not self._stop.is_set():
                     started = time.monotonic()
                     try:
@@ -450,3 +452,21 @@ class Agent:
         signal handler (the hub shutdown hook)."""
         self.stop()
         return self._stopped.wait(timeout)
+
+
+def hub_tls_verify(cfg: Config) -> ssl.SSLContext | bool:
+    """TLS verification for the agent's connection to the hub.
+
+    In the all role the agent posts to https://127.0.0.1, but the hub's
+    certificate names the LAN host, so a hostname check would always fail and
+    batches would queue until dropped. When the hub URL is loopback and this
+    process holds the hub certificate, trust exactly that certificate (pinning)
+    and skip only the hostname check. Every other case uses default
+    verification.
+    """
+    host = urlsplit(cfg.hub_url).hostname or ""
+    if cfg.tls_cert and host in ("127.0.0.1", "::1", "localhost"):
+        ctx = ssl.create_default_context(cafile=cfg.tls_cert)
+        ctx.check_hostname = False
+        return ctx
+    return True
