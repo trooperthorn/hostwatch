@@ -325,6 +325,26 @@ status is 1 (the same warning the summary gives an unavailable source) and
 collector exists. Nothing is stored by this layer, so a restart or a recreated
 app on the same database gives the same answers.
 
+## MQTT client (Phase 4, in progress)
+
+`hostwatch/integrations/mqtt_client.py` is the transport layer for the Home Assistant
+publisher. It is off unless `HOSTWATCH_MQTT_HOST` is set. `Config.validate` checks the
+settings: username and password (or `HOSTWATCH_MQTT_PASSWORD_FILE`, preferred) must be set
+together, only one password source is allowed, TLS CA, client certificate and key files must
+exist and the certificate and key come as a pair, the insecure flag needs TLS, and the topic
+prefixes may not contain wildcards. Setting any MQTT option without a host is an error so a
+forgotten host cannot silently leave the publisher off.
+
+`MqttClient` holds policy and talks to an `MqttTransport` protocol, so tests use an in-memory
+fake and never a broker. On connect it sets a retained last will of `offline` on
+`<base topic>/availability` (default base topic `hostwatch`), then publishes a retained
+`online`, so Home Assistant marks entities unavailable if the hub dies. Failed connects retry
+with exponential backoff (1 s doubling to a 60 s cap, jittered between 50 and 100 percent)
+driven by an injected clock: `ensure_connected()` is called from a loop and does nothing until
+the retry time has passed. The password is read when connecting and scrubbed from logged
+error text. `PahoTransport` adapts paho-mqtt 2.x; discovery payloads, state topics and the
+events topic arrive in later slices.
+
 ## Storage
 
 SQLite in `/data`. Raw samples are kept for `HOSTWATCH_RAW_RETENTION_DAYS`,

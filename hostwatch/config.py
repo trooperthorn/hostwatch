@@ -76,6 +76,18 @@ class Config:
     scrutiny_url: str = field(default_factory=lambda: _env("HOSTWATCH_SCRUTINY_URL", ""))
     raw_retention_days: int = field(default_factory=lambda: int(_env("HOSTWATCH_RAW_RETENTION_DAYS", "7")))
     rollup_retention_days: int = field(default_factory=lambda: int(_env("HOSTWATCH_ROLLUP_RETENTION_DAYS", "400")))
+    mqtt_host: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_HOST", "").strip())
+    mqtt_port: int = field(default_factory=lambda: int(_env("HOSTWATCH_MQTT_PORT", "1883")))
+    mqtt_username: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_USERNAME", ""))
+    mqtt_password: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_PASSWORD", ""), repr=False)
+    mqtt_password_file: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_PASSWORD_FILE", ""))
+    mqtt_tls: bool = field(default_factory=lambda: parse_bool("HOSTWATCH_MQTT_TLS"))
+    mqtt_tls_ca: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_TLS_CA", ""))
+    mqtt_tls_cert: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_TLS_CERT", ""))
+    mqtt_tls_key: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_TLS_KEY", ""))
+    mqtt_tls_insecure: bool = field(default_factory=lambda: parse_bool("HOSTWATCH_MQTT_TLS_INSECURE"))
+    mqtt_discovery_prefix: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_DISCOVERY_PREFIX", "homeassistant"))
+    mqtt_base_topic: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_BASE_TOPIC", "hostwatch"))
 
     def validate(self) -> None:
         if self.role not in {"all", "hub", "agent"}:
@@ -115,6 +127,58 @@ class Config:
             )
 
         self._validate_bind()
+        self._validate_mqtt()
+
+    @property
+    def mqtt_enabled(self) -> bool:
+        """The MQTT publisher is off unless a broker host is configured."""
+        return bool(self.mqtt_host)
+
+    @property
+    def mqtt_tls_active(self) -> bool:
+        return self.mqtt_tls or bool(self.mqtt_tls_ca or self.mqtt_tls_cert)
+
+    def mqtt_password_value(self) -> str:
+        """The broker password from HOSTWATCH_MQTT_PASSWORD or, preferably, the password file
+        (trailing newlines are stripped). Read at call time so a rotated file is picked up."""
+        if self.mqtt_password_file:
+            return Path(self.mqtt_password_file).read_text(encoding="utf-8").rstrip("\r\n")
+        return self.mqtt_password
+
+    def _validate_mqtt(self) -> None:
+        mqtt_set = [n for n, v in (
+            ("HOSTWATCH_MQTT_USERNAME", self.mqtt_username), ("HOSTWATCH_MQTT_PASSWORD", self.mqtt_password),
+            ("HOSTWATCH_MQTT_PASSWORD_FILE", self.mqtt_password_file), ("HOSTWATCH_MQTT_TLS_CA", self.mqtt_tls_ca),
+            ("HOSTWATCH_MQTT_TLS_CERT", self.mqtt_tls_cert), ("HOSTWATCH_MQTT_TLS_KEY", self.mqtt_tls_key)) if v]
+        if not self.mqtt_host:
+            if mqtt_set:
+                raise ValueError(f"{mqtt_set[0]} is set but HOSTWATCH_MQTT_HOST is not, so MQTT stays off. "
+                                 "Set HOSTWATCH_MQTT_HOST or remove the MQTT settings.")
+            return
+        if not 1 <= self.mqtt_port <= 65535:
+            raise ValueError(f"HOSTWATCH_MQTT_PORT must be between 1 and 65535 (got {self.mqtt_port})")
+        if self.mqtt_password and self.mqtt_password_file:
+            raise ValueError("Set only one of HOSTWATCH_MQTT_PASSWORD and HOSTWATCH_MQTT_PASSWORD_FILE")
+        has_password = bool(self.mqtt_password or self.mqtt_password_file)
+        if bool(self.mqtt_username) != has_password:
+            raise ValueError("HOSTWATCH_MQTT_USERNAME and a password (HOSTWATCH_MQTT_PASSWORD or "
+                             "HOSTWATCH_MQTT_PASSWORD_FILE) must be set together")
+        if bool(self.mqtt_tls_cert) != bool(self.mqtt_tls_key):
+            raise ValueError("HOSTWATCH_MQTT_TLS_CERT and HOSTWATCH_MQTT_TLS_KEY must be set together")
+        for name, path in (("HOSTWATCH_MQTT_PASSWORD_FILE", self.mqtt_password_file),
+                           ("HOSTWATCH_MQTT_TLS_CA", self.mqtt_tls_ca), ("HOSTWATCH_MQTT_TLS_CERT", self.mqtt_tls_cert),
+                           ("HOSTWATCH_MQTT_TLS_KEY", self.mqtt_tls_key)):
+            if path and not Path(path).is_file():
+                raise ValueError(f"{name} does not point to a readable file: {path}")
+        if self.mqtt_tls_insecure and not self.mqtt_tls_active:
+            raise ValueError("HOSTWATCH_MQTT_TLS_INSECURE requires TLS (set HOSTWATCH_MQTT_TLS=1 or a CA)")
+        if self.mqtt_tls_insecure:
+            log.warning("HOSTWATCH_MQTT_TLS_INSECURE=1: the broker certificate host name is not verified.")
+        for name, topic in (("HOSTWATCH_MQTT_DISCOVERY_PREFIX", self.mqtt_discovery_prefix),
+                            ("HOSTWATCH_MQTT_BASE_TOPIC", self.mqtt_base_topic)):
+            if not topic or topic.startswith("/") or topic.endswith("/") or any(c in topic for c in "+#\x00"):
+                raise ValueError(f"{name} must be a non-empty topic prefix without wildcards or a leading or "
+                                 f"trailing slash (got {topic!r})")
 
     @property
     def agent_credential(self) -> str:

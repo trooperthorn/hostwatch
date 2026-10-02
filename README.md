@@ -214,6 +214,17 @@ Cross-check against the host: `sudo turbostat --quiet --show PkgWatt --interval 
 for `rapl`, `cat /proc/mdstat` for `mdraid`, `sensors` for `hwmon`, and the
 Scrutiny UI for `scrutiny`.
 
+## MQTT settings (Phase 4, off by default)
+
+The Home Assistant publisher stays off until `HOSTWATCH_MQTT_HOST` is set. Related settings:
+`HOSTWATCH_MQTT_PORT` (1883), `HOSTWATCH_MQTT_USERNAME` with `HOSTWATCH_MQTT_PASSWORD_FILE`
+(preferred) or `HOSTWATCH_MQTT_PASSWORD`, `HOSTWATCH_MQTT_TLS`, `HOSTWATCH_MQTT_TLS_CA`,
+`HOSTWATCH_MQTT_TLS_CERT` with `HOSTWATCH_MQTT_TLS_KEY`, `HOSTWATCH_MQTT_TLS_INSECURE`,
+`HOSTWATCH_MQTT_DISCOVERY_PREFIX` (homeassistant) and `HOSTWATCH_MQTT_BASE_TOPIC` (hostwatch).
+Half-set credentials or missing files stop startup with a message naming the setting. The
+password is never logged. Only the connection layer exists so far; entities arrive in later
+Phase 4 slices.
+
 ## Tests
 
 ```
