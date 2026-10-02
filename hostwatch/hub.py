@@ -29,6 +29,7 @@ from pydantic import BaseModel, Field
 from . import __version__, auth
 from .config import Config, normalize_ip, parse_allowed_clients
 from .integrations import orion as orion_doc
+from .integrations import prometheus as prom
 from .integrations.summary import build_host_summary
 from .schema import Batch
 from .store import Store
@@ -396,5 +397,14 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
         if group not in orion_doc.GROUPS:
             raise HTTPException(status_code=404, detail="unknown group")
         return orion_doc.group_document(orion_summary(host), group)
+
+    if cfg.prometheus_enabled:
+        # Registered only when enabled, so a disabled endpoint is a plain 404 for everyone.
+        @app.get("/metrics", dependencies=[Depends(require_scope("read:metrics"))])
+        def metrics():
+            now = time.time()
+            names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
+            body = prom.render([build_host_summary(store, n, now) for n in names])
+            return Response(content=body, media_type=prom.CONTENT_TYPE)
 
     return app

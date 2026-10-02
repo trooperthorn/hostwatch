@@ -89,6 +89,7 @@ class Config:
     mqtt_discovery_prefix: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_DISCOVERY_PREFIX", "homeassistant"))
     mqtt_base_topic: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_BASE_TOPIC", "hostwatch"))
     mqtt_events_interval: float = field(default_factory=lambda: float(_env("HOSTWATCH_MQTT_EVENTS_INTERVAL", "10")))
+    prometheus_enabled: bool = field(default_factory=lambda: parse_bool("HOSTWATCH_PROMETHEUS"))
 
     def validate(self) -> None:
         if self.role not in {"all", "hub", "agent"}:

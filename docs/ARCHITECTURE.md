@@ -325,6 +325,22 @@ status is 1 (the same warning the summary gives an unavailable source) and
 collector exists. Nothing is stored by this layer, so a restart or a recreated
 app on the same database gives the same answers.
 
+## Prometheus endpoint
+
+`hostwatch/integrations/prometheus.py` renders the shared `HostSummary` in the
+Prometheus text exposition format (0.0.4) by hand, so no dependency is added.
+`GET /metrics` is registered only when `HOSTWATCH_PROMETHEUS` is true, so a
+disabled endpoint is an ordinary 404 and the default is off. When registered it
+sits behind `require_scope("read:metrics")`, so the source allowlist, key checks
+and audit log apply unchanged. Metrics: `hostwatch_cpu_utilization_percent`,
+`hostwatch_memory_used_percent`, `hostwatch_package_power_watts`,
+`hostwatch_temperature_celsius`, `hostwatch_md_degraded_devices`,
+`hostwatch_disk_device_status`, `hostwatch_host_status` and
+`hostwatch_source_up`. A value that is unavailable produces no sample, never a
+zero; `hostwatch_source_up` is 0 for a source that is unavailable or stale and
+carries that fact instead. Label values are escaped (backslash, double quote and
+newline). Nothing is stored by this layer.
+
 ## MQTT client (Phase 4, in progress)
 
 `hostwatch/integrations/mqtt_client.py` is the transport layer for the Home Assistant

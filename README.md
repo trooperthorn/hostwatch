@@ -121,7 +121,12 @@ Each answers flat JSON with numeric values and a numeric status per group (0 ok,
 1 warning, 2 critical). An unavailable value is left out and the group reports
 `<group>_available` 0 with a `<group>_reason`. An unknown host answers 404.
 
-Not yet present (later slices and phases): Home Assistant and Prometheus outputs.
+An optional Prometheus endpoint, `GET /metrics`, is off unless `HOSTWATCH_PROMETHEUS=1` is set
+(it answers 404 otherwise). When on, it needs a key with the `read:metrics` scope and returns the
+text exposition format. A value that is unavailable has no sample; the `hostwatch_source_up` gauge
+(1 or 0 per source) says whether it is being measured.
+
+Not yet present (later slices and phases): the remaining Home Assistant work.
 The read examples below that use the shared token answer 403; use a key with
 the matching scope, created with `key create`.
 
