@@ -356,3 +356,43 @@ def test_partial_unreadable_journal_files_are_named(monkeypatch, dirs):
     assert status.available
     assert "bad1.journal" in status.reason and "unreadable" in status.reason
     assert "system.journal" not in status.reason
+
+
+BOOT_LINES = [
+    "mce: CPU0: Thermal monitoring enabled (TM1)",
+    "MCE: In-kernel MCE decoding enabled.",
+    "mce: [Firmware Bug]: Ignoring request to disable invalid MCA bank 0.",
+    "NMI watchdog: Enabled. Permanently consumes one hw-PMU counter.",
+    "iTCO_wdt: Intel TCO WatchDog Timer Driver v1.11",
+    "iTCO_wdt iTCO_wdt: initialized. heartbeat=30 sec (nowayout=0)",
+    "systemd[1]: Using hardware watchdog 'iTCO_wdt', version 0, device /dev/watchdog0",
+    "systemd[1]: Watchdog running with a timeout of 30s.",
+    "ata1: SATA link up 6.0 Gbps (SStatus 133 SControl 300)",
+    "md/raid1:md127: active with 2 out of 2 mirrors",
+    "md127: detected capacity change from 0 to 1953382400",
+    "md: md127 assembled clean",
+]
+
+
+def test_ordinary_debian_boot_lines_give_no_events(dirs):
+    jdir, data = dirs
+    reader = FakeReader([entry(i, m) for i, m in enumerate(BOOT_LINES, 1)])
+    status, events = JournalWatcher(jdir, data, reader).read()
+    assert status.available and events == []
+
+
+@pytest.mark.parametrize("message,kind", [
+    ("watchdog: BUG: soft lockup - CPU#3 stuck for 26s! [kworker/3:1:123]", "watchdog.event"),
+    ("NMI watchdog: Watchdog detected hard LOCKUP on cpu 2", "watchdog.event"),
+    ("watchdog: watchdog0: watchdog did not stop!", "watchdog.event"),
+    ("systemd[1]: Watchdog timeout (limit 3min)!", "watchdog.event"),
+    ("mce: [Hardware Error]: CPU 0: Machine Check: 0 Bank 5: be00000000800400", "hardware.mce"),
+    ("mce: [Hardware Error]: Machine check events logged", "hardware.mce"),
+    ("MCE: Uncorrected error reported on CPU 1", "hardware.mce"),
+    ("md/raid1:md127: Operation continuing on 1 devices. degraded", "md.degraded"),
+    ("md127: raid1 status [U_]", "md.degraded"),
+])
+def test_real_error_forms_give_one_event(dirs, message, kind):
+    jdir, data = dirs
+    _, events = JournalWatcher(jdir, data, FakeReader([entry(1, message)])).read()
+    assert [e.kind for e in events] == [kind]

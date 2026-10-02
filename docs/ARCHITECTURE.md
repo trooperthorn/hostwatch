@@ -152,7 +152,7 @@ lines. Journal access is read-only. The last `__CURSOR` seen is saved in
 not repeat entries. A table of patterns maps message text to the kinds
 `watchdog.event`, `md.degraded`, `net.e1000e_hardware_error`, `hardware.mce`,
 `disk.io_error`, `disk.ata_link_reset` and `thermal.throttle`; the first match
-wins and unmatched lines give no events. The dedup key is `journal:<cursor>`.
+wins and unmatched lines give no events. The `hardware.mce` pattern needs an error report (a hardware error marker, "Machine check events logged" or an MCE error line), and `watchdog.event` needs a reset, timeout or lockup message, so ordinary boot lines such as machine check init and watchdog driver load lines give no events. The dedup key is `journal:<cursor>`.
 A missing directory, a missing `journalctl` binary or a failing run yields
 source `journal` unavailable with a reason, and so does a directory that holds
 no readable `*.journal` file. When `journalctl` exits 0 with empty output and

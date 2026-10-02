@@ -60,16 +60,17 @@ class LineList(list):
 # so more specific patterns come first.
 PATTERNS: tuple[tuple[re.Pattern[str], str, str, str], ...] = tuple(
     (re.compile(p, re.IGNORECASE), kind, sev, title) for p, kind, sev, title in (
-        (r"watchdog.*(did not stop|timeout|timed out|hardware watchdog|reset|bark)|"
-         r"\bwatchdog\b.*\b(expired|triggered)\b", "watchdog.event", "warning", "Watchdog message in the journal"),
+        (r"watchdog.*did not stop|\b(hard|soft) lockup\b|\bwatchdog timeout\b|"
+         r"\bwatchdog\b.*\b(timed out|expired|triggered)\b|hardware watchdog.*\breset\b",
+         "watchdog.event", "warning", "Watchdog reset or lockup in the journal"),
         (r"md/raid\d*:.*(degraded|not enough operational|disk failure|Disk failure)|"
          r"\bmd\d+:.*(degraded|Disk failure)|raid\d+ array.*degraded|"
          r"\b(md\d+|md/raid\d*)\b.*\[U*_[U_]*\]",
          "md.degraded", "critical", "RAID array is degraded"),
         (r"e1000e.*hardware error|e1000e.*Detected Hardware Unit Hang", "net.e1000e_hardware_error",
          "warning", "e1000e hardware error"),
-        (r"\bmce:|machine check|Hardware Error.*(MCE|Machine Check)", "hardware.mce", "critical",
-         "Machine check exception"),
+        (r"\[Hardware Error\]|Machine check events logged|\bMCE:.*\berror|machine check (exception|error)",
+         "hardware.mce", "critical", "Machine check exception"),
         (r"I/O error, dev |blk_update_request: I/O error|Buffer I/O error", "disk.io_error", "critical",
          "Disk I/O error"),
         (r"ata\d+(\.\d+)?:.*(hard resetting link|link is slow|COMRESET|failed to resume link)|"
