@@ -1,5 +1,12 @@
 """Agent-to-hub wire schema (version 1).
 
+Events (boot classifications, journal matches, threshold crossings) travel in
+the optional Batch.events list. The field defaults to empty and is purely
+additive, so SCHEMA_VERSION stays at 1: v1 agents that never send it remain
+valid, and an older hub that does not know the field ignores it. Event sources
+are reported in Batch.sources like any other source, with available=False and a
+reason when absent.
+
 This is the contract between any agent (Linux now, Windows in Phase 8) and the
 hub. Keep it small and explicit: a batch carries samples plus a report of which
 sources were available, so the hub can tell "value is zero" apart from "this
@@ -34,6 +41,16 @@ class SourceStatus(BaseModel):
     reason: str = ""
 
 
+class Event(BaseModel):
+    kind: str = Field(description="event kind, e.g. boot.clean_shutdown or md.degraded")
+    severity: str = Field(description="info, warning, or critical")
+    source: str = Field(description="event source id, e.g. journal, pstore, rasdaemon")
+    ts: float = Field(description="unix epoch seconds when the event happened")
+    title: str
+    detail: dict[str, Any] = Field(default_factory=dict)
+    dedup_key: str = Field(min_length=1, description="stable key; the hub keeps one row per host and key")
+
+
 class Batch(BaseModel):
     schema_version: int = SCHEMA_VERSION
     agent_version: str
@@ -42,6 +59,7 @@ class Batch(BaseModel):
     sent_at: float
     sources: list[SourceStatus]
     samples: list[Sample]
+    events: list[Event] = Field(default_factory=list)
 
     def model_post_init(self, __context: Any) -> None:
         if self.schema_version != SCHEMA_VERSION:

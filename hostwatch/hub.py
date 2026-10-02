@@ -13,7 +13,7 @@ import hmac
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException
+from fastapi import Depends, FastAPI, Header, HTTPException, Query
 
 from . import __version__
 from .config import Config
@@ -57,7 +57,8 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None) -> FastAP
     @app.post("/internal/v1/ingest", dependencies=[Depends(require_token)])
     def ingest(batch: Batch):
         n = store.ingest(batch)
-        return {"stored": n}
+        e = store.add_events(batch.host, [ev.model_dump() for ev in batch.events]) if batch.events else 0
+        return {"stored": n, "events_stored": e}
 
     @app.get("/internal/v1/latest", dependencies=[Depends(require_token)])
     def latest(host: str | None = None):
@@ -66,6 +67,11 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None) -> FastAP
     @app.get("/internal/v1/sources", dependencies=[Depends(require_token)])
     def sources():
         return {"agents": store.agents(), "sources": store.sources()}
+
+    @app.get("/internal/v1/events", dependencies=[Depends(require_token)])
+    def events(host: str | None = None, since: float | None = None, kind: str | None = None,
+               limit: int = Query(default=100, ge=1, le=1000)):
+        return store.events(host=host, since=since, kind=kind, limit=limit)
 
     @app.get("/internal/v1/gaps", dependencies=[Depends(require_token)])
     def gaps(host: str, source: str, metric: str, hours: float = 24, max_gap_s: float = 60):

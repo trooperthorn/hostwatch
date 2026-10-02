@@ -34,6 +34,18 @@ collectors -> agent -> POST /internal/v1/ingest -> hub -> store (SQLite)
                                                          HA MQTT, Orion poller
 ```
 
+## Events on the wire
+
+A batch may carry an optional `events` list (kind, severity, source, ts, title,
+detail, dedup_key). The field defaults to empty and is additive, so the wire
+`SCHEMA_VERSION` stays at 1: v1 agents without the field are accepted
+unchanged. The hub stores events through `Store.add_events`, which keeps one row
+per host and `dedup_key`, so a resent batch does not duplicate events. Events
+are read with `GET /internal/v1/events` (host, since, kind, limit), behind the
+same bearer token as the other internal endpoints. Event sources are reported in
+the batch `sources` list like any collector, with `available` false and a reason
+when the source is absent, and appear in `/internal/v1/sources`.
+
 Later phases add an event engine between the store and the outputs: it turns
 samples, journal entries, pstore records, rasdaemon records and the boot
 heartbeat into typed events stored in their own table.
