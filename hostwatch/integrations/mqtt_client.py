@@ -45,6 +45,11 @@ class MqttTransport(Protocol):
 
     def set_disconnect_handler(self, handler: Callable[[], None]) -> None: ...
 
+    def subscribe(self, topic: str, qos: int) -> None: ...
+
+    def set_message_handler(self, handler: Callable[[str, str], None]) -> None:
+        """Register a handler called with (topic, payload text) for each received message."""
+
 
 def backoff_delay(attempt: int, rng: Callable[[], float]) -> float:
     """Delay before retry number `attempt` (0 based): base * 2**attempt capped at the cap, then
@@ -65,8 +70,13 @@ class MqttClient:
         self.connected = False
         self.failures = 0
         self.next_attempt: float | None = None
+        self.epoch = 0  # counts successful connects, so a publisher can tell the broker session changed
+        self._listeners: list[Callable[[str, str], None]] = []
         self.availability_topic = f"{config.mqtt_base_topic}/availability"
+        # Home Assistant publishes its birth message here when it (re)starts.
+        self.birth_topic = f"{config.mqtt_discovery_prefix}/status"
         transport.set_disconnect_handler(self._on_disconnect)
+        transport.set_message_handler(self._on_message)
 
     @property
     def enabled(self) -> bool:
@@ -74,6 +84,15 @@ class MqttClient:
 
     def _on_disconnect(self) -> None:
         self.connected = False
+
+    def add_listener(self, listener: Callable[[str, str], None]) -> None:
+        """Call `listener(topic, payload)` for each message on a subscribed topic. It may run on
+        the transport's network thread, so it must only set a flag."""
+        self._listeners.append(listener)
+
+    def _on_message(self, topic: str, payload: str) -> None:
+        for listener in list(self._listeners):
+            listener(topic, payload)
 
     @staticmethod
     def _scrub(text: str, password: str) -> str:
@@ -99,6 +118,7 @@ class MqttClient:
             self.transport.set_will(self.availability_topic, OFFLINE, 1, True)
             self.transport.connect(cfg.mqtt_host, cfg.mqtt_port, self._keepalive)
             self.transport.publish(self.availability_topic, ONLINE, 1, True)
+            self.transport.subscribe(self.birth_topic, 1)
         except Exception as exc:  # noqa: BLE001 - any transport failure must schedule a retry
             delay = backoff_delay(self.failures, self._rng)
             self.failures += 1
@@ -108,6 +128,7 @@ class MqttClient:
                         type(exc).__name__, self._scrub(str(exc), password), delay)
             return False
         self.connected = True
+        self.epoch += 1
         self.failures = 0
         self.next_attempt = None
         log.info("MQTT connected to %s:%s", cfg.mqtt_host, cfg.mqtt_port)
@@ -145,6 +166,17 @@ class PahoTransport:
         self._handler: Callable[[], None] = lambda: None
         self._started = False
         self._client.on_disconnect = lambda *args, **kwargs: self._handler()
+        self._message_handler: Callable[[str, str], None] = lambda topic, payload: None
+        self._client.on_message = self._on_message
+
+    def _on_message(self, client, userdata, msg) -> None:
+        self._message_handler(msg.topic, msg.payload.decode("utf-8", "replace"))
+
+    def set_message_handler(self, handler: Callable[[str, str], None]) -> None:
+        self._message_handler = handler
+
+    def subscribe(self, topic, qos) -> None:
+        self._client.subscribe(topic, qos)
 
     def set_disconnect_handler(self, handler: Callable[[], None]) -> None:
         self._handler = handler

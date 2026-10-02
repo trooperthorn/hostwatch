@@ -222,8 +222,15 @@ The Home Assistant publisher stays off until `HOSTWATCH_MQTT_HOST` is set. Relat
 `HOSTWATCH_MQTT_TLS_CERT` with `HOSTWATCH_MQTT_TLS_KEY`, `HOSTWATCH_MQTT_TLS_INSECURE`,
 `HOSTWATCH_MQTT_DISCOVERY_PREFIX` (homeassistant) and `HOSTWATCH_MQTT_BASE_TOPIC` (hostwatch).
 Half-set credentials or missing files stop startup with a message naming the setting. The
-password is never logged. Only the connection layer exists so far; entities arrive in later
-Phase 4 slices.
+password is never logged.
+
+With MQTT configured the hub publishes one Home Assistant device per monitored host:
+sensors for CPU, memory, package power, temperatures, RAID array and disk health, binary
+sensors for each data source, and problem binary sensors (device class `problem`). Discovery
+messages are retained and republished after every reconnect, when Home Assistant publishes its
+birth message on `<discovery prefix>/status`, and after a hub restart. A value that cannot be
+known is shown by Home Assistant as unavailable, never as zero. The events topic and pool
+health arrive in later Phase 4 slices.
 
 ## Tests
 

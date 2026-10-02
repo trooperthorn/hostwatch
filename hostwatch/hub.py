@@ -101,7 +101,8 @@ class Principal:
 
 
 def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_clock=time.monotonic,
-               mtls_identity: Callable[[Request], Principal | None] | None = None) -> FastAPI:
+               mtls_identity: Callable[[Request], Principal | None] | None = None,
+               ha_publisher=None, ha_interval_s: float = 30.0) -> FastAPI:
     if mtls_identity is None:
         from .mtls import make_identity
         mtls_identity = make_identity(cfg, store)
@@ -114,15 +115,28 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
             except Exception as exc:
                 log.warning("maintenance failed: %s", exc)
 
+    async def ha_loop():
+        while True:
+            try:
+                await asyncio.to_thread(ha_publisher.tick)
+            except Exception as exc:
+                log.warning("Home Assistant publish failed (%s)", type(exc).__name__)
+            await asyncio.sleep(ha_interval_s)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         task = asyncio.create_task(maintenance_loop())
+        ha_task = asyncio.create_task(ha_loop()) if ha_publisher else None
         if on_start:
             on_start()
         yield
         if on_stop:
             on_stop()
         task.cancel()
+        if ha_task:
+            ha_task.cancel()
+            await asyncio.gather(ha_task, return_exceptions=True)
+            await asyncio.to_thread(ha_publisher.close)
 
     app = FastAPI(title="hostwatch hub", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)

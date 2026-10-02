@@ -342,8 +342,35 @@ fake and never a broker. On connect it sets a retained last will of `offline` on
 with exponential backoff (1 s doubling to a 60 s cap, jittered between 50 and 100 percent)
 driven by an injected clock: `ensure_connected()` is called from a loop and does nothing until
 the retry time has passed. The password is read when connecting and scrubbed from logged
-error text. `PahoTransport` adapts paho-mqtt 2.x; discovery payloads, state topics and the
-events topic arrive in later slices.
+error text. `PahoTransport` adapts paho-mqtt 2.x. After connecting, the client subscribes to
+`<discovery prefix>/status` (Home Assistant's birth topic) and counts successful connects in
+`epoch`.
+
+### Home Assistant publisher
+
+`hostwatch/integrations/homeassistant.py` turns `build_host_summary` into entities, so Home
+Assistant agrees with Orion. `HomeAssistantPublisher.tick()` runs every 30 seconds from a hub
+background task (only when MQTT is configured). It connects if due, then for each host
+publishes:
+
+- Discovery, retained, on `<prefix>/<sensor|binary_sensor>/hostwatch_<host>/<key>/config`.
+  One device per host (`identifiers: ["hostwatch_<host>"]`), a unique id per entity, and an
+  `origin` block.
+- State, retained, on `<base>/<host>/<key>/state` (binary sensors use `ON` and `OFF`).
+- Entity availability, retained, on `<base>/<host>/<key>/availability`.
+
+Each entity lists the hub availability topic (the last will) and its own availability topic
+with `availability_mode: all`. A value the summary cannot know gets entity availability
+`offline` and no state message, so it is never reported as zero. The source connectivity
+sensors list only the hub topic, because a source being down is a real answer. If an entity
+that this process published earlier is no longer produced, its availability is set to
+`offline`.
+
+Discovery is republished when the connection epoch changes (first connect, reconnect, broker
+restart), when a `online` birth message arrives (the listener only sets a flag; the next tick
+publishes), when an entity definition changes, and after any failed publish. A new hub process
+starts with nothing marked as published, so a restart on the same database republishes
+everything. Pool health has no collector yet and the events topic is a later slice.
 
 ## Storage
 

@@ -158,9 +158,15 @@ def main(argv: list[str] | None = None) -> int:
                                   hub_url=local_agent_hub_url(cfg))
     agent = Agent(cfg) if cfg.role == "all" else None
     thread = threading.Thread(target=agent.run, name="agent", daemon=True) if agent else None
+    ha_publisher = None
+    if cfg.mqtt_enabled:
+        from .integrations.homeassistant import HomeAssistantPublisher
+        from .integrations.mqtt_client import MqttClient, PahoTransport
+        ha_publisher = HomeAssistantPublisher(cfg, MqttClient(cfg, PahoTransport("hostwatch-hub")), store)
     app = create_app(cfg, store,
                      on_start=thread.start if thread else None,
-                     on_stop=agent.stop_and_wait if agent else None)
+                     on_stop=agent.stop_and_wait if agent else None,
+                     ha_publisher=ha_publisher)
     serve_hub(app, cfg)
     return 0
 

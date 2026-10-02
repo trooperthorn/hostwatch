@@ -22,6 +22,8 @@ class FakeTransport:
         self.connects = []
         self.configured = None
         self.handler = None
+        self.subscribed = []
+        self.message_handler = None
 
     def set_disconnect_handler(self, handler):
         self.handler = handler
@@ -43,6 +45,12 @@ class FakeTransport:
 
     def disconnect(self):
         pass
+
+    def subscribe(self, topic, qos):
+        self.subscribed.append((topic, qos))
+
+    def set_message_handler(self, handler):
+        self.message_handler = handler
 
 
 class Clock:
