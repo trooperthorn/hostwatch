@@ -275,7 +275,7 @@ def test_every_request_is_audited_and_no_secret_is_recorded(tmp_path, caplog):
     client.post("/internal/v1/ingest", content=batch(time.time()).model_dump_json(), headers=H)
     client.get("/internal/v1/latest", headers={"Cookie": f"hostwatch_session={cookie}"})
     client.get("/internal/v1/health")
-    rows = store.audit_rows(limit=100)
+    rows = [r for r in store.audit_rows(limit=100) if r["kind"] != "deprecation"]  # the one-time deprecation note is extra
     assert [(r["method"], r["path"], r["status"]) for r in reversed(rows)] == [
         ("GET", "/internal/v1/latest", 200), ("GET", "/internal/v1/latest", 401),
         ("GET", "/internal/v1/events", 403), ("GET", "/internal/v1/sources", 401),

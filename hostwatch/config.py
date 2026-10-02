@@ -40,6 +40,9 @@ class Config:
     hub_bind: str = field(default_factory=lambda: _env("HOSTWATCH_HUB_BIND", "127.0.0.1"))
     hub_port: int = field(default_factory=lambda: int(_env("HOSTWATCH_HUB_PORT", "8090")))
     ingest_token: str = field(default_factory=lambda: _env("HOSTWATCH_INGEST_TOKEN", ""))
+    ingest_key: str = field(default_factory=lambda: _env("HOSTWATCH_INGEST_KEY", ""))
+    legacy_token_disabled: bool = field(
+        default_factory=lambda: _env("HOSTWATCH_LEGACY_TOKEN_DISABLED", "0").lower() in {"1", "true", "yes"})
     argon2_time_cost: int = field(default_factory=lambda: int(_env("HOSTWATCH_ARGON2_TIME_COST", "3")))
     argon2_memory_kib: int = field(default_factory=lambda: int(_env("HOSTWATCH_ARGON2_MEMORY_KIB", "65536")))
     argon2_parallelism: int = field(default_factory=lambda: int(_env("HOSTWATCH_ARGON2_PARALLELISM", "4")))
@@ -70,13 +73,23 @@ class Config:
                 raise ValueError(f"HOSTWATCH_MTLS_TRUSTED_PROXIES is not a list of addresses: {exc}") from exc
             if not proxies:
                 raise ValueError("HOSTWATCH_MTLS_MODE=proxy requires HOSTWATCH_MTLS_TRUSTED_PROXIES")
-        if len(self.ingest_token) < 32:
+        if self.ingest_token and len(self.ingest_token) < 32:
             raise ValueError(
-                "HOSTWATCH_INGEST_TOKEN must be set to at least 32 characters. "
+                "HOSTWATCH_INGEST_TOKEN must be at least 32 characters when it is set. "
                 "Generate one with: openssl rand -hex 32"
+            )
+        if self.role == "agent" and not (self.ingest_key or self.ingest_token):
+            raise ValueError(
+                "The agent role needs a credential: set HOSTWATCH_INGEST_KEY to a scoped key "
+                "(preferred) or HOSTWATCH_INGEST_TOKEN to the legacy shared token."
             )
 
         self._validate_bind()
+
+    @property
+    def agent_credential(self) -> str:
+        """The bearer the agent sends: the scoped ingest key if set, else the legacy shared token."""
+        return self.ingest_key or self.ingest_token
 
     @property
     def tls_configured(self) -> bool:

@@ -361,9 +361,20 @@ are not audited. A test enumerates `app.routes` and fails if any route other
 than health answers without credentials.
 
 Consequence: an agent that has only the shared token can ingest but gets 403
-when it seeds threshold state from `/internal/v1/events`. Until the key CLI lands,
-an agent can be given a scoped key holding `ingest` and `read:events` in
-`HOSTWATCH_INGEST_TOKEN`, which the agent sends as its bearer token.
+when it seeds threshold state from `/internal/v1/events`. The agent therefore
+prefers `HOSTWATCH_INGEST_KEY`, a scoped key with `ingest` and `read:events`,
+and falls back to `HOSTWATCH_INGEST_TOKEN` only when no key is set. The agent
+role accepts either credential. In the `all` role the process mints an internal
+key for its local agent at start when none is configured: it is held in memory,
+only its digest is stored, it is never logged, and the previous internal key is
+revoked on each start.
+
+The legacy token is deprecated and still enforced as `ingest`-only. The first
+use in each hub process writes a `deprecation` audit row, and every use is
+audited as usual. Setting `HOSTWATCH_LEGACY_TOKEN_DISABLED=1` makes the hub
+reject the token with 401 (an enforced control, recorded in the audit reason).
+The token is optional for the hub and `all` roles; if set it must be at least
+32 characters.
 
 ### Client certificate identity (optional, off by default)
 

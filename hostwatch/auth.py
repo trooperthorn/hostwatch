@@ -120,3 +120,22 @@ def generate_api_key(store: Store, scopes: str | list[str], owner: str,
 def generate_session_token(store: Store, user_id: int, ttl_s: float, now: float | None = None) -> str:
     """Create a session and return its random token. Only the token's digest is stored server side."""
     return store.create_session(user_id, ttl_s, now=now)
+
+
+INTERNAL_AGENT_OWNER = "internal:local-agent"
+
+
+def mint_internal_ingest_key(cfg: Config, store: Store) -> str:
+    """For the all role: return the key the local agent should send.
+
+    If HOSTWATCH_INGEST_KEY is set it is used unchanged. Otherwise a fresh key
+    with the ingest and read:events scopes is created in memory for this process
+    only. The store keeps its hash, never the key, and the key is never logged.
+    Earlier internal keys are revoked first, so restarts do not accumulate
+    active credentials nobody holds.
+    """
+    if cfg.ingest_key:
+        return cfg.ingest_key
+    store.revoke_api_keys_by_owner(INTERNAL_AGENT_OWNER)
+    full, _ = store.create_api_key(["ingest", "read:events"], INTERNAL_AGENT_OWNER)
+    return full

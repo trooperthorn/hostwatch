@@ -126,7 +126,7 @@ class Agent:
         of an open condition cannot be emitted from empty state.
         Only source=thresholds events are requested and every page is read, so
         other event floods cannot push an open condition out of view."""
-        headers = {"Authorization": f"Bearer {self.cfg.ingest_token}"}
+        headers = {"Authorization": f"Bearer {self.cfg.agent_credential}"}
         params: dict = {"host": self.cfg.host_name, "source": "thresholds", "limit": 1000}
         stored: list[dict] = []
         try:
@@ -142,11 +142,11 @@ class Agent:
                     params["before_id"] = r.headers["X-Next-Before-Id"]
         except httpx.HTTPStatusError as exc:
             if exc.response.status_code == 401:
-                log.error("hub rejected the ingest token (401) while seeding threshold state; "
-                          "check HOSTWATCH_INGEST_TOKEN on the agent and the hub")
+                log.error("hub rejected the agent credential (401) while seeding threshold state; "
+                          "check HOSTWATCH_INGEST_KEY (or the legacy HOSTWATCH_INGEST_TOKEN) on the agent and the hub")
             elif exc.response.status_code == 403:
                 log.error("hub refused the read (403) while seeding threshold state: the shared ingest token "
-                          "has the ingest scope only; the agent needs a scoped key with read:events")
+                          "has the ingest scope only; set HOSTWATCH_INGEST_KEY to a scoped key with ingest and read:events")
             else:
                 log.warning("hub answered %s while seeding threshold state", exc.response.status_code)
             return False
@@ -370,7 +370,7 @@ class Agent:
         while (head := self.outbox.peek()) is not None:
             seq, batch = head
             r = client.post(f"{self.cfg.hub_url}/internal/v1/ingest", content=batch.model_dump_json(),
-                            headers={"Authorization": f"Bearer {self.cfg.ingest_token}",
+                            headers={"Authorization": f"Bearer {self.cfg.agent_credential}",
                                      "Content-Type": "application/json"}, timeout=10)
             if r.status_code in DEAD_LETTER_STATUSES:
                 self.outbox.dead_letter(seq, r.status_code)

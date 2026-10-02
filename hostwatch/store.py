@@ -281,6 +281,12 @@ class Store:
             return self._db.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
                                     (time.time() if now is None else now, key_id)).rowcount > 0
 
+    def revoke_api_keys_by_owner(self, owner: str, now: float | None = None) -> int:
+        """Revoke every active key held by an owner. Returns how many were revoked."""
+        with self._lock, self._db:
+            return self._db.execute("UPDATE api_keys SET revoked_at = ? WHERE owner = ? AND revoked_at IS NULL",
+                                    (time.time() if now is None else now, owner)).rowcount
+
     def append_audit(self, actor: str, kind: str, method: str, path: str, status: int, remote: str,
                      detail: dict | None = None, now: float | None = None) -> int:
         """Append one audit row. There is deliberately no update or delete method, and triggers

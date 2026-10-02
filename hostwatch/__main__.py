@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import signal
@@ -70,6 +71,10 @@ def main() -> int:
     from .store import Store
 
     store = Store(cfg.data_dir / "hostwatch.db")
+    if cfg.role == "all":
+        # The local agent talks to its own hub with a hashed, scoped key minted in memory.
+        from .auth import mint_internal_ingest_key
+        cfg = dataclasses.replace(cfg, ingest_key=mint_internal_ingest_key(cfg, store))
     agent = Agent(cfg) if cfg.role == "all" else None
     thread = threading.Thread(target=agent.run, name="agent", daemon=True) if agent else None
     app = create_app(cfg, store,

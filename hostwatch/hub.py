@@ -97,6 +97,8 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
                   for e in exc.errors()]
         return JSONResponse(status_code=422, content={"detail": errors})
 
+    legacy_noted: list = []  # one deprecation audit row per hub process; every use is still audited
+
     def _resolve(request: Request) -> Principal | None:
         cookie = request.cookies.get(SESSION_COOKIE)
         if cookie:
@@ -111,16 +113,26 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
                 if key:
                     return Principal(f"key:{key['prefix']}", "api_key", frozenset(key["scopes"]),
                                      {"owner": key["owner"]})
-            else:
-                if cfg.ingest_token and hmac.compare_digest(token.encode(), cfg.ingest_token.encode()):
-                    return Principal("legacy-token", "legacy_token", frozenset({"ingest"}),
-                                     {"deprecated": "shared ingest token, replace with a scoped key"})
+            elif cfg.ingest_token and hmac.compare_digest(token.encode(), cfg.ingest_token.encode()):
+                if cfg.legacy_token_disabled:
+                    request.state.auth_reason = "legacy shared ingest token is disabled"
+                    return mtls_identity(request)
+                if not legacy_noted:
+                    legacy_noted.append(True)
+                    store.append_audit("legacy-token", "deprecation", request.method, request.url.path, 0,
+                                       request.client.host if request.client else "unknown",
+                                       {"deprecated": "the shared ingest token is in use; give the agent a scoped "
+                                        "HOSTWATCH_INGEST_KEY and set HOSTWATCH_LEGACY_TOKEN_DISABLED=1"})
+                    log.warning("legacy shared ingest token used; migrate the agent to HOSTWATCH_INGEST_KEY")
+                return Principal("legacy-token", "legacy_token", frozenset({"ingest"}),
+                                 {"deprecated": "shared ingest token, replace with a scoped key"})
         return mtls_identity(request)
 
     def authenticate(request: Request) -> Principal:
         principal = _resolve(request)
         if principal is None:
-            request.state.auth_reason = "invalid or missing credentials"
+            if not getattr(request.state, "auth_reason", None):
+                request.state.auth_reason = "invalid or missing credentials"
             raise HTTPException(status_code=401, detail="authentication required")
         request.state.principal = principal
         if principal.kind == "session" and request.method not in SAFE_METHODS:

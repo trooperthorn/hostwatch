@@ -80,7 +80,9 @@ matching scope. Do not expose port
 sudo ./scripts/rapl-access.sh --dry-run
 sudo ./scripts/rapl-access.sh              # prints HOSTWATCH_RAPL_GID
 cp deploy/.env.example deploy/.env
-openssl rand -hex 32                       # paste into HOSTWATCH_INGEST_TOKEN
+openssl rand -hex 32                       # optional legacy HOSTWATCH_INGEST_TOKEN; the all role mints its own ingest key.
+                                           # A remote agent should use HOSTWATCH_INGEST_KEY (scoped key) instead.
+                                           # Once agents use keys, set HOSTWATCH_LEGACY_TOKEN_DISABLED=1.
 nano deploy/.env                           # also set HOSTWATCH_RAPL_GID and HOSTWATCH_JOURNAL_GID
                                            # (journal gid: getent group systemd-journal | cut -d: -f3)
 cd deploy && sudo docker compose up -d --build
