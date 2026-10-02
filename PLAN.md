@@ -37,6 +37,25 @@ every listed host.
 | 7 Hardening and release | Non-root, read-only rootfs, SBOM, image scanning, multi-arch builds, docs, threat model | Fresh deploy from README in under 15 minutes |
 | 8 Windows agent | Native service: Event Log (41, 6008, 1001, WHEA), Storage Spaces, smartctl, LibreHardwareMonitor | Same exit tests as Phase 2 using Windows event sources |
 
+## Phase 3 status
+
+Code complete and unit-tested; not yet verified on hardware. The exit test is
+`tests/test_phase3_exit.py` (default deny, immediate key revocation, an audit
+row per request). Controls and their labels:
+
+| Control | Label |
+|---|---|
+| Session or key required on every route except health | Enforced in `hub.py`, tested |
+| argon2id password hashes, lockout, uniform login failure | Enforced |
+| Server-side sessions, `HttpOnly` and `SameSite=Strict` cookie, CSRF token | Enforced; the `Secure` flag follows `HOSTWATCH_TLS` |
+| Scoped, hashed API keys, revoked on the next request | Enforced |
+| Audit log of every authenticated access and every auth failure | Enforced at the application layer; not tamper-proof against file access |
+| Refusal of a non-loopback bind without TLS | Enforced, with an explicit insecure override |
+| TLS serving through uvicorn | Enforced when a certificate is configured; behaviour in the container unverified |
+| Client certificate login | Optional, off by default; the peer allowlist and binding are enforced, the proxy configuration is advisory |
+| Legacy shared ingest token | Enforced as ingest only; deprecated until disabled |
+| Operator CLI | Boundary is shell access to the data directory, not the network |
+
 ## Phase 0 detail
 
 Run on each host:

@@ -401,6 +401,22 @@ and how smart card certificates present their subject are unverified, see
 
 ## Security model
 
+Control summary for Phase 3, each labelled honestly. Enforced means the code
+refuses the request and a test proves it. Advisory means it depends on how the
+operator deploys it.
+
+| Control | Label | Test |
+|---|---|---|
+| Default deny: every route except health needs a session, key or certificate identity | Enforced | `tests/test_phase3_exit.py`, `tests/test_auth.py` |
+| Revoked key rejected on its next request | Enforced | `tests/test_phase3_exit.py` |
+| One audit row per authenticated request and per 401 or 403, none for health | Enforced; append-only at the application layer only | `tests/test_phase3_exit.py` |
+| Password lockout, uniform login failure, CSRF token on cookie writes | Enforced | `tests/test_login.py` |
+| Non-loopback bind refused without TLS | Enforced, override `HOSTWATCH_ALLOW_INSECURE_BIND=1` | `tests/test_config.py` |
+| Loopback as the default bind | Advisory: it limits exposure and is not authentication | none |
+| Proxy mode client certificates | Peer allowlist and binding lookup enforced; proxy verification and header stripping advisory | `tests/test_mtls.py` |
+| Operator CLI | Advisory: protected only by access to the data directory | `tests/test_cli.py` |
+| Audit log tamper resistance | Advisory: a person with write access to the database file can edit it | none |
+
 Current (enforced): the hub binds to 127.0.0.1 by default, every endpoint
 except health and login requires a session, a scoped API key or the ingest-only legacy token (constant time compare) and is audited, the
 container runs non-root with a read-only rootfs, all capabilities dropped, and

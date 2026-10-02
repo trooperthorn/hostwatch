@@ -18,8 +18,17 @@ SolarWinds Orion (API Poller). One image, three roles (`HOSTWATCH_ROLE=all|hub|a
 - Phase 2 (event engine): code complete and unit-tested, including the
   read-only journal, pstore and rasdaemon mounts and `journalctl` in the image.
   **Not yet deployed or verified on real hardware.**
+- Phase 3 (API and auth): code complete and unit-tested, including the exit
+  test in `tests/test_phase3_exit.py`. Enforced: default deny on every route
+  except health, argon2id logins with lockout, server-side sessions with CSRF
+  tokens, hashed scoped API keys revoked on the next request, an append-only
+  audit log (application layer only), and refusal of a non-loopback bind
+  without TLS. Advisory: the reverse proxy behind proxy-mode client
+  certificates, the loopback default bind as a deployment choice, and the CLI
+  trust boundary (shell access to the data directory). **Not yet deployed or
+  verified on real hardware**; see `UNVERIFIED.md`.
 - Next: deploy on MediaIn-SVR, confirm all six sources, run the 24h gap test,
-  then run the four Phase 2 exit scenarios.
+  then run the four Phase 2 exit scenarios and the open Phase 3 checks.
 
 ## Rules
 
@@ -42,8 +51,10 @@ SolarWinds Orion (API Poller). One image, three roles (`HOSTWATCH_ROLE=all|hub|a
    as what, no em dashes, no attribution footers or generation notices, no
    model names, no real credentials. Hostnames of the owner's own lab hosts are
    acceptable in `UNVERIFIED.md` and `docs/`.
-7. **Do not widen exposure ahead of the plan.** The hub binds to 127.0.0.1 until
-   Phase 3 adds login, scoped API keys, and TLS.
+7. **Do not widen exposure ahead of the plan.** The hub binds to 127.0.0.1 by
+   default. Phase 3 added login, scoped API keys and TLS, but a non-loopback
+   bind still needs TLS or an explicit insecure override, and the Phase 3 checks
+   in `UNVERIFIED.md` should pass on hardware before the port is published.
 8. **Do not mount the host `/proc`** into the container. The files read are
    system-wide from the container's own `/proc`.
 

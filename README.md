@@ -102,6 +102,36 @@ nano deploy/.env                           # also set HOSTWATCH_RAPL_GID and HOS
 cd deploy && sudo docker compose up -d --build
 ```
 
+## Create the first admin and API keys
+
+The hub denies every route except health until a caller presents a session or a
+scoped key. Create the first administrator on an empty database. Enforced: the
+command refuses to run when any user exists. The password is printed once to
+standard output and only its argon2id hash is stored.
+
+```
+sudo docker exec -it hostwatch python -m hostwatch bootstrap-admin
+sudo docker exec -it hostwatch python -m hostwatch user create alice
+```
+
+Create, list and revoke scoped API keys. Valid scopes are `read:metrics`,
+`read:events`, `ingest` and `admin`. The secret is shown once and cannot be
+recovered. A revoked key is rejected on its next request.
+
+```
+sudo docker exec hostwatch python -m hostwatch key create --scopes read:metrics,read:events --owner homeassistant
+sudo docker exec hostwatch python -m hostwatch key create --scopes ingest,read:events --owner agent-truenas
+sudo docker exec hostwatch python -m hostwatch key list
+sudo docker exec hostwatch python -m hostwatch key revoke 2
+```
+
+These commands are advisory-protected only: anyone who can run `docker exec` or
+write the data volume can use them. Every command is written to the audit log.
+For access from other hosts, serve TLS by setting `HOSTWATCH_TLS_CERT` and
+`HOSTWATCH_TLS_KEY`; the hub refuses a non-loopback bind otherwise unless
+`HOSTWATCH_ALLOW_INSECURE_BIND=1` is set. In the examples below, set `TOKEN`
+to a key secret instead of the legacy shared token.
+
 ## Verify
 
 ```
