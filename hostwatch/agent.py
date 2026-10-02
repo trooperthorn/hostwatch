@@ -34,7 +34,8 @@ log = logging.getLogger("hostwatch.agent")
 MAX_QUEUE = 240  # one hour at the default 15s interval
 PENDING_BOOT_MARKER = "boot.pending_events"
 PSTORE_SENT_MARKER = "pstore.sent_keys"
-RETRYABLE_4XX = {401, 408, 429}
+DEAD_LETTER_STATUSES = {400, 422}
+MAX_BACKOFF_S = 300.0
 MAX_SEEN_KEYS = 10000
 
 EventSource = Callable[[], tuple[SourceStatus, list[Event]]]
@@ -73,6 +74,15 @@ class Agent:
         # Pstore and rasdaemon re-read whole records, so keys already handed to a
         # batch are remembered and not sent again by this process.
         self._seen_keys: dict[str, None] = {}
+        self._cycle_keys: list[str] = []
+        # Threshold events are held back until the seed from the hub succeeds.
+        self.seeded = False
+        self._seed_failures = 0
+        self._next_seed = 0.0
+        self._flush_failures = 0
+        self._next_flush = 0.0
+        self._head_seq: int | None = None
+        self._head_failures = 0
 
     @property
     def pending_events(self) -> list[Event]:
@@ -105,9 +115,11 @@ class Agent:
                               json.dumps((sent + [e.dedup_key for e in new])[-MAX_SEEN_KEYS:]))
         return status, new
 
-    def seed_thresholds(self, client: httpx.Client) -> None:
-        """Seed threshold state from events the hub already stores. Best effort:
-        if the hub is unreachable, state starts empty and one event may repeat.
+    def seed_thresholds(self, client: httpx.Client) -> bool:
+        """Seed threshold state from events the hub already stores. Returns True
+        once seeded. On failure it returns False and the run loop retries with
+        backoff; threshold events are held back until it succeeds, so a repeat
+        of an open condition cannot be emitted from empty state.
         Only source=thresholds events are requested and every page is read, so
         other event floods cannot push an open condition out of view."""
         headers = {"Authorization": f"Bearer {self.cfg.ingest_token}"}
@@ -130,11 +142,25 @@ class Agent:
                           "check HOSTWATCH_INGEST_TOKEN on the agent and the hub")
             else:
                 log.warning("hub answered %s while seeding threshold state", exc.response.status_code)
-            return
+            return False
         except Exception as exc:
             log.warning("hub unreachable, could not seed threshold state: %s", exc)
-            return
+            return False
         self.thresholds.seed(stored)
+        self.seeded = True
+        return True
+
+    def _try_seed(self, client: httpx.Client) -> None:
+        if self.seeded or time.monotonic() < self._next_seed:
+            return
+        if self.seed_thresholds(client):
+            log.info("threshold state seeded; threshold events are enabled")
+            return
+        self._seed_failures += 1
+        self._next_seed = time.monotonic() + self._backoff(self._seed_failures)
+
+    def _backoff(self, failures: int) -> float:
+        return min(self.cfg.interval_s * 2 ** max(0, failures - 1), MAX_BACKOFF_S)
 
     def _collect_events(self) -> list[Event]:
         events: list[Event] = []
@@ -150,6 +176,7 @@ class Agent:
                 if ev.dedup_key in self._seen_keys:
                     continue
                 self._seen_keys[ev.dedup_key] = None
+                self._cycle_keys.append(ev.dedup_key)
                 events.append(ev)
         while len(self._seen_keys) > MAX_SEEN_KEYS:
             del self._seen_keys[next(iter(self._seen_keys))]
@@ -222,7 +249,8 @@ class Agent:
         self._stage_pending([])
         events.extend(self._collect_events())
         self._outbox_status()
-        events.extend(self.thresholds.evaluate(samples, self.status.values()))
+        if self.seeded:
+            events.extend(self.thresholds.evaluate(samples, self.status.values()))
         return Batch(agent_version=__version__, host=self.cfg.host_name, platform=self.platform,
                      sent_at=time.time(), sources=list(self.status.values()), samples=samples,
                      events=events, batch_id=str(uuid.uuid4()))
@@ -236,6 +264,12 @@ class Agent:
                          f"({self.outbox.dropped_total()} in total); events were kept")
         if dead:
             notes.append(f"{dead} batch(es) refused by the hub are in the dead-letter table")
+        quarantined = self.outbox.quarantined_total()
+        if quarantined:
+            notes.append(f"{quarantined} batch(es) were quarantined after repeated delivery failures")
+        if self.outbox.recovered_from is not None:
+            notes.append(f"the outbox file was corrupt and was moved to {self.outbox.recovered_from.name}; "
+                         "batches and progress markers in it were lost")
         self.status["outbox"] = SourceStatus(source="outbox", available=not dropped, reason="; ".join(notes))
 
     def cycle(self) -> None:
@@ -243,35 +277,78 @@ class Agent:
         to the outbox in a single transaction."""
         self.outbox.enqueue(self.collect_once())
 
+    def safe_cycle(self) -> bool:
+        """Run one cycle without letting an exception end the loop. On failure
+        the staged markers and the in-process dedup keys of the failed cycle are
+        discarded so nothing is skipped, the failure is logged, and the agent
+        source is reported unavailable with the reason until a cycle succeeds."""
+        self._cycle_keys = []
+        try:
+            self._beat()
+            self.cycle()
+        except Exception as exc:
+            log.exception("agent cycle failed; the loop continues")
+            self.outbox.discard_staged()
+            for key in self._cycle_keys:
+                self._seen_keys.pop(key, None)
+            self.status["agent"] = SourceStatus(source="agent", available=False,
+                                                reason=f"cycle error: {type(exc).__name__}: {exc}")
+            return False
+        self.status["agent"] = SourceStatus(source="agent", available=True, reason="")
+        return True
+
     def flush(self, client: httpx.Client) -> None:
         """Send queued batches oldest first. A batch leaves the outbox only after
-        a 2xx answer. A 4xx other than 401, 408 and 429 can never succeed and is
-        dead-lettered so the head is not blocked; anything else raises and the
-        batch stays queued."""
+        a 2xx answer. A 400 or 422 can never succeed and is dead-lettered so the
+        head is not blocked. Any other failure raises and the batch stays queued.
+        If the hub keeps answering the same head batch with a non-network error
+        (other than 401, which a corrected token fixes) for `quarantine_after`
+        consecutive attempts, the batch is quarantined to the dead-letter table
+        with that status and delivery continues with the next one."""
         while (head := self.outbox.peek()) is not None:
             seq, batch = head
             r = client.post(f"{self.cfg.hub_url}/internal/v1/ingest", content=batch.model_dump_json(),
                             headers={"Authorization": f"Bearer {self.cfg.ingest_token}",
                                      "Content-Type": "application/json"}, timeout=10)
-            if 400 <= r.status_code < 500 and r.status_code not in RETRYABLE_4XX:
+            if r.status_code in DEAD_LETTER_STATUSES:
                 self.outbox.dead_letter(seq, r.status_code)
                 continue
-            r.raise_for_status()
-            self.outbox.ack(seq)
+            if r.is_success:
+                self._head_seq, self._head_failures = None, 0
+                self.outbox.ack(seq)
+                continue
+            if self._head_seq != seq:
+                self._head_seq, self._head_failures = seq, 0
+            self._head_failures += 1
+            if r.status_code != 401 and self._head_failures >= self.cfg.quarantine_after:
+                self.outbox.dead_letter(seq, r.status_code, quarantine=True)
+                self._head_seq, self._head_failures = None, 0
+                continue
+            raise httpx.HTTPStatusError(f"hub answered {r.status_code}", request=r.request, response=r)
+
+    def _try_flush(self, client: httpx.Client) -> None:
+        if time.monotonic() < self._next_flush:
+            return
+        try:
+            self.flush(client)
+        except Exception as exc:
+            self._flush_failures += 1
+            wait = self._backoff(self._flush_failures)
+            self._next_flush = time.monotonic() + wait
+            log.warning("delivery failed (%s); %d batch(es) queued, next attempt in %.0fs", exc,
+                        self.outbox.depth(), wait)
+        else:
+            self._flush_failures, self._next_flush = 0, 0.0
 
     def run(self) -> None:
         self.detect()
         self.start_boot_check()
         with httpx.Client() as client:
-            self.seed_thresholds(client)
             while not self._stop.is_set():
                 started = time.monotonic()
-                self._beat()
-                self.cycle()
-                try:
-                    self.flush(client)
-                except Exception as exc:
-                    log.warning("hub unreachable (%s); %d batch(es) queued", exc, self.outbox.depth())
+                self._try_seed(client)
+                self.safe_cycle()
+                self._try_flush(client)
                 self._stop.wait(max(0.0, self.cfg.interval_s - (time.monotonic() - started)))
 
     def _beat(self) -> None:

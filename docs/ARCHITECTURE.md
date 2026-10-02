@@ -170,12 +170,28 @@ batch to the outbox and then tries to send from the oldest. A batch is removed
 only after the hub answers 2xx. The hub also deduplicates by `batch_id`, so a
 resend after a lost answer is harmless.
 
-- A 5xx answer or a network failure leaves the batch queued and is logged.
-- A 401 leaves the batch queued, because a corrected token makes it deliverable.
-  408 and 429 are treated the same way because they are transient.
-- Any other 4xx can never succeed. The batch moves to the `dead_letters` table
+- A network failure, a 5xx answer or any 4xx other than 400 and 422 leaves the
+  batch queued and is logged. The run loop then waits before the next delivery
+  attempt, doubling from the cycle interval up to five minutes, while cycles
+  keep collecting.
+- 400 and 422 can never succeed. The batch moves to the `dead_letters` table
   with the status (the last 1000 are kept), an error is logged, and the next
   batch is sent. The outbox source status names the count.
+- If the same head batch is answered with a non-network error (an HTTP status)
+  `HOSTWATCH_QUARANTINE_AFTER` times in a row (default 5), it is quarantined to
+  `dead_letters` with that status and delivery continues. 401 is never counted,
+  because a corrected token makes the batch deliverable. Network errors never
+  count. The outbox source status reports the quarantined count.
+- If `outbox.db` cannot be opened as a database, it is renamed to
+  `outbox.db.corrupt-<timestamp>`, an error is logged, and a fresh outbox is
+  started. The outbox source status names the renamed file, because the queued
+  batches and markers in it are lost.
+- Each agent cycle runs inside a guard. An exception is logged, markers staged
+  by that cycle are discarded so nothing is skipped, the source `agent` is
+  reported unavailable with the reason, and the next cycle runs normally.
+- Threshold state is seeded from the hub with retry and backoff. Threshold
+  events are not emitted until the seed has succeeded, so an open condition is
+  not announced again after a restart during a hub outage.
 - The cap is 240 batches. Past it, the oldest batch loses its samples, which are
   counted, and its events move into the next batch, which gets a new `batch_id`
   because the hub may have acknowledged the old one. Events are never dropped

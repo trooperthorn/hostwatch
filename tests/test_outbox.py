@@ -11,12 +11,13 @@ import logging
 import sqlite3
 
 import httpx
+import pytest
 
 from hostwatch.agent import Agent
 from hostwatch.config import Config
 from hostwatch.events.journal import JournalWatcher
 from hostwatch.outbox import Outbox
-from hostwatch.schema import Batch, Event, Sample
+from hostwatch.schema import Batch, Event, Sample, SourceStatus
 
 TOKEN = "t" * 32
 OLD, NEW = "aaaaaaaa-0000-0000-0000-000000000001", "bbbbbbbb-0000-0000-0000-000000000002"
@@ -259,3 +260,129 @@ def test_boot_event_survives_agent_restart_before_delivery(tmp_path):
     second.start_boot_check()  # same boot, so nothing is classified again
     (ev,) = second.collect_once().events
     assert ev.kind == "boot.agent_stopped" and ev.dedup_key == f"boot:{NEW}"
+
+
+def test_a_cycle_that_raises_is_followed_by_a_normal_cycle(tmp_path, caplog):
+    agent = Agent(make_cfg(tmp_path))
+    real = agent.collect_once
+    calls = {"n": 0}
+
+    def flaky():
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("boom")
+        return real()
+
+    agent.collect_once = flaky
+    with caplog.at_level(logging.ERROR, logger="hostwatch.agent"):
+        assert agent.safe_cycle() is False
+    assert any("cycle failed" in r.getMessage() for r in caplog.records)
+    assert agent.status["agent"].available is False and "boom" in agent.status["agent"].reason
+    assert agent.outbox.depth() == 0
+    assert agent.safe_cycle() is True
+    assert agent.outbox.depth() == 1 and agent.status["agent"].available is True
+
+
+def test_events_read_in_a_failed_cycle_are_not_lost(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    fake = event("lost-1", source="fake")
+    agent.event_sources = {"fake": lambda: (SourceStatus(source="fake", available=True), [fake])}
+    real = agent.outbox.enqueue
+    agent.outbox.enqueue = lambda b: (_ for _ in ()).throw(sqlite3.OperationalError("disk full"))
+    assert agent.safe_cycle() is False
+    agent.outbox.enqueue = real
+    assert agent.safe_cycle() is True
+    (_, queued) = agent.outbox.peek()
+    assert [e.dedup_key for e in queued.events] == ["lost-1"]
+
+
+def test_404_stays_queued_and_is_retried(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    agent.outbox.enqueue(batch(1, events=[event("k")]))
+    for _ in range(2):
+        with pytest.raises(httpx.HTTPStatusError):
+            agent.flush(hub_client(status=404))
+    assert agent.outbox.depth() == 1 and agent.outbox.dead_letter_count() == 0
+    sent: list = []
+    agent.flush(hub_client(log=sent))
+    assert [b["batch_id"] for b in sent] == ["b1"] and agent.outbox.depth() == 0
+
+
+def test_422_dead_letters_the_batch(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    agent.outbox.enqueue(batch(1))
+    agent.flush(hub_client(status=422))
+    assert agent.outbox.depth() == 0 and agent.outbox.dead_letter_count() == 1
+
+
+def test_head_batch_answered_500_five_times_is_quarantined_and_the_next_delivers(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    agent.outbox.enqueue(batch(1, events=[event("poison")]))
+    agent.outbox.enqueue(batch(2, events=[event("good")]))
+    status = lambda body: 500 if body["batch_id"] == "b1" else 200  # noqa: E731
+    for _ in range(4):
+        with pytest.raises(httpx.HTTPStatusError):
+            agent.flush(hub_client(status=status))
+    assert agent.outbox.depth() == 2
+    sent: list = []
+    agent.flush(hub_client(status=status, log=sent))  # fifth failure quarantines, then b2 goes
+    assert [b["batch_id"] for b in sent] == ["b1", "b2"]
+    assert agent.outbox.depth() == 0 and agent.outbox.dead_letter_count() == 1
+    row = sqlite3.connect(tmp_path / "data/outbox.db").execute("SELECT batch_id, status FROM dead_letters").fetchone()
+    assert row == ("b1", 500)
+    agent.collect_once()
+    assert "quarantined" in agent.status["outbox"].reason
+
+
+def test_network_errors_do_not_count_toward_quarantine(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    agent.outbox.enqueue(batch(1))
+    for _ in range(8):
+        with pytest.raises(httpx.ConnectError):
+            agent.flush(down_client())
+    assert agent.outbox.depth() == 1 and agent.outbox.dead_letter_count() == 0
+
+
+def test_garbage_outbox_is_quarantined_and_the_agent_starts(tmp_path, caplog):
+    cfg = make_cfg(tmp_path)
+    (cfg.data_dir / "outbox.db").write_bytes(b"this is not a sqlite database " * 50)
+    with caplog.at_level(logging.ERROR, logger="hostwatch.outbox"):
+        agent = Agent(cfg)
+    assert any("could not be opened" in r.getMessage() for r in caplog.records)
+    moved = list(cfg.data_dir.glob("outbox.db.corrupt-*"))
+    assert len(moved) == 1
+    agent.outbox.enqueue(batch(1))
+    assert agent.outbox.depth() == 1
+    agent.collect_once()
+    assert "corrupt" in agent.status["outbox"].reason and moved[0].name in agent.status["outbox"].reason
+
+
+def md_agent(tmp_path):
+    cfg = make_cfg(tmp_path)
+    (cfg.sysfs / "block/md0/md").mkdir(parents=True)
+    (cfg.sysfs / "block/md0/md/degraded").write_text("1\n")
+    agent = Agent(cfg)
+    agent.detect()
+    return agent
+
+
+def seed_client(rows):
+    def handler(request):
+        return httpx.Response(200, json=rows)
+
+    return httpx.Client(transport=httpx.MockTransport(handler))
+
+
+def test_threshold_events_wait_for_a_delayed_seed_and_do_not_duplicate(tmp_path):
+    from hostwatch.events.thresholds import ThresholdEngine
+
+    prior = ThresholdEngine().evaluate(
+        [Sample(source="mdraid", metric="degraded", value=1, labels={"array": "md0"}, ts=1.0)], [], now=1.0)
+    stored = [{**e.model_dump(), "id": 1} for e in prior]
+    agent = md_agent(tmp_path)
+    assert agent.seed_thresholds(down_client()) is False
+    held = agent.collect_once()
+    assert not [e for e in held.events if e.source == "thresholds"]
+    assert agent.seed_thresholds(seed_client(stored)) is True
+    after = agent.collect_once()
+    assert not [e for e in after.events if e.kind == "md.degraded"]

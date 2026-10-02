@@ -13,9 +13,15 @@ stripped of its samples (counted as dropped). Its events are kept by moving
 them into the next batch, which then gets a new batch_id, because the hub may
 already have acknowledged the old id. A batch left with nothing is deleted.
 
-A batch the hub refuses with a 4xx other than 401 (and other than the
-retryable 408 and 429) can never succeed, so it moves to the dead_letters
-table with the status and no longer blocks the queue head.
+A batch the hub refuses with 400 or 422 can never succeed, so it moves to the
+dead_letters table with the status and no longer blocks the queue head. A batch
+that keeps failing with another non-network error is quarantined to the same
+table by the agent after a configurable number of consecutive failures, and
+counted separately.
+
+A file that SQLite cannot open as a database is renamed to
+outbox.db.corrupt-<timestamp>, an error is logged, and a fresh outbox starts.
+`recovered_from` names the renamed file so the agent can report the loss.
 """
 
 from __future__ import annotations
@@ -78,12 +84,42 @@ class Outbox:
         self.max_batches = max_batches
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
-        self._db = sqlite3.connect(path, check_same_thread=False)
-        self._db.execute("PRAGMA synchronous=FULL")
-        with self._db:
-            self._db.executescript(_SCHEMA)
+        self.recovered_from: Path | None = None
+        try:
+            self._db = self._open(path)
+        except sqlite3.DatabaseError as exc:
+            stamp = time.strftime("%Y%m%dT%H%M%S")
+            moved = path.with_name(f"{path.name}.corrupt-{stamp}")
+            n = 0
+            while moved.exists():
+                n += 1
+                moved = path.with_name(f"{path.name}.corrupt-{stamp}-{n}")
+            path.rename(moved)
+            log.error("outbox %s could not be opened (%s); moved to %s and a fresh outbox was started. "
+                      "Queued batches and source progress markers in it are lost", path, exc, moved)
+            self.recovered_from = moved
+            self._db = self._open(path)
         self._staged: dict[str, str | None] = {}
         self._warned_drop = 0
+
+    @staticmethod
+    def _open(path: Path) -> sqlite3.Connection:
+        db = sqlite3.connect(path, check_same_thread=False)
+        try:
+            db.execute("PRAGMA synchronous=FULL")
+            with db:
+                db.executescript(_SCHEMA)
+            db.execute("SELECT COUNT(*) FROM batches").fetchone()
+        except sqlite3.DatabaseError:
+            db.close()
+            raise
+        return db
+
+    def discard_staged(self) -> None:
+        """Forget staged markers, used when a cycle failed before its batch was
+        written so no marker runs ahead of events that were never queued."""
+        with self._lock:
+            self._staged.clear()
 
     def close(self) -> None:
         with self._lock:
@@ -176,7 +212,7 @@ class Outbox:
                 self._db.execute("DELETE FROM counters WHERE name='dropped_since_drain'")
                 self._warned_drop = 0
 
-    def dead_letter(self, seq: int, status: int) -> None:
+    def dead_letter(self, seq: int, status: int, quarantine: bool = False) -> None:
         with self._lock, self._db:
             row = self._db.execute("SELECT batch_id, payload FROM batches WHERE seq=?", (seq,)).fetchone()
             if row is None:
@@ -186,7 +222,17 @@ class Outbox:
             self._db.execute("DELETE FROM batches WHERE seq=?", (seq,))
             self._db.execute("DELETE FROM dead_letters WHERE id <= "
                              "(SELECT MAX(id) FROM dead_letters) - ?", (MAX_DEAD_LETTERS,))
-        log.error("hub refused batch %s with status %d; moved to the dead-letter table", row[0], status)
+            if quarantine:
+                self._bump("quarantined", 1)
+        if quarantine:
+            log.error("batch %s failed repeatedly with status %d; quarantined to the dead-letter table",
+                      row[0], status)
+        else:
+            log.error("hub refused batch %s with status %d; moved to the dead-letter table", row[0], status)
+
+    def quarantined_total(self) -> int:
+        with self._lock:
+            return self._counter("quarantined")
 
     def dead_letter_count(self) -> int:
         with self._lock:

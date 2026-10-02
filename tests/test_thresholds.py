@@ -85,6 +85,7 @@ def test_agent_batch_includes_events_from_event_source_and_thresholds(tmp_path):
     agent = Agent(cfg)
     fake = Event(kind="fake.thing", severity="info", source="fake", ts=1.0, title="t", dedup_key="fake:1")
     agent.event_sources = {"fake": lambda: (SourceStatus(source="fake", available=True), [fake])}
+    agent.seeded = True  # threshold events are held back until the hub seed succeeds
     agent.detect()
     batch = agent.collect_once()
     got = kinds(batch.events)
