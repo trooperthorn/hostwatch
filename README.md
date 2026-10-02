@@ -12,7 +12,8 @@ Current phase: **1 (collector core)**. Phase 0 is complete on MediaIn-SVR.
 |---|---|
 | `hostwatch/schema.py` | Agent-to-hub wire schema, version 1, with an optional events list |
 | `hostwatch/collectors/` | One module per source: `cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `scrutiny` |
-| `hostwatch/agent.py` | Detect, collect, push to hub; bounded queue while the hub is down |
+| `hostwatch/agent.py` | Detect, collect, push to hub; bounded queue while the hub is down; writes the boot heartbeat |
+| `hostwatch/events/boot.py` | Heartbeat writer and boot classifier (clean shutdown, watchdog reset, kernel panic, power loss, unknown) |
 | `hostwatch/hub.py` | Internal ingest and read API (token-protected, loopback only in Phase 1) |
 | `hostwatch/store.py` | SQLite: raw samples, hourly rollups, source availability, versioned schema with an additive events table |
 | `scripts/host-prep.sh` | Phase 0 host check and fixes |

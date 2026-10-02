@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import json
 import logging
+import signal
 import sys
 import threading
 import time
@@ -39,7 +40,9 @@ def main() -> int:
     cfg.validate()
 
     if cfg.role == "agent":
-        Agent(cfg).run()
+        agent = Agent(cfg)
+        signal.signal(signal.SIGTERM, lambda *_: agent.stop())
+        agent.run()
         return 0
 
     import uvicorn

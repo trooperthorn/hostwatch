@@ -50,6 +50,23 @@ Later phases add an event engine between the store and the outputs: it turns
 samples, journal entries, pstore records, rasdaemon records and the boot
 heartbeat into typed events stored in their own table.
 
+## Boot classifier
+
+`hostwatch/events/boot.py` holds the heartbeat writer and the classifier. Each
+agent cycle atomically rewrites `heartbeat.json` in the data directory (temp
+file, fsync, rename) with the current `boot_id`, a timestamp, and
+`clean_shutdown: false`. On stop (SIGTERM) the agent writes the same file with
+the flag true and stops updating it. At start, the agent reads `boot_id` from
+`<procfs>/sys/kernel/random/boot_id`; if it differs from the previous
+heartbeat, `classify` returns one of `clean_shutdown`, `kernel_panic` (flag not
+set and pstore under `<sysfs>/fs/pstore` is non-empty), `watchdog_reset`,
+`power_loss`, or `unknown`, with the evidence in the event detail. A missing or
+malformed heartbeat gives `unknown`. The watchdog and power loss hints come from
+journal watchers that a later slice adds, so until then those boots are
+`unknown`. The event kind is `boot.<class>` with dedup key `boot:<boot_id>`,
+queued for the next batch. The source `boot` is reported unavailable when the
+boot_id cannot be read.
+
 ## Storage
 
 SQLite in `/data`. Raw samples are kept for `HOSTWATCH_RAW_RETENTION_DAYS`,

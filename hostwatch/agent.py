@@ -21,7 +21,8 @@ import httpx
 from . import __version__
 from .collectors import build_collectors
 from .config import Config
-from .schema import Batch, SourceStatus
+from .events import boot
+from .schema import Batch, Event, SourceStatus
 
 log = logging.getLogger("hostwatch.agent")
 MAX_QUEUE = 240  # one hour at the default 15s interval
@@ -46,6 +47,27 @@ class Agent:
         self.queue: collections.deque[Batch] = collections.deque(maxlen=MAX_QUEUE)
         self._last_detect = 0.0
         self._stop = threading.Event()
+        self.heartbeat: boot.Heartbeat | None = None
+        self.pending_events: list[Event] = []
+
+    def start_boot_check(self) -> None:
+        """Classify how the previous boot ended, once, then start the heartbeat.
+        The event is queued for the next batch; the hub deduplicates by boot_id.
+        The pending event is held in memory, so an agent restart before it is
+        delivered loses it (the heartbeat already names the new boot)."""
+        boot_id = boot.read_boot_id(self.cfg.procfs)
+        if boot_id is None:
+            self.status["boot"] = SourceStatus(source="boot", available=False,
+                                               reason=f"cannot read {self.cfg.procfs / boot.BOOT_ID_REL}")
+            return
+        previous = boot.load_heartbeat(self.cfg.data_dir)
+        pstore = boot.pstore_has_records(self.cfg.sysfs / "fs/pstore")
+        result = boot.classify(previous, boot_id, pstore, {})
+        if result is not None:
+            self.pending_events.append(boot.boot_event(result))
+            log.info("boot classified as %s", result.kind)
+        self.heartbeat = boot.Heartbeat(self.cfg.data_dir, boot_id)
+        self.status["boot"] = SourceStatus(source="boot", available=True, reason="")
 
     def detect(self) -> None:
         for c in self.collectors:
@@ -72,8 +94,10 @@ class Agent:
                 log.warning("collector %s failed: %s", c.id, exc)
                 self.status[c.id] = SourceStatus(source=c.id, available=False,
                                                  reason=f"collect error: {type(exc).__name__}: {exc}")
+        events, self.pending_events = self.pending_events, []
         return Batch(agent_version=__version__, host=self.cfg.host_name, platform=self.platform,
-                     sent_at=time.time(), sources=list(self.status.values()), samples=samples)
+                     sent_at=time.time(), sources=list(self.status.values()), samples=samples,
+                     events=events)
 
     def flush(self, client: httpx.Client) -> None:
         while self.queue:
@@ -86,9 +110,11 @@ class Agent:
 
     def run(self) -> None:
         self.detect()
+        self.start_boot_check()
         with httpx.Client() as client:
             while not self._stop.is_set():
                 started = time.monotonic()
+                self._beat()
                 self.queue.append(self.collect_once())
                 try:
                     self.flush(client)
@@ -96,5 +122,21 @@ class Agent:
                     log.warning("hub unreachable (%s); %d batch(es) queued", exc, len(self.queue))
                 self._stop.wait(max(0.0, self.cfg.interval_s - (time.monotonic() - started)))
 
+    def _beat(self) -> None:
+        if self.heartbeat is None:
+            return
+        try:
+            self.heartbeat.beat()
+        except OSError as exc:
+            log.warning("heartbeat write failed: %s", exc)
+            self.status["boot"] = SourceStatus(source="boot", available=False,
+                                               reason=f"heartbeat write failed: {exc}")
+
     def stop(self) -> None:
+        """Stop the loop and record an orderly shutdown in the heartbeat."""
         self._stop.set()
+        if self.heartbeat is not None:
+            try:
+                self.heartbeat.mark_clean()
+            except OSError as exc:
+                log.warning("clean-shutdown heartbeat failed: %s", exc)
