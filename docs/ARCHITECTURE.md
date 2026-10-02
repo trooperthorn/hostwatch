@@ -72,13 +72,12 @@ when the boot_id cannot be read.
 ## pstore ingestion
 
 `hostwatch/events/pstore.py` reads the directory named by `HOSTWATCH_PSTORE`
-(default `/host/pstore`) read-only. Every regular file becomes one event:
-`pstore.kernel_panic` or `pstore.kernel_oops` for `dmesg-*` files whose text
-carries a panic or oops marker, otherwise `pstore.record`. The dedup key is
-`pstore:<file name>:<first 16 hex of the content sha256>`, so re-reading gives
-the same key and a rewritten record gives a new one. Files are never deleted or
+(default `/host/pstore`) read-only. Every regular file becomes one event; symlinks are skipped.
+Only `dmesg-*` files are classified, and only by explicit markers: `Kernel panic - not syncing` or a `Panic#N` header gives `pstore.kernel_panic`; an `Oops#N` header or a line starting with `BUG:` or `Oops:` gives `pstore.kernel_oops`; everything else is `pstore.record`. The dedup key is
+`pstore:<file name>:<first 16 hex of the sha256 of the whole file>`, hashed in chunks, so re-reading gives
+the same key and a rewritten record gives a new one. For a file over 1 MiB the excerpt comes from the head, the marker scan covers the head and the tail, and `detail.truncated` is true. Files are never deleted or
 modified. A missing or unreadable directory yields source `pstore` unavailable
-with a reason and no events; an empty directory is available with no events.
+with a reason and no events; an empty directory is available with no events. If records exist but none could be read, the source is unavailable with a reason; if some failed, it stays available and the reason carries the failed count.
 The agent reads it every cycle and sends each record once per process.
 
 ## rasdaemon ingestion
