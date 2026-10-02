@@ -300,10 +300,10 @@ session takes effect on the next lookup. The audit log has no update or delete
 method, and SQLite triggers abort UPDATE and DELETE on it. This is an
 application-layer control: anyone who can write the database file directly can
 drop the triggers or edit rows, so it is not tamper-proofing. The tables exist
-but nothing in the hub enforces authentication yet; that arrives in later
-Phase 3 slices, so the hub is still bound to 127.0.0.1 and uses the shared token.
+and the hub now enforces them as described under Hub authentication below. The
+hub is still bound to 127.0.0.1.
 
-`hostwatch/auth.py` holds the auth primitives and is not yet called by the hub.
+`hostwatch/auth.py` holds the auth primitives; the hub calls the store lookups, while password login and lockout have no HTTP endpoint yet.
 Passwords are hashed with argon2id, with time cost, memory and parallelism read
 from config so tests can use a low cost; a login with an outdated hash is
 rehashed. `check_login` locks a user for `HOSTWATCH_LOGIN_LOCK_S` after
@@ -312,13 +312,39 @@ disabled user triggers a dummy verify so timing does not reveal whether the
 account exists. The lock is a fixed window, not an escalating backoff, and it
 is per account, so an attacker can lock out a known username (a denial of
 service trade-off accepted for now). Scopes are limited to `read:metrics`,
-`read:events`, `ingest` and `admin`. These are library functions only; they
-become enforced controls when a later slice wires them into the hub.
+`read:events`, `ingest` and `admin`. Password login and lockout become enforced controls
+when a later slice adds the login endpoint.
+
+### Hub authentication (enforced)
+
+Every route except `/internal/v1/health` depends on one `authenticate`
+function. It tries, in order: the `hostwatch_session` cookie, a bearer API key
+(`hw_` prefix, looked up by digest), an mTLS identity from a hook (a stub that
+returns nothing until a later slice wires a TLS listener, so it is advisory
+plumbing only), and the legacy `HOSTWATCH_INGEST_TOKEN`, which grants the
+`ingest` scope only and is marked deprecated in the audit detail. A
+`require_scope` check then applies: `latest`, `sources` and `gaps` need
+`read:metrics`, `events` needs `read:events`, `ingest` needs `ingest`. Sessions
+carry both read scopes and never `ingest`. `admin` satisfies every scope except
+`ingest`. Missing or invalid credentials give 401, a missing scope gives 403.
+
+An HTTP middleware appends one `audit_log` row for each authenticated request
+and each 401 or 403, with actor, method, path, status and remote address.
+Secrets are never written; a failed attempt is recorded under the actor
+`anonymous` with a reason. If the audit write fails the request answers 500, so
+an access is never served unrecorded. Requests to unknown paths and to health
+are not audited. A test enumerates `app.routes` and fails if any route other
+than health answers without credentials.
+
+Consequence: an agent that has only the shared token can ingest but gets 403
+when it seeds threshold state from `/internal/v1/events`. Until the key CLI lands,
+an agent can be given a scoped key holding `ingest` and `read:events` in
+`HOSTWATCH_INGEST_TOKEN`, which the agent sends as its bearer token.
 
 ## Security model
 
 Current (enforced): the hub binds to 127.0.0.1 by default, every endpoint
-except health requires the ingest bearer token compared in constant time, the
+except health requires a session, a scoped API key or the ingest-only legacy token (constant time compare) and is audited, the
 container runs non-root with a read-only rootfs, all capabilities dropped, and
 `no-new-privileges`. The host `/sys` is mounted read-only. The host `/proc` is
 never mounted. The Phase 2 event sources are read-only bind mounts and nothing
@@ -334,8 +360,8 @@ else was widened (no privileged mode, no added capability, no writable host moun
 The image installs `journalctl` from the `systemd` package. Reading the journal
 may need the `systemd-journal` group, which is recorded in `UNVERIFIED.md`.
 
-Planned (Phase 3): user login with argon2 hashes, sessions, lockout, optional
-mTLS client certificates, scoped hashed API keys, and an audit log. The bind
+Planned (rest of Phase 3): login endpoints, lockout over HTTP, optional
+mTLS client certificates, key management CLI and TLS serving. The bind
 address must not widen before that work lands.
 
 ## Isolation for tests and agents

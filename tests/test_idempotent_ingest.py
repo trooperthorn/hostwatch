@@ -148,6 +148,8 @@ def test_events_endpoint_source_filter_and_cursor(tmp_path):
     client = TestClient(create_app(Config(ingest_token=TOKEN, data_dir=tmp_path), store))
     store.add_events("h1", [ev(f"t{i}", float(i), source="thresholds").model_dump() for i in range(1, 6)]
                      + [ev("j", 9.0, source="journal").model_dump()])
+    secret, _ = store.create_api_key(["read:events"], "test")
+    H = {"Authorization": f"Bearer {secret}"}
     r = client.get("/internal/v1/events", headers=H, params={"source": "thresholds", "limit": 2})
     assert [e["dedup_key"] for e in r.json()] == ["t5", "t4"]
     assert float(r.headers["x-next-before"]) == 4.0
@@ -159,11 +161,11 @@ def test_events_endpoint_source_filter_and_cursor(tmp_path):
     assert "x-next-before" not in last.headers
 
 
-def agent_for(tmp_path, hub_url="http://testserver"):
+def agent_for(tmp_path, hub_url="http://testserver", token=TOKEN):
     for d in ("sys", "proc", "data"):
         (tmp_path / d).mkdir(exist_ok=True)
     cfg = Config(sysfs=tmp_path / "sys", procfs=tmp_path / "proc", data_dir=tmp_path / "data",
-                 ingest_token=TOKEN, host_name="h1", hub_url=hub_url,
+                 ingest_token=token, host_name="h1", hub_url=hub_url,
                  pstore=tmp_path / "none", journal=tmp_path / "none", rasdaemon_db=tmp_path / "none.db")
     return Agent(cfg)
 
@@ -181,7 +183,9 @@ def test_seed_restores_open_condition_below_1000_other_events(tmp_path):
     rows += [ev(f"o{i}", 10.0 + i, "scrutiny.status_raised", "thresholds",
                 {"rule_key": f"scrutiny:w{i}", "state": 1}).model_dump() for i in range(1005)]
     store.add_events("h1", rows)
-    agent = agent_for(tmp_path)
+    # An agent can use a scoped key that holds both ingest and read:events as its token.
+    secret, _ = store.create_api_key(["ingest", "read:events"], "agent")
+    agent = agent_for(tmp_path, token=secret)
     agent.seed_thresholds(hub)  # TestClient is an httpx.Client talking to the hub app
     after = agent.thresholds.evaluate([Sample(source="mdraid", metric="degraded", value=1,
                                               labels={"array": "md0"}, ts=2.0)], [], now=2.0)

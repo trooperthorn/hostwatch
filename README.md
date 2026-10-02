@@ -19,8 +19,8 @@ Current phase: **2 (event engine)**, code complete and not yet deployed. Phase 0
 | `hostwatch/events/rasdaemon.py` | Read-only rasdaemon database ingestion (`HOSTWATCH_RASDAEMON_DB`, default `/host/rasdaemon/ras-mc_event.db`): `mc_event`, `aer_event` and `mce_record` rows become `hardware_error` events, each table only if present; progress survives restarts, a recreated database is detected by checking the timestamp of the last row read, an undecodable value is stored as hex, a row that cannot be converted is skipped and counted in the source reason, and zone-less timestamps are read as UTC and flagged |
 | `hostwatch/events/journal.py` | Read-only journal watcher (`HOSTWATCH_JOURNAL`, default `/host/journal`): runs `journalctl --directory` on a worker thread with a saved cursor (first read bounded to two boots, falls back to `HOSTWATCH_JOURNAL_VOLATILE`), recovers from a rotated-out cursor with a `journal.cursor_reset` event, marks a capped first read as `journal.backlog_truncated`, names unreadable journal files in the source reason, reports unreadable journals as unavailable, and turns watchdog, md degraded, e1000e, MCE, I/O error, ata link reset and thermal throttle messages into events |
 | `hostwatch/events/thresholds.py` | Edge-triggered threshold events from samples (md degraded, md sync change, source flip, Scrutiny device_status growth), seeded from stored events |
-| `hostwatch/hub.py` | Internal ingest and read API (token-protected, loopback only in Phase 1) |
-| `hostwatch/auth.py` | Auth building blocks, not yet wired into the hub: argon2id password hashing with cost from config, login lockout with a dummy verify for unknown users, scope validation, and API key and session token generation that stores only digests |
+| `hostwatch/hub.py` | Internal ingest and read API (session, scoped key or legacy ingest token on every route but health, audited, loopback only) |
+| `hostwatch/auth.py` | Auth building blocks (the hub uses the key and session lookups; login and lockout are not yet exposed over HTTP): argon2id password hashing with cost from config, login lockout with a dummy verify for unknown users, scope validation, and API key and session token generation that stores only digests |
 | `hostwatch/store.py` | SQLite: raw samples, hourly rollups, source availability, versioned schema with additive events, batch id and auth tables (users, sessions, API keys, audit log) |
 | `scripts/host-prep.sh` | Phase 0 host check and fixes |
 | `scripts/rapl-access.sh` | Grant RAPL read access to a dedicated group (see its header for the security trade-off) |
@@ -28,8 +28,14 @@ Current phase: **2 (event engine)**, code complete and not yet deployed. Phase 0
 
 ## What Phase 1 does and does not do
 
-Enforced in Phase 1:
-- Every hub endpoint except `/internal/v1/health` requires the ingest bearer token.
+Enforced:
+- Every hub endpoint except `/internal/v1/health` requires a credential, and
+  each access and each authentication failure is appended to the audit log
+  (never the secret). Accepted credentials are a session cookie, a scoped
+  bearer API key, and the deprecated shared ingest token, which may only
+  ingest. `latest`, `sources` and `gaps` need `read:metrics`, `events` needs
+  `read:events`, `ingest` needs `ingest`. A revoked key is rejected on its next
+  request. An mTLS identity hook exists but is not wired to a TLS listener yet.
 - The hub binds to 127.0.0.1. The container runs as UID 10001, read-only root
   filesystem, all capabilities dropped, `no-new-privileges`.
 - `/sys` is mounted read-only. The host `/proc` is not mounted.
@@ -37,8 +43,11 @@ Enforced in Phase 1:
   `/var/lib/rasdaemon`. There is no privileged mode, no added capability, and
   no writable host mount.
 
-Not yet present (later phases): user login, scoped API keys, TLS, Home
-Assistant and Orion endpoints. Do not expose port
+Not yet present (later slices and phases): login endpoints, the CLI that
+creates users and keys, TLS serving, Home Assistant and Orion endpoints. Until
+the CLI lands there is no supported way to mint a key, so the read examples
+below that use the shared token now answer 403; they need a key with the
+matching scope. Do not expose port
 8090 off-host before Phase 3.
 
 ## Deploy on MediaIn-SVR

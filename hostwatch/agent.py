@@ -144,6 +144,9 @@ class Agent:
             if exc.response.status_code == 401:
                 log.error("hub rejected the ingest token (401) while seeding threshold state; "
                           "check HOSTWATCH_INGEST_TOKEN on the agent and the hub")
+            elif exc.response.status_code == 403:
+                log.error("hub refused the read (403) while seeding threshold state: the shared ingest token "
+                          "has the ingest scope only; the agent needs a scoped key with read:events")
             else:
                 log.warning("hub answered %s while seeding threshold state", exc.response.status_code)
             return False
