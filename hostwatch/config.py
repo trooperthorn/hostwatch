@@ -3,7 +3,8 @@
 Every setting has a default that works for the single-container "all" role on
 a Linux host with /sys bind-mounted read-only at /host/sys. /proc is the
 container's own: the files read (stat, meminfo, loadavg) are system-wide, so the
-host /proc, which would expose every host process, is not mounted.
+host /proc, which would expose every host process, is not mounted. The event
+sources (journal, pstore, rasdaemon database) are read-only mounts under /host.
 """
 
 from __future__ import annotations

@@ -23,6 +23,12 @@ services:
       - "${HOSTWATCH_RAPL_GID:?run scripts/rapl-access.sh and set HOSTWATCH_RAPL_GID in .env}"
     volumes:
       - /sys:/host/sys:ro
+      # Phase 2 event sources, all read-only. The container paths match the
+      # defaults in hostwatch/config.py. The host /proc is deliberately not mounted.
+      - /var/log/journal:/host/journal:ro
+      - /run/log/journal:/host/journal-volatile:ro
+      - /sys/fs/pstore:/host/pstore:ro
+      - /var/lib/rasdaemon:/host/rasdaemon:ro
       - hostwatch-data:/data
 
 volumes:

@@ -4,7 +4,7 @@ Host health, power, and crash monitoring with authenticated API access for
 Home Assistant and SolarWinds Orion. See `PLAN.md` for the phased plan and
 `UNVERIFIED.md` for assumptions not yet confirmed on real hardware.
 
-Current phase: **1 (collector core)**. Phase 0 is complete on MediaIn-SVR.
+Current phase: **2 (event engine)**, code complete and not yet deployed. Phase 0 is complete on MediaIn-SVR.
 
 ## Layout
 
@@ -31,9 +31,12 @@ Enforced in Phase 1:
 - The hub binds to 127.0.0.1. The container runs as UID 10001, read-only root
   filesystem, all capabilities dropped, `no-new-privileges`.
 - `/sys` is mounted read-only. The host `/proc` is not mounted.
+- Phase 2 adds only read-only mounts: the journal, `/sys/fs/pstore`, and
+  `/var/lib/rasdaemon`. There is no privileged mode, no added capability, and
+  no writable host mount.
 
 Not yet present (later phases): user login, scoped API keys, TLS, Home
-Assistant and Orion endpoints, events and crash detection. Do not expose port
+Assistant and Orion endpoints. Do not expose port
 8090 off-host before Phase 3.
 
 ## Deploy on MediaIn-SVR
@@ -60,6 +63,11 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8090/internal/v1/late
 
 # Recent events, filtered by host, kind, and a unix timestamp (limit defaults to 100):
 curl -s -H "Authorization: Bearer $TOKEN"   "http://127.0.0.1:8090/internal/v1/events?kind=md.degraded&since=1700000000&limit=20"
+
+# Event sources are mounted read-only; each reports unavailable with a reason if absent:
+sudo docker exec hostwatch ls /host/journal /host/pstore /host/rasdaemon
+sudo docker exec hostwatch which journalctl
+curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8090/internal/v1/sources | python3 -m json.tool
 
 # Phase 1 exit test, after 24 hours (expect gap_count 0):
 curl -s -H "Authorization: Bearer $TOKEN" \

@@ -74,3 +74,20 @@ unavailable with a reason, never as zero.
 Exit test on MediaIn-SVR: all six sources available, `/internal/v1/gaps`
 reports 0 gaps over 24 hours for `rapl/watts` and `mdraid/degraded`, and
 values agree with turbostat, `/proc/mdstat`, `sensors`, and the Scrutiny UI.
+
+## Phase 2 detail
+
+Linux only. A heartbeat file in the data volume classifies each boot as a
+clean shutdown, a watchdog-caught hang, a kernel panic (pstore), or power
+loss. Journal watchers, pstore and rasdaemon ingestion, and threshold events
+(for example md degraded) feed a new additive `events` table, migrated from
+the Phase 1 schema, and are served by `/internal/v1/events`. Every source is
+read-only and is reported unavailable with a reason when absent.
+
+Deployment adds only read-only mounts to `deploy/docker-compose.yml`:
+`/var/log/journal`, `/run/log/journal`, `/sys/fs/pstore` and
+`/var/lib/rasdaemon`. The image installs `journalctl`. Privileged mode,
+capabilities, and writable host mounts are not added.
+
+Exit test on MediaIn-SVR: a watchdog hang, a clean reboot, a power pull, and a
+test-array `mdadm --fail` each produce the correct event. ai-pi is deferred.

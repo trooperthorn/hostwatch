@@ -13,10 +13,13 @@ SolarWinds Orion (API Poller). One image, three roles (`HOSTWATCH_ROLE=all|hub|a
 ## Current state
 
 - Phase 0 (host prep): complete on MediaIn-SVR. ai-pi deferred by the owner.
-- Phase 1 (collector core): code complete and unit-tested (`pytest`, 19 tests).
+- Phase 1 (collector core): code complete and unit-tested (`pytest`).
   **Not yet deployed or verified on real hardware.**
-- Next: deploy Phase 1 on MediaIn-SVR, confirm all six sources, run the 24h gap
-  test, then start Phase 2 (event engine).
+- Phase 2 (event engine): code complete and unit-tested, including the
+  read-only journal, pstore and rasdaemon mounts and `journalctl` in the image.
+  **Not yet deployed or verified on real hardware.**
+- Next: deploy on MediaIn-SVR, confirm all six sources, run the 24h gap test,
+  then run the four Phase 2 exit scenarios.
 
 ## Rules
 

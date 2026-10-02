@@ -77,8 +77,7 @@ carries a panic or oops marker, otherwise `pstore.record`. The dedup key is
 the same key and a rewritten record gives a new one. Files are never deleted or
 modified. A missing or unreadable directory yields source `pstore` unavailable
 with a reason and no events; an empty directory is available with no events.
-The agent reads it every cycle and sends each record once per process. The
-compose mount comes in a later slice.
+The agent reads it every cycle and sends each record once per process.
 
 ## rasdaemon ingestion
 
@@ -94,8 +93,7 @@ database with none of the three tables, yields source `rasdaemon` unavailable
 with a reason; a single missing table is skipped and named in the reason of an
 otherwise available source. A row whose timestamp cannot be parsed keeps the raw
 text in the detail and is stamped with the read time, flagged by
-`ts_is_read_time`. The agent reads it every cycle and sends each row once per process. The
-compose mount comes in a later slice.
+`ts_is_read_time`. The agent reads it every cycle and sends each row once per process.
 
 ## Journal watching
 
@@ -110,7 +108,7 @@ not repeat entries. A table of patterns maps message text to the kinds
 wins and unmatched lines give no events. The dedup key is `journal:<cursor>`.
 A missing directory, a missing `journalctl` binary or a failing run yields
 source `journal` unavailable with a reason. The first read with no saved cursor
-reads the whole journal. The agent reads it every cycle. The compose mount comes in a later slice.
+reads the whole journal. The agent reads it every cycle.
 
 ## Threshold events
 
@@ -161,7 +159,18 @@ Current (enforced): the hub binds to 127.0.0.1 by default, every endpoint
 except health requires the ingest bearer token compared in constant time, the
 container runs non-root with a read-only rootfs, all capabilities dropped, and
 `no-new-privileges`. The host `/sys` is mounted read-only. The host `/proc` is
-never mounted.
+never mounted. The Phase 2 event sources are read-only bind mounts and nothing
+else was widened (no privileged mode, no added capability, no writable host mount):
+
+| Host path | Container path | Config variable |
+|---|---|---|
+| `/var/log/journal` | `/host/journal` | `HOSTWATCH_JOURNAL` |
+| `/run/log/journal` | `/host/journal-volatile` | none yet; mounted for later use, the watcher reads only `HOSTWATCH_JOURNAL` |
+| `/sys/fs/pstore` | `/host/pstore` | `HOSTWATCH_PSTORE` |
+| `/var/lib/rasdaemon` | `/host/rasdaemon` | `HOSTWATCH_RASDAEMON_DB` (file `ras-mc_event.db`) |
+
+The image installs `journalctl` from the `systemd` package. Reading the journal
+may need the `systemd-journal` group, which is recorded in `UNVERIFIED.md`.
 
 Planned (Phase 3): user login with argon2 hashes, sessions, lockout, optional
 mTLS client certificates, scoped hashed API keys, and an audit log. The bind
