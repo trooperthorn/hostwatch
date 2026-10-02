@@ -6,7 +6,8 @@
 services:
   hostwatch:
     build: ..
-    image: hostwatch:0.1.0
+    # Pulls the CI-built image; "docker compose build" still builds locally.
+    image: ghcr.io/trooperthorn/hostwatch:edge
     container_name: hostwatch
     restart: unless-stopped
     network_mode: host

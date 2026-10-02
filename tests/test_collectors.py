@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 
 import httpx
 import pytest
@@ -24,6 +25,7 @@ def test_rapl_absent(fs):
     assert not ok and "no intel-rapl" in reason
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="intel-rapl:N paths contain a colon, which Windows file names cannot hold")
 def test_rapl_first_cycle_emits_nothing_then_watts(fs, monkeypatch):
     sysfs, procfs, w = fs
     z = "class/powercap/intel-rapl:0"
@@ -40,6 +42,7 @@ def test_rapl_first_cycle_emits_nothing_then_watts(fs, monkeypatch):
     assert s.value == 20.0 and s.unit == "W" and s.labels["domain"] == "package-0"
 
 
+@pytest.mark.skipif(sys.platform == "win32", reason="intel-rapl:N paths contain a colon, which Windows file names cannot hold")
 def test_rapl_counter_wrap(fs, monkeypatch):
     sysfs, procfs, w = fs
     z = "class/powercap/intel-rapl:0"
