@@ -14,14 +14,12 @@ them into the next batch, which then gets a new batch_id, because the hub may
 already have acknowledged the old id. A batch left with nothing is deleted.
 
 A batch the hub refuses with 400 or 422 can never succeed, so it moves to the
-dead_letters table with the status and no longer blocks the queue head. A batch
-that keeps failing with another non-network error is quarantined to the same
-table by the agent after a configurable number of consecutive failures, and
-counted separately.
+dead_letters table with the status and no longer blocks the queue head. No
+other hub answer moves a batch: a 5xx is the hub's problem, so the batch waits.
 
-Quarantined rows are never trimmed by the dead-letter cap, so a long outage
-cannot silently erase them. The consecutive-failure count of the head batch is
-stored in the counters table, so a restart does not reset it.
+A row whose payload cannot be decoded can never be sent either. It moves to
+dead_letters with status 0 and the decode error, is counted as undecodable, and
+the queue moves on. Quarantined rows are never trimmed by the dead-letter cap.
 
 A file that SQLite reports as not a database or as malformed is renamed to
 outbox.db.corrupt-<timestamp> together with any -wal, -shm or -journal sidecar,
@@ -54,7 +52,7 @@ CREATE TABLE IF NOT EXISTS batches (
 CREATE TABLE IF NOT EXISTS markers (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS dead_letters (
   id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, status INTEGER NOT NULL,
-  ts REAL NOT NULL, payload TEXT NOT NULL, quarantined INTEGER NOT NULL DEFAULT 0);
+  ts REAL NOT NULL, payload TEXT NOT NULL, quarantined INTEGER NOT NULL DEFAULT 0, error TEXT);
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 """
 
@@ -140,6 +138,9 @@ class Outbox:
             if "quarantined" not in cols:
                 with db:
                     db.execute("ALTER TABLE dead_letters ADD COLUMN quarantined INTEGER NOT NULL DEFAULT 0")
+            if "error" not in cols:
+                with db:
+                    db.execute("ALTER TABLE dead_letters ADD COLUMN error TEXT")
             db.execute("SELECT COUNT(*) FROM batches").fetchone()
         except sqlite3.DatabaseError:
             db.close()
@@ -207,19 +208,37 @@ class Outbox:
         row = self._db.execute("SELECT value FROM counters WHERE name=?", (name,)).fetchone()
         return row[0] if row else 0
 
+    def _move_undecodable(self, seq: int, batch_id: str, payload: str, exc: Exception) -> None:
+        """Move a row that cannot be decoded to dead_letters. The caller owns the
+        transaction."""
+        self._db.execute("INSERT INTO dead_letters (batch_id, status, ts, payload, quarantined, error) "
+                         "VALUES (?, 0, ?, ?, 1, ?)", (batch_id, time.time(), payload, f"{type(exc).__name__}: {exc}"[:500]))
+        self._db.execute("DELETE FROM batches WHERE seq=?", (seq,))
+        self._bump("undecodable", 1)
+        log.error("outbox row %s (batch %s) could not be decoded (%s); moved to the dead-letter table",
+                  seq, batch_id, exc)
+
     def _enforce_cap(self) -> None:
         while self._db.execute("SELECT COUNT(*) FROM batches").fetchone()[0] > self.max_batches:
-            seq, payload = self._db.execute(
-                "SELECT seq, payload FROM batches ORDER BY seq LIMIT 1").fetchone()
-            old = Batch.model_validate_json(payload)
+            seq, old_id, payload = self._db.execute(
+                "SELECT seq, batch_id, payload FROM batches ORDER BY seq LIMIT 1").fetchone()
+            try:
+                old = Batch.model_validate_json(payload)
+            except ValueError as exc:
+                self._move_undecodable(seq, old_id, payload, exc)
+                continue
             dropped = len(old.samples)
             if dropped:
                 self._bump("dropped_samples", dropped)
                 self._bump("dropped_since_drain", dropped)
-            nxt_seq, nxt_payload = self._db.execute(
-                "SELECT seq, payload FROM batches WHERE seq > ? ORDER BY seq LIMIT 1", (seq,)).fetchone()
+            nxt_seq, nxt_id, nxt_payload = self._db.execute(
+                "SELECT seq, batch_id, payload FROM batches WHERE seq > ? ORDER BY seq LIMIT 1", (seq,)).fetchone()
             if old.events:
-                nxt = Batch.model_validate_json(nxt_payload)
+                try:
+                    nxt = Batch.model_validate_json(nxt_payload)
+                except ValueError as exc:
+                    self._move_undecodable(nxt_seq, nxt_id, nxt_payload, exc)
+                    continue
                 nxt = nxt.model_copy(update={"events": [*old.events, *nxt.events],
                                              "batch_id": str(uuid.uuid4())})
                 self._db.execute("UPDATE batches SET batch_id=?, payload=? WHERE seq=?",
@@ -231,9 +250,19 @@ class Outbox:
             return self._db.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
 
     def peek(self) -> tuple[int, Batch] | None:
+        """The oldest decodable batch. A row that cannot be decoded is moved to
+        dead_letters on the way, so one bad row never blocks the ones behind it."""
         with self._lock:
-            row = self._db.execute("SELECT seq, payload FROM batches ORDER BY seq LIMIT 1").fetchone()
-        return (row[0], Batch.model_validate_json(row[1])) if row else None
+            while True:
+                row = self._db.execute(
+                    "SELECT seq, batch_id, payload FROM batches ORDER BY seq LIMIT 1").fetchone()
+                if row is None:
+                    return None
+                try:
+                    return row[0], Batch.model_validate_json(row[2])
+                except ValueError as exc:
+                    with self._db:
+                        self._move_undecodable(row[0], row[1], row[2], exc)
 
     def ack(self, seq: int) -> None:
         """Remove a delivered batch. Called only after a 2xx answer."""
@@ -261,22 +290,9 @@ class Outbox:
         else:
             log.error("hub refused batch %s with status %d; moved to the dead-letter table", row[0], status)
 
-    def head_failures(self, seq: int) -> int:
-        """Consecutive failures recorded for the head batch `seq`, 0 if the
-        recorded batch is a different one."""
+    def undecodable_total(self) -> int:
         with self._lock:
-            return self._counter("head_failures") if self._counter("head_seq") == seq else 0
-
-    def record_head_failure(self, seq: int) -> int:
-        with self._lock, self._db:
-            n = self.head_failures(seq) + 1
-            for name, value in (("head_seq", seq), ("head_failures", n)):
-                self._db.execute("INSERT OR REPLACE INTO counters (name, value) VALUES (?, ?)", (name, value))
-            return n
-
-    def clear_head_failures(self) -> None:
-        with self._lock, self._db:
-            self._db.execute("DELETE FROM counters WHERE name IN ('head_seq', 'head_failures')")
+            return self._counter("undecodable")
 
     def quarantined_total(self) -> int:
         with self._lock:

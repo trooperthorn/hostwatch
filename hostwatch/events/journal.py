@@ -491,6 +491,15 @@ class BackgroundJournal:
         except Exception as exc:  # the thread must always finish with a result
             result["error"] = f"{type(exc).__name__}: {exc}"
 
+    def rewind(self) -> None:
+        """Forget the worker in flight and its result. Called after a cycle
+        failed: the cursor staged by that cycle was discarded, so a worker that
+        started from the staged cursor would skip entries the failed cycle never
+        queued. The next read starts again from the last committed cursor. An
+        abandoned thread finishes into its own result and is ignored."""
+        self._thread = None
+        self._result = {}
+
     def read(self) -> tuple[SourceStatus, list[Event]]:
         events: list[Event] = []
         thread = self._thread

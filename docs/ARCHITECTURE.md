@@ -55,8 +55,10 @@ heartbeat into typed events stored in their own table.
 `hostwatch/events/boot.py` holds the heartbeat writer and the classifier. Each
 agent cycle atomically rewrites `heartbeat.json` in the data directory (temp
 file, fsync, rename) with the current `boot_id`, a timestamp, and
-`agent_stopped_cleanly: false`. On stop (SIGTERM) the agent writes the same file
-with the flag true and stops updating it. The flag says only that the agent
+`agent_stopped_cleanly: false`. On stop (SIGTERM) the signal handler only sets a stop flag and takes no lock,
+because the signal can arrive while a heartbeat write holds the heartbeat lock.
+The run loop writes the same file with the flag true on its way out and stops
+updating it. The flag says only that the agent
 stopped, because stopping the container is not a host shutdown. Heartbeats
 written with the old `clean_shutdown` name are still read.
 
@@ -174,7 +176,10 @@ stays available. The container needs the host `systemd-journal` group through
 (`BackgroundJournal`) with its own 60 second limit, so a slow journal never
 delays a sample cycle: each agent cycle collects the previous worker's result,
 parses it and starts the next read. Parsing and cursor staging stay on the
-agent thread so the cursor remains tied to the events it produced. The
+agent thread so the cursor remains tied to the events it produced. When a cycle
+fails after the journal read, the staged cursor is discarded and the background
+reader is rewound, so the next read starts from the last committed cursor and
+the same entries are read again and delivered once. The
 `ataN: SATA link up` message counts as a link reset only after a reset on the
 same port was seen, and RAID `[U_]` status needs an `mdN` or `md/raid` context.
 The cursor is a progress marker that commits
@@ -190,22 +195,19 @@ batch to the outbox and then tries to send from the oldest. A batch is removed
 only after the hub answers 2xx. The hub also deduplicates by `batch_id`, so a
 resend after a lost answer is harmless.
 
-- A network failure, a 5xx answer or any 4xx other than 400 and 422 leaves the
-  batch queued and is logged. The run loop then waits before the next delivery
-  attempt, doubling from the cycle interval up to five minutes, while cycles
-  keep collecting.
+- A network failure, any 5xx answer or any 4xx other than 400 and 422 leaves
+  the batch queued and is logged. A 5xx describes the hub, not the batch, so it
+  never dead-letters. The run loop then waits before the next delivery attempt,
+  doubling from the cycle interval up to five minutes, while cycles keep
+  collecting. The outbox source status reports how long delivery has been
+  stalled and how many batches are kept.
 - 400 and 422 can never succeed. The batch moves to the `dead_letters` table
   with the status (the last 1000 are kept), an error is logged, and the next
   batch is sent. The outbox source status names the count.
-- If the same head batch is answered with a non-network error (an HTTP status)
-  `HOSTWATCH_QUARANTINE_AFTER` times in a row (default 5), it is quarantined to
-  `dead_letters` with that status and delivery continues. 401 is never counted,
-  because a corrected token makes the batch deliverable. Network errors never
-  count. 408, 429, 502, 503 and 504 are never counted either, because they
-  describe an overloaded or unreachable hub or proxy, so an outage cannot move
-  the queue into `dead_letters`. The failure count is stored in the outbox and
-  survives a restart, and quarantined rows are exempt from the 1000-row trim.
-  The outbox source status reports the quarantined count.
+- A row whose payload cannot be decoded can never be sent. It moves to
+  `dead_letters` with status 0 and the decode error, is exempt from the
+  1000-row trim, and the queue moves on. The outbox source status reports the
+  count.
 - If SQLite reports `outbox.db` as not a database or malformed, it is renamed,
   with any `-wal`, `-shm` or `-journal` file, to `outbox.db.corrupt-<timestamp>`, an error is logged, and a fresh outbox is
   started. The outbox source status names the renamed file, because the queued

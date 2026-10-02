@@ -315,26 +315,7 @@ def test_422_dead_letters_the_batch(tmp_path):
     assert agent.outbox.depth() == 0 and agent.outbox.dead_letter_count() == 1
 
 
-def test_head_batch_answered_500_five_times_is_quarantined_and_the_next_delivers(tmp_path):
-    agent = Agent(make_cfg(tmp_path))
-    agent.outbox.enqueue(batch(1, events=[event("poison")]))
-    agent.outbox.enqueue(batch(2, events=[event("good")]))
-    status = lambda body: 500 if body["batch_id"] == "b1" else 200  # noqa: E731
-    for _ in range(4):
-        with pytest.raises(httpx.HTTPStatusError):
-            agent.flush(hub_client(status=status))
-    assert agent.outbox.depth() == 2
-    sent: list = []
-    agent.flush(hub_client(status=status, log=sent))  # fifth failure quarantines, then b2 goes
-    assert [b["batch_id"] for b in sent] == ["b1", "b2"]
-    assert agent.outbox.depth() == 0 and agent.outbox.dead_letter_count() == 1
-    row = sqlite3.connect(tmp_path / "data/outbox.db").execute("SELECT batch_id, status FROM dead_letters").fetchone()
-    assert row == ("b1", 500)
-    agent.collect_once()
-    assert "quarantined" in agent.status["outbox"].reason
-
-
-def test_network_errors_do_not_count_toward_quarantine(tmp_path):
+def test_network_errors_never_dead_letter(tmp_path):
     agent = Agent(make_cfg(tmp_path))
     agent.outbox.enqueue(batch(1))
     for _ in range(8):
@@ -427,30 +408,14 @@ def test_seed_and_flush_retries_back_off_and_recover(tmp_path):
     assert agent.outbox.depth() == 0 and agent._flush_failures == 0
 
 
-@pytest.mark.parametrize("code", [502, 503, 504, 408, 429, 401])
-def test_gateway_and_overload_statuses_never_quarantine(tmp_path, code):
+@pytest.mark.parametrize("code", [500, 501, 502, 503, 504, 408, 429, 401, 404])
+def test_hub_side_statuses_never_dead_letter(tmp_path, code):
     agent = Agent(make_cfg(tmp_path))
     agent.outbox.enqueue(batch(1))
     for _ in range(8):
         with pytest.raises(httpx.HTTPStatusError):
             agent.flush(hub_client(status=code))
     assert agent.outbox.depth() == 1 and agent.outbox.dead_letter_count() == 0
-
-
-def test_quarantine_count_survives_an_agent_restart(tmp_path):
-    cfg = make_cfg(tmp_path)
-    agent = Agent(cfg)
-    agent.outbox.enqueue(batch(1))
-    for _ in range(3):
-        with pytest.raises(httpx.HTTPStatusError):
-            agent.flush(hub_client(status=500))
-    agent.outbox.close()
-    again = Agent(cfg)
-    for _ in range(1):
-        with pytest.raises(httpx.HTTPStatusError):
-            again.flush(hub_client(status=500))
-    again.flush(hub_client(status=500))  # fifth failure overall
-    assert again.outbox.depth() == 0 and again.outbox.quarantined_total() == 1
 
 
 def test_quarantined_batches_are_not_trimmed_by_the_dead_letter_cap(tmp_path, monkeypatch):
@@ -588,3 +553,187 @@ def test_threshold_event_is_not_lost_when_the_cycle_fails_after_it_opened(tmp_pa
     kinds = [e.kind for e in agent.outbox.peek()[1].events]
     assert kinds.count("md.degraded") == 1
     assert real_collect is not None
+
+
+ENTRIES_FOR_REREAD = [
+    {"__CURSOR": "c1", "__REALTIME_TIMESTAMP": "1000000", "MESSAGE": "ata3: hard resetting link"},
+    {"__CURSOR": "c2", "__REALTIME_TIMESTAMP": "2000000", "MESSAGE": "md127: Disk failure on sdc"}]
+
+
+class AfterCursorReader:
+    """Serves entries after the cursor, like journalctl --after-cursor."""
+
+    def __init__(self, entries):
+        self.entries = entries
+
+    def __call__(self, directory, cursor):
+        start = [e["__CURSOR"] for e in self.entries].index(cursor) + 1 if cursor else 0
+        return [json.dumps(e) for e in self.entries[start:]]
+
+
+def _patch_client(monkeypatch):
+    import hostwatch.agent as agent_mod
+
+    real_client = httpx.Client
+    monkeypatch.setattr(agent_mod.httpx, "Client", lambda: real_client(
+        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))))
+
+
+def test_cycle_that_fails_after_the_journal_read_rereads_the_same_entries(tmp_path, monkeypatch):
+    from hostwatch.events.journal import BackgroundJournal
+
+    jdir = tmp_path / "journal"
+    jdir.mkdir()
+    (jdir / "system.journal").write_bytes(b"x")
+    agent = Agent(make_cfg(tmp_path, journal=jdir))
+    watcher = JournalWatcher(jdir, agent.cfg.data_dir, AfterCursorReader(ENTRIES_FOR_REREAD), markers=agent.outbox)
+    background = agent.journal = BackgroundJournal(watcher)
+    agent.event_sources = {"journal": background.read}
+    agent.detect()
+
+    def cycle_and_settle():
+        ok = agent.safe_cycle()
+        if background._thread is not None:
+            background._thread.join()
+        return ok
+
+    cycle_and_settle()  # starts the first worker
+    real_enqueue = agent.outbox.enqueue
+    state = {"fail": True}
+
+    def flaky(batch):
+        if state["fail"] and batch.events:
+            state["fail"] = False
+            raise RuntimeError("disk full")
+        real_enqueue(batch)
+
+    monkeypatch.setattr(agent.outbox, "enqueue", flaky)
+    assert cycle_and_settle() is False  # the cycle read the entries, then failed
+    assert agent.outbox.get("journal.cursor") is None
+    for _ in range(3):
+        assert cycle_and_settle() is True
+    sent: list = []
+    agent.flush(hub_client(log=sent))
+    keys = [e["dedup_key"] for b in sent for e in b["events"]]
+    assert keys == ["journal:c1", "journal:c2"]
+    assert agent.outbox.get("journal.cursor") == "c2"
+
+
+def test_thirty_minute_5xx_episode_keeps_every_batch_and_delivers_after_recovery(tmp_path, monkeypatch):
+    import hostwatch.agent as agent_mod
+
+    clock = {"t": 1000.0}
+    monkeypatch.setattr(agent_mod.time, "monotonic", lambda: clock["t"])
+    agent = Agent(make_cfg(tmp_path, interval_s=15.0))
+    agent.detect()
+    outage = hub_client(status=503)
+    mixed = hub_client(status=500)
+    n = 0
+    while clock["t"] < 1000.0 + 30 * 60:
+        agent.outbox.enqueue(batch(n, events=[event(f"e{n}")]))
+        n += 1
+        agent._try_flush(outage if n % 2 else mixed)
+        clock["t"] += 15.0
+    assert agent.outbox.depth() == n and agent.outbox.dead_letter_count() == 0
+    assert agent._next_flush - clock["t"] <= agent_mod.MAX_BACKOFF_S
+    agent.collect_once()
+    assert "stalled for 1" in agent.status["outbox"].reason
+    sent: list = []
+    clock["t"] = agent._next_flush
+    agent._try_flush(hub_client(log=sent))
+    assert [b["batch_id"] for b in sent] == [f"b{i}" for i in range(n)]
+    assert agent.outbox.depth() == 0 and agent._stall_since is None
+
+
+def test_corrupt_outbox_row_is_dead_lettered_and_later_rows_deliver(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    agent.outbox.enqueue(batch(1, events=[event("a")]))
+    agent.outbox.enqueue(batch(2, events=[event("b")]))
+    agent.outbox.enqueue(batch(3, events=[event("c")]))
+    db = sqlite3.connect(tmp_path / "data/outbox.db")
+    db.execute("UPDATE batches SET payload='{not json' WHERE batch_id='b1'")
+    db.commit()
+    db.close()
+    sent: list = []
+    agent.flush(hub_client(log=sent))
+    assert [b["batch_id"] for b in sent] == ["b2", "b3"]
+    assert agent.outbox.depth() == 0 and agent.outbox.dead_letter_count() == 1
+    row = sqlite3.connect(tmp_path / "data/outbox.db").execute(
+        "SELECT batch_id, status, error FROM dead_letters").fetchone()
+    assert row[0] == "b1" and row[1] == 0 and row[2]
+    agent.collect_once()
+    assert "could not be decoded" in agent.status["outbox"].reason
+
+
+def test_corrupt_row_at_the_overflow_edge_does_not_fail_enqueue(tmp_path):
+    box = Outbox(tmp_path / "data/o.db", max_batches=2)
+    box.enqueue(batch(1, samples=1))
+    box.enqueue(batch(2, events=[event("b")]))
+    db = sqlite3.connect(tmp_path / "data/o.db")
+    db.execute("UPDATE batches SET payload='garbage' WHERE batch_id='b1'")
+    db.commit()
+    db.close()
+    box.enqueue(batch(3))
+    assert box.undecodable_total() == 1 and box.depth() == 2
+
+
+def test_start_boot_check_raising_does_not_stop_the_loop(tmp_path, monkeypatch):
+    agent = Agent(make_cfg(tmp_path, interval_s=0.01))
+    cycles = []
+
+    def boom():
+        raise RuntimeError("classifier exploded")
+
+    monkeypatch.setattr(agent, "start_boot_check", boom)
+    real_cycle = agent.safe_cycle
+
+    def counting():
+        cycles.append(1)
+        if len(cycles) >= 2:
+            agent.stop()
+        return real_cycle()
+
+    monkeypatch.setattr(agent, "safe_cycle", counting)
+    _patch_client(monkeypatch)
+    monkeypatch.setattr(agent, "seed_thresholds", lambda c: (_ for _ in ()).throw(ValueError("bad page")))
+    agent.run()
+    assert len(cycles) == 2
+    assert agent.status["boot"].available is False
+    assert "unknown" in agent.status["boot"].reason and "classifier exploded" in agent.status["boot"].reason
+
+
+def test_unexpected_error_in_the_loop_body_is_logged_and_the_loop_continues(tmp_path, monkeypatch):
+    agent = Agent(make_cfg(tmp_path, interval_s=0.01))
+    calls = []
+
+    def flaky_seed(client):
+        calls.append(1)
+        if len(calls) == 1:
+            raise MemoryError("odd")
+        agent.stop()
+
+    monkeypatch.setattr(agent, "_try_seed", flaky_seed)
+    _patch_client(monkeypatch)
+    agent.run()
+    assert len(calls) == 2
+
+
+def test_sigterm_during_a_heartbeat_write_completes_shutdown_with_the_clean_flag(tmp_path, monkeypatch):
+    from hostwatch.events import boot
+
+    cfg = make_cfg(tmp_path, interval_s=0.01)
+    agent = Agent(cfg)
+    _patch_client(monkeypatch)
+    real_write = boot.Heartbeat._write
+    seen = {"signalled": False}
+
+    def write_with_signal(self, clean):
+        if not clean and not seen["signalled"]:
+            seen["signalled"] = True
+            agent.stop()  # what the SIGTERM handler does, while the heartbeat lock is held
+        real_write(self, clean)
+
+    monkeypatch.setattr(boot.Heartbeat, "_write", write_with_signal)
+    agent.run()  # a handler that took the heartbeat lock would deadlock here
+    assert seen["signalled"]
+    assert boot.load_heartbeat(cfg.data_dir)["agent_stopped_cleanly"] is True

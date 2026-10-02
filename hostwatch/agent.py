@@ -35,10 +35,6 @@ MAX_QUEUE = 240  # one hour at the default 15s interval
 PENDING_BOOT_MARKER = "boot.pending_events"
 PSTORE_SENT_MARKER = "pstore.sent_keys"
 DEAD_LETTER_STATUSES = {400, 422}
-# Statuses that describe an overloaded or unreachable hub or proxy, or a token
-# problem, rather than a batch the hub cannot process. They never count toward
-# quarantine, so an outage cannot move queued batches out of the delivery path.
-NEVER_QUARANTINE_STATUSES = {401, 408, 429, 502, 503, 504}
 MAX_BACKOFF_S = 300.0
 MAX_SEEN_KEYS = 10000
 
@@ -68,7 +64,7 @@ class Agent:
         self.thresholds = ThresholdEngine()
         self.journal_watcher = JournalWatcher(cfg.journal, cfg.data_dir, markers=self.outbox,
                                               volatile=cfg.journal_volatile)
-        journal = BackgroundJournal(self.journal_watcher)
+        journal = self.journal = BackgroundJournal(self.journal_watcher)
         rasdaemon = RasdaemonReader(cfg.rasdaemon_db, markers=self.outbox)
         self.event_sources: dict[str, EventSource] = {
             "pstore": self._read_pstore,
@@ -85,6 +81,9 @@ class Agent:
         self._next_seed = 0.0
         self._flush_failures = 0
         self._next_flush = 0.0
+        # Monotonic time of the first failed delivery of the current stall.
+        self._stall_since: float | None = None
+        self._stopped = threading.Event()
 
     @property
     def pending_events(self) -> list[Event]:
@@ -155,7 +154,12 @@ class Agent:
     def _try_seed(self, client: httpx.Client) -> None:
         if self.seeded or time.monotonic() < self._next_seed:
             return
-        if self.seed_thresholds(client):
+        try:
+            seeded = self.seed_thresholds(client)
+        except Exception as exc:  # a bad answer must not end the loop
+            log.warning("threshold seeding failed: %s: %s", type(exc).__name__, exc)
+            seeded = False
+        if seeded:
             log.info("threshold state seeded; threshold events are enabled")
             self.status.pop("thresholds", None)
             return
@@ -187,6 +191,25 @@ class Agent:
         while len(self._seen_keys) > MAX_SEEN_KEYS:
             del self._seen_keys[next(iter(self._seen_keys))]
         return events
+
+    def _guarded_boot_check(self) -> None:
+        """Run start_boot_check so a failure leaves the boot source unknown, with
+        the reason, and the loop running. The heartbeat is still started when the
+        boot id can be read, so the next start has something to compare."""
+        try:
+            self.start_boot_check()
+            return
+        except Exception as exc:
+            log.exception("boot check failed; the previous boot's end is unknown")
+            reason = f"boot classification failed, the previous boot's end is unknown: {type(exc).__name__}: {exc}"
+        try:
+            if self.heartbeat is None:
+                boot_id = boot.read_boot_id(self.cfg.procfs)
+                if boot_id is not None:
+                    self.heartbeat = boot.Heartbeat(self.cfg.data_dir, boot_id)
+        except Exception:
+            log.exception("heartbeat could not be started after the boot check failed")
+        self.status["boot"] = SourceStatus(source="boot", available=False, reason=reason)
 
     def start_boot_check(self) -> None:
         """Classify how the previous boot ended, once, then start the heartbeat.
@@ -291,10 +314,13 @@ class Agent:
             notes.append(f"outbox full: {dropped} sample(s) dropped since the queue last drained "
                          f"({self.outbox.dropped_total()} in total); events were kept")
         if dead:
-            notes.append(f"{dead} batch(es) refused by the hub are in the dead-letter table")
-        quarantined = self.outbox.quarantined_total()
-        if quarantined:
-            notes.append(f"{quarantined} batch(es) were quarantined after repeated delivery failures")
+            notes.append(f"{dead} batch(es) refused by the hub or undecodable are in the dead-letter table")
+        undecodable = self.outbox.undecodable_total()
+        if undecodable:
+            notes.append(f"{undecodable} outbox row(s) could not be decoded and were moved to the dead-letter table")
+        if self._stall_since is not None:
+            notes.append(f"delivery to the hub has stalled for {time.monotonic() - self._stall_since:.0f}s; "
+                         f"{self.outbox.depth()} batch(es) are queued and kept")
         if self.outbox.recovered_from is not None:
             notes.append(f"the outbox file was corrupt and was moved to {self.outbox.recovered_from.name}; "
                          "batches and progress markers in it were lost")
@@ -321,6 +347,7 @@ class Agent:
             # Threshold conditions opened by the failed cycle were never queued, so
             # forget them and let the next cycle emit them again.
             self.thresholds.state = threshold_state
+            self.journal.rewind()
             for key in self._cycle_keys:
                 self._seen_keys.pop(key, None)
             self.status["agent"] = SourceStatus(source="agent", available=False,
@@ -332,13 +359,8 @@ class Agent:
     def flush(self, client: httpx.Client) -> None:
         """Send queued batches oldest first. A batch leaves the outbox only after
         a 2xx answer. A 400 or 422 can never succeed and is dead-lettered so the
-        head is not blocked. Any other failure raises and the batch stays queued.
-        If the hub keeps answering the same head batch with a non-network error
-        (other than the statuses in NEVER_QUARANTINE_STATUSES, which describe a
-        token or an overloaded or unreachable hub or proxy and not a bad batch)
-        for `quarantine_after` consecutive attempts, counted in the outbox so a
-        restart does not reset it, the batch is quarantined to the dead-letter table
-        with that status and delivery continues with the next one."""
+        head is not blocked. Any other failure, including every 5xx, raises and
+        the batch stays queued: those describe the hub, not the batch."""
         while (head := self.outbox.peek()) is not None:
             seq, batch = head
             r = client.post(f"{self.cfg.hub_url}/internal/v1/ingest", content=batch.model_dump_json(),
@@ -348,15 +370,8 @@ class Agent:
                 self.outbox.dead_letter(seq, r.status_code)
                 continue
             if r.is_success:
-                self.outbox.clear_head_failures()
                 self.outbox.ack(seq)
                 continue
-            if r.status_code not in NEVER_QUARANTINE_STATUSES:
-                failures = self.outbox.record_head_failure(seq)
-                if failures >= self.cfg.quarantine_after:
-                    self.outbox.dead_letter(seq, r.status_code, quarantine=True)
-                    self.outbox.clear_head_failures()
-                    continue
             raise httpx.HTTPStatusError(f"hub answered {r.status_code}", request=r.request, response=r)
 
     def _try_flush(self, client: httpx.Client) -> None:
@@ -366,23 +381,34 @@ class Agent:
             self.flush(client)
         except Exception as exc:
             self._flush_failures += 1
+            if self._stall_since is None:
+                self._stall_since = time.monotonic()
             wait = self._backoff(self._flush_failures)
             self._next_flush = time.monotonic() + wait
             log.warning("delivery failed (%s); %d batch(es) queued, next attempt in %.0fs", exc,
                         self.outbox.depth(), wait)
         else:
             self._flush_failures, self._next_flush = 0, 0.0
+            self._stall_since = None
 
     def run(self) -> None:
-        self.detect()
-        self.start_boot_check()
-        with httpx.Client() as client:
-            while not self._stop.is_set():
-                started = time.monotonic()
-                self._try_seed(client)
-                self.safe_cycle()
-                self._try_flush(client)
-                self._stop.wait(max(0.0, self.cfg.interval_s - (time.monotonic() - started)))
+        """The loop. It writes the clean-shutdown flag itself when it exits, so a
+        signal handler only has to call stop()."""
+        try:
+            self.detect()
+            self._guarded_boot_check()
+            with httpx.Client() as client:
+                while not self._stop.is_set():
+                    started = time.monotonic()
+                    try:
+                        self._try_seed(client)
+                        self.safe_cycle()
+                        self._try_flush(client)
+                    except Exception:  # last resort: nothing may end the loop
+                        log.exception("unexpected error in the agent loop; continuing")
+                    self._stop.wait(max(0.0, self.cfg.interval_s - (time.monotonic() - started)))
+        finally:
+            self.finish()
 
     def _beat(self) -> None:
         if self.heartbeat is None:
@@ -390,7 +416,7 @@ class Agent:
         try:
             self.heartbeat.beat()
             current = self.status.get("boot")
-            if current is not None and not current.available:
+            if current is not None and not current.available and current.reason.startswith("heartbeat write failed"):
                 self.status["boot"] = SourceStatus(source="boot", available=True, reason="")
         except OSError as exc:
             log.warning("heartbeat write failed: %s", exc)
@@ -398,10 +424,23 @@ class Agent:
                                                reason=f"heartbeat write failed: {exc}")
 
     def stop(self) -> None:
-        """Stop the loop and record an orderly shutdown in the heartbeat."""
+        """Ask the loop to end. Safe in a signal handler: it only sets a flag and
+        takes no lock. The run loop writes the clean flag on its way out."""
         self._stop.set()
-        if self.heartbeat is not None:
-            try:
-                self.heartbeat.mark_clean()
-            except OSError as exc:
-                log.warning("clean-shutdown heartbeat failed: %s", exc)
+
+    def finish(self) -> None:
+        """Record an orderly shutdown in the heartbeat, then release waiters."""
+        try:
+            if self.heartbeat is not None:
+                try:
+                    self.heartbeat.mark_clean()
+                except OSError as exc:
+                    log.warning("clean-shutdown heartbeat failed: %s", exc)
+        finally:
+            self._stopped.set()
+
+    def stop_and_wait(self, timeout: float = 15.0) -> bool:
+        """Stop and wait for the run loop to finish, for callers that are not a
+        signal handler (the hub shutdown hook)."""
+        self.stop()
+        return self._stopped.wait(timeout)

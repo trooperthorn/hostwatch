@@ -41,6 +41,7 @@ def main() -> int:
 
     if cfg.role == "agent":
         agent = Agent(cfg)
+        # The handler only sets a flag; the run loop writes the clean flag on exit.
         signal.signal(signal.SIGTERM, lambda *_: agent.stop())
         agent.run()
         return 0
@@ -55,7 +56,7 @@ def main() -> int:
     thread = threading.Thread(target=agent.run, name="agent", daemon=True) if agent else None
     app = create_app(cfg, store,
                      on_start=thread.start if thread else None,
-                     on_stop=agent.stop if agent else None)
+                     on_stop=agent.stop_and_wait if agent else None)
     uvicorn.run(app, host=cfg.hub_bind, port=cfg.hub_port, log_level="info")
     return 0
 

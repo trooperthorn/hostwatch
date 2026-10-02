@@ -309,7 +309,9 @@ def test_agent_stop_marks_clean(tmp_path):
     cfg = make_cfg(tmp_path)
     agent = start(cfg)
     agent.heartbeat.beat()
-    agent.stop()
+    agent.stop()  # only sets the flag
+    assert boot.load_heartbeat(cfg.data_dir)["agent_stopped_cleanly"] is False
+    agent.finish()  # what the run loop does on its way out
     assert boot.load_heartbeat(cfg.data_dir)["agent_stopped_cleanly"] is True
 
 
