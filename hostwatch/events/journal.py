@@ -115,12 +115,25 @@ SHUTDOWN_PATTERN = re.compile(
     r"systemd-shutdown\[1\]|Shutting down\.", re.IGNORECASE)
 
 
-def default_previous_boot_reader(directory: Path) -> Iterable[str]:
-    """Run journalctl read-only for the last 200 entries of the previous boot."""
+def normalize_boot_id(boot_id: str) -> str:
+    """Return the boot id as 32 lowercase hex characters, or raise ReaderError.
+    The id is validated before it reaches the journalctl command line."""
+    flat = str(boot_id).replace("-", "").lower()
+    if not re.fullmatch(r"[0-9a-f]{32}", flat):
+        raise ReaderError("the previous heartbeat's boot id is not 32 hex characters")
+    return flat
+
+
+def default_previous_boot_reader(directory: Path, boot_id: str) -> Iterable[str]:
+    """Run journalctl read-only for the last 200 entries of the boot with the
+    given id (the previous heartbeat's boot id), not whichever boot journalctl
+    numbers as -1. An id the journal does not hold gives no output, which the
+    caller reports as unavailable."""
+    flat = normalize_boot_id(boot_id)
     exe = shutil.which("journalctl")
     if exe is None:
         raise ReaderError("journalctl is not installed")
-    return _run_journalctl(exe, directory, ["-b", "-1", "-n", str(PREVIOUS_BOOT_LINES)])
+    return _run_journalctl(exe, directory, [f"_BOOT_ID={flat}", "-n", str(PREVIOUS_BOOT_LINES)])
 
 
 def previous_boot_hints(lines: Iterable[str]) -> dict[str, bool]:
@@ -187,7 +200,7 @@ class JournalWatcher:
     def __init__(self, directory: Path, data_dir: Path, reader: Reader | None = None,
                  markers: Markers | None = None, volatile: Path | None = None,
                  has_files: Callable[[Path], bool] = has_journal_files,
-                 previous_boot_reader: Callable[[Path], Iterable[str]] | None = None) -> None:
+                 previous_boot_reader: Callable[[Path, str], Iterable[str]] | None = None) -> None:
         """With markers (the agent outbox), the cursor is staged and becomes
         durable together with the batch that carries the events read. Without
         markers the cursor is saved to a file at once, for standalone use."""
@@ -200,11 +213,15 @@ class JournalWatcher:
         self._reset_ports: set[str] = set()
         self.previous_boot_reader = previous_boot_reader or default_previous_boot_reader
 
-    def previous_boot(self) -> dict[str, bool]:
+    def previous_boot(self, boot_id: str) -> dict[str, bool]:
         """Hints from the previous boot's last entries, read through the same
         directory choice as the live read. Raises ReaderError with the reason
         when the previous boot's journal cannot be read."""
-        return previous_boot_hints(self.previous_boot_reader(self.choose_directory()))
+        directory = self.choose_directory()
+        try:
+            return previous_boot_hints(self.previous_boot_reader(directory, boot_id))
+        except ReaderError as exc:
+            raise ReaderError(f"boot {boot_id}: {exc}") from exc
 
     def load_cursor(self) -> str | None:
         if self.markers is not None:

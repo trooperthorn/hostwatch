@@ -167,14 +167,16 @@ class Agent:
                                                reason=f"cannot read {self.cfg.procfs / boot.BOOT_ID_REL}")
             return
         previous = boot.load_heartbeat(self.cfg.data_dir)
-        pstore = boot.pstore_evidence(self.cfg.sysfs / "fs/pstore",
-                                      previous.get("ts") if previous else None)
+        classified = boot.load_classified(self.cfg.data_dir)
+        start = previous.get("first_ts") if previous else None
+        pstore = boot.pstore_evidence(self.cfg.pstore, start if isinstance(start, (int, float)) else None,
+                                      previous.get("ts") if previous else None, classified)
         hints: dict[str, bool] = {}
         journal_unavailable: str | None = None
         bootstatus = boot.read_bootstatus(self.cfg.sysfs)
         if previous is not None and previous.get("boot_id") != boot_id:
             try:
-                hints = self.journal_watcher.previous_boot()
+                hints = self.journal_watcher.previous_boot(previous["boot_id"])
             except ReaderError as exc:
                 journal_unavailable = str(exc)
         result = boot.classify(previous, boot_id, pstore, hints, journal_unavailable=journal_unavailable,
@@ -182,6 +184,11 @@ class Agent:
         if result is not None:
             self._stage_pending([*self.pending_events, boot.boot_event(result)])
             self.outbox.commit_staged()
+            if pstore.get("fresh_keys"):
+                try:
+                    boot.save_classified(self.cfg.data_dir, classified | set(pstore["fresh_keys"]))
+                except OSError as exc:
+                    log.warning("cannot record classified pstore records: %s", exc)
             log.info("boot classified as %s", result.kind)
         self.heartbeat = boot.Heartbeat(self.cfg.data_dir, boot_id)
         self.status["boot"] = SourceStatus(source="boot", available=True, reason="")

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import os
 import time
@@ -21,7 +22,7 @@ def make_cfg(tmp_path, boot_id=NEW):
     sysfs.mkdir()
     data.mkdir()
     return Config(procfs=procfs, sysfs=sysfs, data_dir=data, ingest_token="x" * 32, host_name="h",
-                  journal=tmp_path / "journal", journal_volatile=tmp_path / "journal-volatile")
+                  journal=tmp_path / "journal", journal_volatile=tmp_path / "journal-volatile", pstore=tmp_path / "pstore")
 
 
 def write_hb(cfg, boot_id=OLD, clean=False, ts=1000.0):
@@ -71,8 +72,8 @@ def test_old_flag_name_in_existing_heartbeat_is_still_read(tmp_path):
 def test_stale_heartbeat_with_pstore_gives_kernel_panic(tmp_path):
     cfg = make_cfg(tmp_path)
     write_hb(cfg)
-    (cfg.sysfs / "fs/pstore").mkdir(parents=True)
-    (cfg.sysfs / "fs/pstore/dmesg-efi-1").write_text("Kernel panic")
+    (cfg.pstore).mkdir(parents=True)
+    (cfg.pstore / "dmesg-efi-1").write_text("Kernel panic")
     (ev,) = start(cfg).pending_events
     assert ev.kind == "boot.kernel_panic"
     assert ev.detail["pstore_fresh"] == ["dmesg-efi-1"]
@@ -82,7 +83,7 @@ def test_stale_pstore_record_is_not_evidence(tmp_path):
     cfg = make_cfg(tmp_path)
     hb_ts = time.time() - 3600
     write_hb(cfg, ts=hb_ts)
-    rec = cfg.sysfs / "fs/pstore/dmesg-efi-0"
+    rec = cfg.pstore / "dmesg-efi-0"
     rec.parent.mkdir(parents=True)
     rec.write_text("Kernel panic - not syncing")
     old = hb_ts - 86400
@@ -129,7 +130,7 @@ def test_heartbeat_failure_then_success_recovers_boot_source(tmp_path, monkeypat
 def test_empty_pstore_is_not_evidence(tmp_path):
     cfg = make_cfg(tmp_path)
     write_hb(cfg)
-    (cfg.sysfs / "fs/pstore").mkdir(parents=True)
+    (cfg.pstore).mkdir(parents=True)
     (ev,) = start(cfg).pending_events
     assert ev.kind == "boot.unknown"
 
@@ -166,8 +167,8 @@ def with_prev_journal(cfg, agent_lines):
     (cfg.journal / "system.journal").write_bytes(b"x")
     seen = []
 
-    def reader(directory):
-        seen.append(directory)
+    def reader(directory, boot_id):
+        seen.append((directory, boot_id))
         if isinstance(agent_lines, Exception):
             raise agent_lines
         return agent_lines
@@ -258,8 +259,10 @@ def test_default_previous_boot_reader_command_is_read_only(monkeypatch, tmp_path
     class Done:
         returncode, stdout, stderr = 0, "{}\n", ""
     monkeypatch.setattr(journal.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or Done())
-    journal.default_previous_boot_reader(tmp_path)
-    assert calls[0][1:] == [f"--directory={tmp_path}", "-o", "json", "--no-pager", "-b", "-1", "-n", "200"]
+    journal.default_previous_boot_reader(tmp_path, OLD)
+    assert calls[0][1:] == [f"--directory={tmp_path}", "-o", "json", "--no-pager",
+                            "_BOOT_ID=" + OLD.replace("-", ""), "-n", "200"]
+    assert "-b" not in calls[0]
 
 
 def test_missing_heartbeat_first_run_is_unknown_not_a_guess(tmp_path):
@@ -330,3 +333,102 @@ def test_boot_event_row_in_hub_store_has_boot_id_and_previous_heartbeat_ts(tmp_p
     (row,) = store.events(host="h")
     assert row["boot_id"] == NEW
     assert row["ts"] == 1234.5
+
+
+def test_custom_pstore_root_with_fresh_panic_record_gives_kernel_panic(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg = dataclasses.replace(cfg, pstore=tmp_path / "custom-pstore")
+    write_hb(cfg, ts=2000.0)
+    hb = json.loads((cfg.data_dir / boot.HEARTBEAT_FILE).read_text())
+    hb["first_ts"] = 1000.0
+    (cfg.data_dir / boot.HEARTBEAT_FILE).write_text(json.dumps(hb))
+    cfg.pstore.mkdir()
+    rec = cfg.pstore / "dmesg-efi-7"
+    rec.write_text("Kernel panic - not syncing")
+    os.utime(rec, (1500.0, 1500.0))
+    # The sysfs location must not be consulted.
+    (cfg.sysfs / "fs/pstore").mkdir(parents=True)
+    (ev,) = start(cfg).pending_events
+    assert ev.kind == "boot.kernel_panic"
+    assert ev.detail["pstore_fresh"] == ["dmesg-efi-7"]
+
+
+def test_previous_boot_journal_uses_heartbeat_boot_id_not_minus_one(tmp_path, monkeypatch):
+    from hostwatch.events import journal
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg, clean=True)
+    cfg.journal.mkdir()
+    (cfg.journal / "system.journal").write_bytes(b"x")
+    other = "cccccccc0000000000000000000000cc"
+    # A fake journal in which -b -1 is a different boot than the heartbeat's.
+    by_boot = {OLD.replace("-", ""): [jline(1, "Reached target shutdown.target - System Shutdown.")],
+               other: [jline(2, "eth0: link up")]}
+    monkeypatch.setattr(journal.shutil, "which", lambda name: "/usr/bin/journalctl")
+
+    class Done:
+        returncode, stderr = 0, ""
+
+        def __init__(self, out):
+            self.stdout = "\n".join(out)
+
+    def run(cmd, **kw):
+        assert "-b" not in cmd
+        match = [a for a in cmd if a.startswith("_BOOT_ID=")]
+        return Done(by_boot.get(match[0].split("=", 1)[1], []))
+    monkeypatch.setattr(journal.subprocess, "run", run)
+    agent = Agent(cfg)
+    agent.start_boot_check()
+    (ev,) = agent.pending_events
+    assert ev.kind == "boot.clean_shutdown"
+
+
+def test_previous_boot_missing_from_journal_is_unavailable_with_reason(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg)
+    agent = with_prev_journal(cfg, [])
+    agent.start_boot_check()
+    (ev,) = agent.pending_events
+    assert OLD in ev.detail["journal_previous_boot"]
+    assert ev.detail["journal_hints"] == {}
+
+
+def test_invalid_boot_id_is_rejected_before_journalctl(tmp_path):
+    import pytest
+    from hostwatch.events import journal
+    with pytest.raises(ReaderError):
+        journal.default_previous_boot_reader(tmp_path, "x; rm -rf /")
+
+
+def test_pstore_record_older_than_previous_boot_start_is_stale_despite_skew(tmp_path):
+    cfg = make_cfg(tmp_path)
+    # Short boot: began at 1000, last heartbeat at 1030. The record is from 990,
+    # inside the 60 s skew of the last heartbeat but before this boot began.
+    (cfg.data_dir / boot.HEARTBEAT_FILE).write_text(
+        json.dumps({"boot_id": OLD, "ts": 1030.0, "first_ts": 1000.0, "agent_stopped_cleanly": False}))
+    cfg.pstore.mkdir()
+    rec = cfg.pstore / "dmesg-efi-0"
+    rec.write_text("Kernel panic - not syncing")
+    os.utime(rec, (990.0, 990.0))
+    (ev,) = start(cfg).pending_events
+    assert ev.kind == "boot.unknown"
+    assert ev.detail["pstore_stale"] == ["dmesg-efi-0"]
+
+
+def test_pstore_record_already_classified_in_earlier_boot_is_stale(tmp_path):
+    cfg = make_cfg(tmp_path)
+    cfg.pstore.mkdir()
+    rec = cfg.pstore / "dmesg-efi-0"
+    rec.write_text("Kernel panic - not syncing")
+    os.utime(rec, (1500.0, 1500.0))
+    (cfg.data_dir / boot.HEARTBEAT_FILE).write_text(
+        json.dumps({"boot_id": OLD, "ts": 2000.0, "first_ts": 1000.0, "agent_stopped_cleanly": False}))
+    (ev,) = start(cfg).pending_events
+    assert ev.kind == "boot.kernel_panic"
+    # The next boot sees the same file still present (pstore not cleared).
+    mid = "dddddddd-0000-0000-0000-000000000004"
+    (cfg.procfs / "sys/kernel/random/boot_id").write_text(mid + "\n")
+    (cfg.data_dir / boot.HEARTBEAT_FILE).write_text(
+        json.dumps({"boot_id": NEW, "ts": 3000.0, "first_ts": 1400.0, "agent_stopped_cleanly": False}))
+    (ev2,) = start(cfg).pending_events[-1:]
+    assert ev2.kind == "boot.unknown"
+    assert ev2.detail["pstore_stale"] == ["dmesg-efi-0"]

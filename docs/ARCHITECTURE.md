@@ -65,11 +65,11 @@ if it differs from the previous heartbeat, `classify` returns one of
 `clean_shutdown` (flag set and journal evidence of a host shutdown from the
 previous boot), `kernel_panic` (a fresh pstore record), `agent_stopped` (flag
 set, no host shutdown evidence), `watchdog_reset`, `unknown_unclean`, or `unknown`.
-Only pstore records whose mtime is later than the previous heartbeat time minus
-60 seconds count as evidence; older ones are listed in `detail.pstore_stale`. A
+Only pstore records read from the configured `HOSTWATCH_PSTORE` root (the same root pstore ingestion uses) whose mtime is later than the previous boot's start (`first_ts` in the heartbeat, the earliest heartbeat time for that boot id) and that no earlier boot event counted (`pstore_classified.json`) count as evidence. A heartbeat without `first_ts` falls back to the last heartbeat time minus
+60 seconds; older ones are listed in `detail.pstore_stale`. A
 pstore directory that cannot be read is reported in `detail.pstore` as
 unavailable, never as no records. A missing or malformed heartbeat gives
-`unknown`. The journal hints come from `journalctl --directory=<dir> -b -1 -n 200 -o json`,
+`unknown`. The journal hints come from `journalctl --directory=<dir> _BOOT_ID=<32 hex of the heartbeat's boot id> -n 200 -o json` (not `-b -1`, which may be another boot; an invalid id or an id absent from the journal makes the hint source unavailable with a reason),
 run through `JournalWatcher.previous_boot` with a pluggable reader (a callable taking
 the directory), only when the boot_id changed. A shutdown target or "Journal stopped"
 message gives `host_shutdown`, a watchdog message gives `watchdog`, and entries with no

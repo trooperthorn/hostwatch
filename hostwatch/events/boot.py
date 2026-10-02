@@ -55,29 +55,61 @@ def read_boot_id(procfs: Path) -> str | None:
     return value or None
 
 
-def pstore_evidence(pstore_dir: Path, since_ts: float | None) -> dict[str, Any]:
+def pstore_evidence(pstore_dir: Path, boot_start_ts: float | None, since_ts: float | None = None,
+                    already_classified: set[str] | None = None) -> dict[str, Any]:
     """Split pstore records into fresh and stale. A record is fresh only when its
-    mtime is later than since_ts (the previous heartbeat) minus PSTORE_SKEW_S;
-    older records predate the previous boot's last sign of life and cannot be
-    evidence of how it ended. An unreadable directory is reported as
-    unavailable, never as no records."""
+    mtime is later than boot_start_ts (when the previous boot began) and it was
+    not counted in an earlier boot event (already_classified holds
+    "name:mtime" keys). A record from before the previous boot began cannot
+    say how that boot ended, even if it is close to the last heartbeat of a short
+    boot. When the start is unknown (heartbeat from an older agent), the old rule
+    applies as a fallback: later than since_ts minus PSTORE_SKEW_S. An unreadable
+    directory is reported as unavailable, never as no records."""
     try:
         entries = sorted(pstore_dir.iterdir())
     except OSError as exc:
         return {"unavailable": f"pstore unavailable: cannot read {pstore_dir}: {exc}",
-                "fresh": [], "stale": []}
+                "fresh": [], "stale": [], "fresh_keys": []}
+    done = already_classified or set()
     fresh: list[str] = []
     stale: list[str] = []
+    keys: list[str] = []
     for path in entries:
         try:
             mtime = path.lstat().st_mtime
         except OSError:
             continue
-        if since_ts is None or mtime > since_ts - PSTORE_SKEW_S:
+        key = f"{path.name}:{mtime!r}"
+        if boot_start_ts is not None:
+            is_fresh = mtime > boot_start_ts
+        else:
+            is_fresh = since_ts is None or mtime > since_ts - PSTORE_SKEW_S
+        if is_fresh and key not in done:
             fresh.append(path.name)
+            keys.append(key)
         else:
             stale.append(path.name)
-    return {"unavailable": None, "fresh": fresh, "stale": stale}
+    return {"unavailable": None, "fresh": fresh, "stale": stale, "fresh_keys": keys}
+
+
+CLASSIFIED_FILE = "pstore_classified.json"
+MAX_CLASSIFIED = 500
+
+
+def load_classified(data_dir: Path) -> set[str]:
+    """Pstore record keys already counted in an earlier boot event."""
+    try:
+        raw = json.loads((data_dir / CLASSIFIED_FILE).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return set()
+    return {k for k in raw if isinstance(k, str)} if isinstance(raw, list) else set()
+
+
+def save_classified(data_dir: Path, keys: set[str]) -> None:
+    data_dir.mkdir(parents=True, exist_ok=True)
+    tmp = data_dir / (CLASSIFIED_FILE + ".tmp")
+    tmp.write_text(json.dumps(sorted(keys)[-MAX_CLASSIFIED:]), encoding="utf-8")
+    os.replace(tmp, data_dir / CLASSIFIED_FILE)
 
 
 WATCHDOG_BOOTSTATUS_REL = "class/watchdog/watchdog0/bootstatus"
@@ -108,9 +140,15 @@ class Heartbeat:
         self.boot_id = boot_id
         self._lock = threading.Lock()
         self._clean = False
+        # The earliest heartbeat time seen for this boot_id, kept across agent
+        # restarts inside the same boot. It is the best available boot start.
+        previous = load_heartbeat(data_dir)
+        first = previous.get("first_ts", previous.get("ts")) if previous and previous.get("boot_id") == boot_id else None
+        self.first_ts = float(first) if isinstance(first, (int, float)) else time.time()
 
     def _write(self, clean: bool) -> None:
-        payload = {"boot_id": self.boot_id, "ts": time.time(), "agent_stopped_cleanly": clean}
+        payload = {"boot_id": self.boot_id, "ts": time.time(), "first_ts": self.first_ts,
+                   "agent_stopped_cleanly": clean}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + ".tmp")
         with open(tmp, "w", encoding="utf-8") as fh:
