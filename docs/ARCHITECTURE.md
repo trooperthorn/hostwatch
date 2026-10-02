@@ -341,7 +341,7 @@ zero; `hostwatch_source_up` is 0 for a source that is unavailable or stale and
 carries that fact instead. Label values are escaped (backslash, double quote and
 newline). Nothing is stored by this layer.
 
-## MQTT client (Phase 4, in progress)
+## MQTT client (Phase 4)
 
 `hostwatch/integrations/mqtt_client.py` is the transport layer for the Home Assistant
 publisher. It is off unless `HOSTWATCH_MQTT_HOST` is set. `Config.validate` checks the
@@ -406,6 +406,11 @@ same event on the next tick. A crash between a publish and the cursor write send
 event again, so consumers should deduplicate by `id`. The first run starts at the newest stored
 event instead of replaying history. `HOSTWATCH_MQTT_EVENTS_INTERVAL` (seconds, default 10) sets
 the poll period.
+
+The Phase 4 exit test, `tests/test_phase4_exit.py`, runs the publisher and the Orion
+endpoints together against a fake broker. It shows the device and entities, a forced warning
+giving Orion status 1 and the problem sensor on, and recovery after a hub restart and a broker
+restart. It uses fakes only; the matching hardware checks are open in `UNVERIFIED.md`.
 
 ## Storage
 

@@ -28,6 +28,12 @@ SolarWinds Orion (API Poller). One image, three roles (`HOSTWATCH_ROLE=all|hub|a
   certificates, the loopback default bind as a deployment choice, and the CLI
   trust boundary (shell access to the data directory). **Not yet deployed or
   verified on real hardware**; see `UNVERIFIED.md`.
+- Phase 4 (integrations): code complete and unit-tested, including the exit
+  test in `tests/test_phase4_exit.py`. Home Assistant MQTT discovery and events
+  (off unless `HOSTWATCH_MQTT_HOST` is set), Orion API Poller endpoints and an
+  optional Prometheus `/metrics`, all behind `read:metrics` keys and the Phase 3
+  allowlist. **Not yet verified against a real broker, Home Assistant, Orion or
+  Prometheus**; see `UNVERIFIED.md`.
 - Next: deploy on MediaIn-SVR, confirm all six sources, run the 24h gap test,
   then run the four Phase 2 exit scenarios and the open Phase 3 checks.
 

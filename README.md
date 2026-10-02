@@ -239,7 +239,7 @@ known is shown by Home Assistant as unavailable, never as zero. Boot classificat
 hardware events (pstore, rasdaemon, threshold and journal) go to `<base topic>/events` as
 non-retained JSON, once each, with a cursor kept in the database so a restart neither replays
 nor drops them; the first run starts at the newest existing event. Pool health arrives in a
-later Phase 4 slice.
+later release.
 
 ## Tests
 

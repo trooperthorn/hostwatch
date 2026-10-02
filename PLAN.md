@@ -63,6 +63,27 @@ Open items for Phase 3:
   aggregated per peer per minute, which bounds that one source of growth but not the
   log as a whole.
 
+## Phase 4 status
+
+Code complete and unit-tested; not yet verified on hardware. The exit test is
+`tests/test_phase4_exit.py`: with a fake broker and the hub under TestClient it
+checks that the Home Assistant device and entities appear, that a forced
+warning gives Orion status 1 and switches the problem sensor on, and that both
+survive a hub restart and a broker restart (with and without retained
+messages). Components and labels:
+
+| Component | Label |
+|---|---|
+| Home Assistant MQTT discovery, state, availability with last will, events topic | Enforced in code, tested against a fake transport only |
+| Orion API Poller endpoints under `/api/v1/orion` behind `read:metrics` | Enforced, tested; Orion behaviour is assumed |
+| Prometheus `/metrics`, off by default, behind `read:metrics` | Enforced, tested with a strict parser only |
+| MQTT credentials, TLS and password file; password never logged | Enforced, tested |
+
+Open hardware checks are listed in `UNVERIFIED.md`: a real broker (last will,
+reconnect, TLS), Home Assistant accepting the discovery payloads, an Orion API
+Poller alert on a forced warning, and a Prometheus scrape. The phase is not
+done until those pass on the listed hosts.
+
 ## Phase 0 detail
 
 Run on each host:
