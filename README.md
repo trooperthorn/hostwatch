@@ -14,7 +14,7 @@ Current phase: **1 (collector core)**. Phase 0 is complete on MediaIn-SVR.
 | `hostwatch/collectors/` | One module per source: `cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `scrutiny` |
 | `hostwatch/agent.py` | Detect, collect, push to hub; bounded queue while the hub is down |
 | `hostwatch/hub.py` | Internal ingest and read API (token-protected, loopback only in Phase 1) |
-| `hostwatch/store.py` | SQLite: raw samples, hourly rollups, source availability |
+| `hostwatch/store.py` | SQLite: raw samples, hourly rollups, source availability, versioned schema with an additive events table |
 | `scripts/host-prep.sh` | Phase 0 host check and fixes |
 | `scripts/rapl-access.sh` | Grant RAPL read access to a dedicated group (see its header for the security trade-off) |
 | `deploy/` | Compose file and `.env.example` |

@@ -39,13 +39,99 @@ CREATE TABLE IF NOT EXISTS agents (
 """
 
 
+# Schema versioning uses PRAGMA user_version. Phase 1 databases never set it, so
+# a database with user_version 0 is treated as version 1 once its Phase 1 tables
+# exist. Each migration step is additive: it only creates objects and is guarded
+# with IF NOT EXISTS so that running it twice changes nothing.
+SCHEMA_VERSION = 2
+
+MIGRATIONS: dict[int, tuple[str, ...]] = {
+    2: (
+        """CREATE TABLE IF NOT EXISTS events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, host TEXT NOT NULL, ts REAL NOT NULL,
+  kind TEXT NOT NULL, severity TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '{}', dedup_key TEXT NOT NULL, boot_id TEXT,
+  UNIQUE (host, dedup_key)
+)""",
+        "CREATE INDEX IF NOT EXISTS events_host_ts ON events(host, ts)",
+        "CREATE INDEX IF NOT EXISTS events_kind ON events(kind)",
+        """CREATE TABLE IF NOT EXISTS boot_state (
+  host TEXT PRIMARY KEY, boot_id TEXT, heartbeat_ts REAL NOT NULL, boot_ts REAL, clean_shutdown INTEGER
+)""",
+    ),
+}
+
+
+class SchemaTooNewError(RuntimeError):
+    """Raised when the database was written by a newer version of hostwatch."""
+
+
 class Store:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
         self._db = sqlite3.connect(path, check_same_thread=False)
         self._lock = threading.Lock()
         with self._lock:
+            version = self._db.execute("PRAGMA user_version").fetchone()[0]
+            if version > SCHEMA_VERSION:
+                self._db.close()
+                raise SchemaTooNewError(
+                    f"{path} has schema version {version} but this hostwatch supports up to "
+                    f"{SCHEMA_VERSION}. Upgrade hostwatch or restore an older database.")
             self._db.executescript(DDL)
+            self._migrate()
+
+    def _migrate(self) -> None:
+        """Apply numbered migration steps above the stored version, atomically."""
+        version = self._db.execute("PRAGMA user_version").fetchone()[0]
+        if version == 0:
+            version = 1  # Phase 1 tables were just ensured by DDL; adopt them as version 1.
+        for target in range(version + 1, SCHEMA_VERSION + 1):
+            self._db.execute("BEGIN")
+            try:
+                for stmt in MIGRATIONS[target]:
+                    self._db.execute(stmt)
+                self._db.execute(f"PRAGMA user_version = {target}")
+                self._db.execute("COMMIT")
+            except Exception:
+                self._db.execute("ROLLBACK")
+                raise
+            version = target
+
+    def add_events(self, host: str, events: list[dict]) -> int:
+        """Insert events, ignoring any whose (host, dedup_key) already exists. Returns rows inserted."""
+        rows = [(host, e["ts"], e["kind"], e["severity"], e["source"], e["title"],
+                 json.dumps(e.get("detail", {}), sort_keys=True), e["dedup_key"], e.get("boot_id"))
+                for e in events]
+        with self._lock, self._db:
+            before = self._db.total_changes
+            self._db.executemany(
+                "INSERT OR IGNORE INTO events (host, ts, kind, severity, source, title, detail, dedup_key, boot_id) "
+                "VALUES (?,?,?,?,?,?,?,?,?)", rows)
+            return self._db.total_changes - before
+
+    def events(self, host: str | None = None, since: float | None = None,
+               kind: str | None = None, limit: int = 100) -> list[dict]:
+        where, params = [], []
+        if host:
+            where.append("host = ?")
+            params.append(host)
+        if since is not None:
+            where.append("ts >= ?")
+            params.append(since)
+        if kind:
+            where.append("kind = ?")
+            params.append(kind)
+        sql = ("SELECT id, host, ts, kind, severity, source, title, detail, dedup_key, boot_id FROM events"
+               + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY ts DESC, id DESC LIMIT ?")
+        params.append(limit)
+        with self._lock:
+            cur = self._db.execute(sql, params)
+            cols = [c[0] for c in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            r["detail"] = json.loads(r["detail"])
+        return rows
 
     def ingest(self, batch: Batch) -> int:
         rows = [(s.ts, batch.host, s.source, s.metric, json.dumps(s.labels, sort_keys=True), s.value, s.unit)

@@ -45,6 +45,14 @@ rollups for `HOSTWATCH_ROLLUP_RETENTION_DAYS`, pruned by an hourly maintenance
 task in the hub. Schema changes must be additive, versioned, and migrated with
 guards, with a test that upgrades a database built by the previous version.
 
+The schema version is stored in `PRAGMA user_version`. Phase 1 databases never
+set it, so a database with version 0 is adopted as version 1. `Store._migrate()`
+applies numbered steps in a transaction, each created with `IF NOT EXISTS` so a
+repeat run changes nothing. Version 2 adds the `events` table (unique per host
+on `dedup_key`) and the `boot_state` heartbeat table; existing tables are never
+altered. If the stored version is newer than the code supports, the store
+refuses to start with `SchemaTooNewError` rather than risk damaging data.
+
 ## Security model
 
 Current (enforced): the hub binds to 127.0.0.1 by default, every endpoint
