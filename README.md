@@ -123,7 +123,9 @@ Each answers flat JSON with numeric values and a numeric status per group (0 ok,
 
 `overall_status` is at least 1 while any expected group is unmeasured (its source
 never reported, is unavailable or is stale); `overall_unmeasured` counts those
-groups. A host with no data at all reports `overall_status` 2 with the reason
+groups. A source that is absent by design (no md arrays on a ZFS host, no RAPL zone, no hwmon
+devices, no Scrutiny URL) is not unmeasured: its group reports `<group>_present` 0 and status 0 and
+raises no warning. An unreadable source is not absent and stays a warning. A host with no data at all reports `overall_status` 2 with the reason
 "no data". The `hosts` list keys each entry by a slug of the host name
 (`host_<slug>_name`, `host_<slug>_status`), so a new host never renames existing
 keys; names whose slugs collide get a short hash suffix. To monitor a host in
@@ -135,7 +137,8 @@ list only to discover host names and slugs.
 An optional Prometheus endpoint, `GET /metrics`, is off unless `HOSTWATCH_PROMETHEUS=1` is set
 (it answers 404 otherwise). When on, it needs a key with the `read:metrics` scope and returns the
 text exposition format. A value that is unavailable has no sample; the `hostwatch_source_up` gauge
-(1 or 0 per source) says whether it is being measured.
+(1 or 0 per source) says whether it is being measured, and the separate `hostwatch_source_present`
+gauge is 0 for a source the agent established is absent by design.
 
 Not yet present (later slices and phases): the remaining Home Assistant work.
 The read examples below that use the shared token answer 403; use a key with

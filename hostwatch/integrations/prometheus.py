@@ -79,6 +79,10 @@ def render(summaries: list[HostSummary]) -> str:
         for name, c in s.sources.items():
             fam.add("hostwatch_source_up", "1 when the source reports, 0 when it is unavailable or stale.",
                     {"host": h, "source": name}, 1 if c.value is not None else 0)
+        for name, c in s.sources.items():
+            fam.add("hostwatch_source_present",
+                    "0 when the agent established that the source is absent by design, otherwise 1.",
+                    {"host": h, "source": name}, 0 if c.state == "not_present" else 1)
         fam.add("hostwatch_host_status",
                 "Overall status: 0 ok, 1 warning (also while a group is unmeasured), 2 critical (also no data).",
                 {"host": h}, s.overall_status)

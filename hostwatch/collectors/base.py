@@ -32,6 +32,14 @@ class Collector:
     def collect(self) -> list[Sample]:
         raise NotImplementedError
 
+    def is_absent(self) -> bool:
+        """True only when the place this source would live was readable and shows it is not there.
+
+        Called by the agent after detect() fails. An unreadable or missing location is unavailable,
+        not absent, so the default is False and a collector must positively establish absence.
+        """
+        return False
+
     def sample(self, metric: str, value: float | None, unit: str = "", ts: float | None = None,
                **labels: str) -> Sample:
         return Sample(source=self.id, metric=metric, value=value, unit=unit,

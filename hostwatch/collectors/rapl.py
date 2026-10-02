@@ -30,6 +30,14 @@ class RaplCollector(Collector):
             return []
         return sorted(p for p in base.iterdir() if p.name.startswith("intel-rapl:"))
 
+    def is_absent(self) -> bool:
+        """Absent when the powercap directory is readable and holds no intel-rapl zone."""
+        base = self.sysfs / "class" / "powercap"
+        try:
+            return not any(p.name.startswith("intel-rapl:") for p in base.iterdir())
+        except OSError:
+            return False
+
     def detect(self) -> tuple[bool, str]:
         zones = self._zones()
         if not zones:

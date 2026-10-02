@@ -5,6 +5,10 @@ snake_case keys, numbers only (no nesting, no booleans), and a numeric status
 per field group where 0 is ok, 1 is warning and 2 is critical. This follows the
 owner's UniFi API Poller pattern; the assumptions are listed in UNVERIFIED.md.
 
+A group whose source is not present by design (see `HostSummary.not_present`) reports
+`<group>_present` 0, `<group>_available` 0, status 0 and the reason "not present". Unmeasured is
+not the same: that stays status 1.
+
 Unavailable values are never reported as zero. The value key is left out, the
 group carries `<group>_available` 0 and a `<group>_reason` text, and the group
 status is 1 (warning), the same rule the summary applies to an unavailable
@@ -18,7 +22,7 @@ from typing import Any
 
 from .homeassistant import slug as host_slug
 from .homeassistant import slug_hash
-from .summary import STATUS_WARNING, Component, HostSummary
+from .summary import STATUS_OK, STATUS_WARNING, Component, HostSummary
 
 GROUPS = ("cpu", "memory", "power", "temperatures", "raid", "pools", "disks", "sources")
 
@@ -45,14 +49,25 @@ def host_keys(hosts: list[str]) -> dict[str, str]:
     return keys
 
 
-def _group(doc: dict[str, Any], name: str, comps: list[Component]) -> None:
-    """Add `<name>_status`, `<name>_available` and, if nothing is known, `<name>_reason`."""
+def _group(doc: dict[str, Any], name: str, comps: list[Component], s: HostSummary | None = None) -> bool:
+    """Add `<name>_status`, `<name>_available` and, if nothing is known, `<name>_reason`.
+
+    Returns False when the group is not present on this host, in which case only the not-present
+    keys were written and the caller should add nothing else.
+    """
+    if s is not None and name in s.not_present:
+        doc[f"{name}_present"] = 0
+        doc[f"{name}_available"] = 0
+        doc[f"{name}_status"] = STATUS_OK
+        doc[f"{name}_reason"] = "not present"
+        return False
     known = [c.status for c in comps if c.status is not None]
     doc[f"{name}_available"] = 1 if known else 0
     doc[f"{name}_status"] = max(known) if known else STATUS_WARNING
     if not known:
         reasons = sorted({c.reason for c in comps if c.reason})
         doc[f"{name}_reason"] = "; ".join(reasons) if reasons else "no data reported"
+    return True
 
 
 def _item(doc: dict[str, Any], key: str, c: Component, value_key: str) -> None:
@@ -66,7 +81,8 @@ def _item(doc: dict[str, Any], key: str, c: Component, value_key: str) -> None:
 
 def _single(s: HostSummary, name: str, c: Component, value_key: str) -> dict[str, Any]:
     doc: dict[str, Any] = {"host": s.host}
-    _group(doc, name, [c])
+    if not _group(doc, name, [c], s):
+        return doc
     if c.value is not None and c.status is not None:
         doc[value_key] = c.value
     return doc
@@ -86,7 +102,8 @@ def power(s: HostSummary) -> dict[str, Any]:
 
 def temperatures(s: HostSummary) -> dict[str, Any]:
     doc: dict[str, Any] = {"host": s.host}
-    _group(doc, "temperatures", s.temperatures)
+    if not _group(doc, "temperatures", s.temperatures, s):
+        return doc
     for c in s.temperatures:
         if not c.labels:
             continue  # the placeholder for "no sensor reported" is covered by the group reason
@@ -99,7 +116,8 @@ def temperatures(s: HostSummary) -> dict[str, Any]:
 
 def raid(s: HostSummary) -> dict[str, Any]:
     doc: dict[str, Any] = {"host": s.host}
-    _group(doc, "raid", s.md_arrays)
+    if not _group(doc, "raid", s.md_arrays, s):
+        return doc
     for c in s.md_arrays:
         key = "md_" + slug(c.labels.get("array", ""))
         _item(doc, key, c, f"{key}_degraded_devices")
@@ -116,7 +134,8 @@ def pools(s: HostSummary) -> dict[str, Any]:
 
 def disks(s: HostSummary) -> dict[str, Any]:
     doc: dict[str, Any] = {"host": s.host}
-    _group(doc, "disks", s.disks)
+    if not _group(doc, "disks", s.disks, s):
+        return doc
     for c in s.disks:
         key = "disk_" + slug(c.labels.get("wwn") or c.labels.get("device", ""))
         _item(doc, key, c, f"{key}_device_status")
@@ -129,6 +148,10 @@ def sources(s: HostSummary) -> dict[str, Any]:
     for name, c in s.sources.items():
         key = "source_" + slug(name)
         doc[f"{key}_up"] = 1 if c.value is not None else 0
+        if c.state == "not_present":
+            doc[f"{key}_present"] = 0
+            doc[f"{key}_status"] = STATUS_OK
+            continue
         doc[f"{key}_status"] = c.status if c.status is not None else STATUS_WARNING
         if c.value is None and c.reason:
             doc[f"{key}_reason"] = c.reason
@@ -149,6 +172,8 @@ def summary_document(s: HostSummary) -> dict[str, Any]:
     doc["overall_available"] = 0 if s.status is None else 1
     doc["overall_status"] = s.overall_status
     doc["overall_unmeasured"] = len(s.unmeasured)
+    if s.not_present:
+        doc["overall_not_present"] = len(s.not_present)
     if s.overall_reason:
         doc["overall_reason"] = s.overall_reason
     if s.last_seen is not None:

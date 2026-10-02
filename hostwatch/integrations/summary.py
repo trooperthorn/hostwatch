@@ -10,6 +10,9 @@ Rules that follow the project contract:
   * A sample older than `STALE_AFTER_S` is stale and treated as unavailable.
   * A source the hub reports unavailable, or has not heard from for
     `STALE_AFTER_S`, makes every value that depends on it unavailable.
+  * A source the agent reports as not present (positively established absence, such as no md
+    arrays on a ZFS host) makes its group "not present": no warning, no values, no entities.
+    Unreadable is not absent; that stays unmeasured.
   * Status codes are 0 ok, 1 warning, 2 critical, from `status_for` only.
 """
 
@@ -88,6 +91,7 @@ class HostSummary:
     open_conditions: list[str]
     last_seen: float | None
     unmeasured: list[str] = field(default_factory=list)
+    not_present: list[str] = field(default_factory=list)
 
     def components(self) -> list[Component]:
         return [self.cpu, self.memory, self.package_power, *self.temperatures, *self.md_arrays,
@@ -140,9 +144,14 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
     # Source availability: the reported flag plus the age of the last report.
     blocked: dict[str, str] = {}
     sources: dict[str, Component] = {}
+    absent: set[str] = set()
     for name, r in sorted(src_rows.items()):
         age = now - r["updated"]
-        if not r["available"]:
+        if not r.get("present", 1) and not r["available"] and age <= STALE_AFTER_S:
+            absent.add(name)
+            sources[name] = Component(f"source.{name}", None, "", "not_present",
+                                      f"source {name} is not present on this host")
+        elif not r["available"]:
             blocked[name] = f"source {name} unavailable: {r['reason'] or 'no reason given'}"
             sources[name] = Component(f"source.{name}", None, "", "warning", blocked[name])
         elif age > STALE_AFTER_S:
@@ -159,6 +168,8 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
              labels: dict[str, str] | None = None) -> Component:
         """Build a component from the newest of `metric_rows`, or explain why not."""
         labels = labels or {}
+        if source in absent:
+            return Component(name, None, unit, "not_present", f"source {source} is not present on this host", labels)
         if source in blocked:
             return Component(name, None, unit, "unknown", blocked[source], labels)
         if source not in src_rows:
@@ -194,7 +205,7 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
     for r in pick("hwmon", "temp"):
         lab = {"chip": r["labels"].get("chip", ""), "sensor": r["labels"].get("sensor", "")}
         temps.append(comp(f"temp.{_label(lab)}", "hwmon", [r], "C", CPU_TEMP_C, lab))
-    if not temps:
+    if not temps and "hwmon" not in absent:
         temps.append(comp("temp", "hwmon", [], "C", CPU_TEMP_C))
 
     md: list[Component] = []
@@ -250,10 +261,16 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
     group_comps = {"cpu": [cpu], "memory": [memory], "power": [power], "temperatures": temps,
                    "raid": md, "disks": disks}
     unmeasured = []
+    not_present = []
     for group, source in EXPECTED_GROUPS.items():
+        if source in absent:
+            # Scrutiny disk temperatures can still populate temperatures when hwmon is absent.
+            if group != "temperatures" or not temps:
+                not_present.append(group)
+            continue
         src_ok = source in sources and source not in blocked
         comps = group_comps[group]
         if not src_ok or (comps and all(c.status is None for c in comps)):
             unmeasured.append(group)
     return HostSummary(host, now, cpu, memory, power, temps, md, disks, sources, problems,
-                       sorted(open_conditions), last_seen, unmeasured)
+                       sorted(open_conditions), last_seen, unmeasured, not_present)

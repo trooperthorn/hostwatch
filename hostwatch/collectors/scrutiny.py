@@ -30,6 +30,10 @@ class ScrutinyCollector(Collector):
         r.raise_for_status()
         return r.json()
 
+    def is_absent(self):
+        """Absent by configuration: no Scrutiny URL was set, so nothing is expected."""
+        return not self.url
+
     def detect(self):
         if not self.url:
             return False, "HOSTWATCH_SCRUTINY_URL not set"

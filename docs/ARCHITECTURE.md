@@ -336,6 +336,22 @@ not read as healthy. A host with no data at all has `overall_status` 2 and
 `overall_reason` "no data". Prometheus follows the same rule through
 `hostwatch_host_status` and `hostwatch_host_unmeasured_groups`.
 
+A source that is absent by design is not unmeasured. `SourceStatus` carries an optional
+`present` field that defaults to true, so agents that never send it are read as present. A
+collector sets it false only when the place where the source would live was readable and shows
+nothing there: `mdraid` when `/proc/mdstat` is readable and lists no arrays (or does not exist
+while `/proc` is readable, which is the case on a ZFS host such as TrueNAS-SVR where the md module
+is not loaded), `rapl` when the powercap directory is readable and has no `intel-rapl` zone,
+`hwmon` when `/sys/class/hwmon` is readable and empty, and `scrutiny` when no URL is configured.
+An unreadable path stays present and unavailable, which is unmeasured and keeps the warning. The
+group of an absent source is listed in `HostSummary.not_present`, contributes no warning, and is
+reported as not present by each consumer: Orion writes `<group>_present` 0, `<group>_available` 0,
+`<group>_status` 0 and the reason "not present" (and `overall_not_present` counts them), Home
+Assistant creates no entity for it and retires one it had published, and Prometheus adds the
+`hostwatch_source_present` gauge. `hostwatch_source_up` keeps its meaning and is 0 for an absent
+source. A not-present report older than the staleness window is treated as stale, so a silent
+agent still reads as unmeasured.
+
 The `hosts` document keys each entry by a slug of the host name, for example
 `host_media_svr_name` and `host_media_svr_status`, not by position, so adding a
 host never renames another host's keys. The slug is the Home Assistant rule:
@@ -449,7 +465,7 @@ set it, so a database with version 0 is adopted as version 1. `Store._migrate()`
 applies numbered steps in a transaction, each created with `IF NOT EXISTS` so a
 repeat run changes nothing. Version 2 adds the `events` table (unique per host
 on `dedup_key`) and the `boot_state` heartbeat table; existing tables are never
-altered. Version 3 adds the `batch_ids` table (unique per host and batch id) the same way;
+altered. Version 6 adds the `present` column to `sources` (default 1, added only when missing). Version 3 adds the `batch_ids` table (unique per host and batch id) the same way;
 maintenance prunes ids older than the raw retention. If the stored version is newer than the code supports, the store
 refuses to start with `SchemaTooNewError` rather than risk damaging data.
 

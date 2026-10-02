@@ -45,9 +45,16 @@ CREATE TABLE IF NOT EXISTS agents (
 # a database with user_version 0 is treated as version 1 once its Phase 1 tables
 # exist. Each migration step is additive: it only creates objects and is guarded
 # with IF NOT EXISTS so that running it twice changes nothing.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
-MIGRATIONS: dict[int, tuple[str, ...]] = {
+def _add_sources_present(db: sqlite3.Connection) -> None:
+    """Add sources.present (default 1, so rows from older agents read as present) once."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(sources)")}
+    if "present" not in cols:
+        db.execute("ALTER TABLE sources ADD COLUMN present INTEGER NOT NULL DEFAULT 1")
+
+
+MIGRATIONS: dict[int, tuple] = {
     2: (
         """CREATE TABLE IF NOT EXISTS events (
   id INTEGER PRIMARY KEY AUTOINCREMENT, host TEXT NOT NULL, ts REAL NOT NULL,
@@ -104,6 +111,8 @@ BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END""",
   name TEXT PRIMARY KEY, last_id INTEGER NOT NULL, updated REAL NOT NULL
 )""",
     ),
+    # Whether a source is absent by design. Existing rows default to present.
+    6: (_add_sources_present,),
 }
 
 
@@ -146,7 +155,10 @@ class Store:
             self._db.execute("BEGIN")
             try:
                 for stmt in MIGRATIONS[target]:
-                    self._db.execute(stmt)
+                    if callable(stmt):
+                        stmt(self._db)
+                    else:
+                        self._db.execute(stmt)
                 self._db.execute(f"PRAGMA user_version = {target}")
                 self._db.execute("COMMIT")
             except Exception:
@@ -481,9 +493,11 @@ class Store:
                     for s in batch.samples]
             self._db.executemany("INSERT INTO samples VALUES (?,?,?,?,?,?,?)", rows)
             self._db.executemany(
-                "INSERT INTO sources VALUES (?,?,?,?,?) ON CONFLICT(host, source) DO UPDATE SET "
-                "available=excluded.available, reason=excluded.reason, updated=excluded.updated",
-                [(batch.host, st.source, int(st.available), st.reason, batch.sent_at) for st in batch.sources])
+                "INSERT INTO sources (host, source, available, reason, updated, present) VALUES (?,?,?,?,?,?) "
+                "ON CONFLICT(host, source) DO UPDATE SET available=excluded.available, "
+                "reason=excluded.reason, updated=excluded.updated, present=excluded.present",
+                [(batch.host, st.source, int(st.available), st.reason, batch.sent_at, int(st.present))
+                 for st in batch.sources])
             self._db.execute(
                 "INSERT INTO agents VALUES (?,?,?,?) ON CONFLICT(host) DO UPDATE SET "
                 "platform=excluded.platform, agent_version=excluded.agent_version, last_seen=excluded.last_seen",
@@ -514,7 +528,7 @@ class Store:
 
     def sources(self) -> list[dict]:
         with self._lock:
-            cur = self._db.execute("SELECT host, source, available, reason, updated FROM sources ORDER BY host, source")
+            cur = self._db.execute("SELECT host, source, available, reason, updated, present FROM sources ORDER BY host, source")
             return [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
 
     def agents(self) -> list[dict]:

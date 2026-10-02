@@ -23,6 +23,13 @@ class HwmonCollector(Collector):
         base = self.sysfs / "class" / "hwmon"
         return sorted(base.glob("hwmon*")) if base.is_dir() else []
 
+    def is_absent(self):
+        """Absent when /sys/class/hwmon is readable and has no devices."""
+        try:
+            return not any((self.sysfs / "class" / "hwmon").iterdir())
+        except OSError:
+            return False
+
     def detect(self):
         devs = self._devices()
         if not devs:

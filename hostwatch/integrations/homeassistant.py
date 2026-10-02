@@ -102,8 +102,12 @@ def build_entities(summary: HostSummary) -> list[Entity]:
     out = [
         _sensor("cpu_utilization", "CPU utilization", summary.cpu, unit="%"),
         _sensor("memory_used", "Memory used", summary.memory, unit="%"),
-        _sensor("package_power", "Package power", summary.package_power, device_class="power", unit="W"),
     ]
+    # A group that is not present by design gets no entity at all, so Home Assistant shows no
+    # permanently unknown sensor for hardware the host does not have.
+    if "power" not in summary.not_present:
+        out.append(_sensor("package_power", "Package power", summary.package_power, device_class="power",
+                           unit="W"))
     for c in summary.temperatures:
         if c.name.startswith("disk_temp."):
             who = c.labels.get("device") or c.labels.get("wwn", "")
@@ -122,6 +126,8 @@ def build_entities(summary: HostSummary) -> list[Entity]:
         out.append(_sensor("disk_" + slug(c.labels.get("wwn", "") or who), f"Disk {who} health status", c,
                            diagnostic=True))
     for full, c in summary.sources.items():
+        if c.state == "not_present":
+            continue
         short = full.removeprefix("source.")
         # A source that is down is a real answer ("off"), so the entity stays available.
         out.append(Entity("source_" + slug(short) + "_up", "binary_sensor", f"Source {short} reporting",
@@ -291,7 +297,9 @@ class HomeAssistantPublisher:
             component, key = entry.split("/", 1)
             topic = f"{self.config.mqtt_discovery_prefix}/{component}/{node}/{key}/config"
             avail = f"{self.config.mqtt_base_topic}/{slug_part}/{key}/availability"
-            if not self.client.publish(avail, NOT_AVAILABLE, retain=True)                     or not self.client.publish(topic, "", retain=True):
+            marked = self.client.publish(avail, NOT_AVAILABLE, retain=True)
+            cleared = marked and self.client.publish(topic, "", retain=True)
+            if not cleared:
                 self._epoch = -1
                 return False
             self._published.pop(topic, None)

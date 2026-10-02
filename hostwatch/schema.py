@@ -39,6 +39,11 @@ class SourceStatus(BaseModel):
     source: str
     available: bool
     reason: str = ""
+    present: bool = Field(
+        default=True,
+        description="False only when the collector positively established that this host has no such source "
+                    "(for example no md arrays). An unreadable source stays present and unavailable. "
+                    "Agents that never send the field are read as present.")
 
 
 class Event(BaseModel):

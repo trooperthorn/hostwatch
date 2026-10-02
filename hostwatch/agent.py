@@ -288,7 +288,13 @@ class Agent:
             prev = self.status.get(c.id)
             if prev is None or prev.available != ok:
                 log.info("source %s: %s %s", c.id, "available" if ok else "unavailable", reason)
-            self.status[c.id] = SourceStatus(source=c.id, available=ok, reason=reason)
+            absent = False
+            if not ok:
+                try:
+                    absent = c.is_absent()
+                except Exception as exc:
+                    log.warning("source %s: could not establish absence: %s", c.id, exc)
+            self.status[c.id] = SourceStatus(source=c.id, available=ok, reason=reason, present=not absent)
         self._last_detect = time.monotonic()
 
     def collect_once(self) -> Batch:

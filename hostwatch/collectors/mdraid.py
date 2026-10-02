@@ -29,6 +29,21 @@ class MdRaidCollector(Collector):
             return False, "no md arrays"
         return True, ", ".join(a.name for a in arrays)
 
+    def is_absent(self):
+        """Absent when /proc/mdstat is readable and lists no arrays, or does not exist.
+
+        A missing file means the md module is not loaded (TrueNAS-SVR, which uses ZFS). Any other
+        failure to read it, such as a permission error, leaves the source present and unavailable.
+        """
+        path = self.procfs / "mdstat"
+        try:
+            text = path.read_text()
+        except FileNotFoundError:
+            return self.procfs.is_dir()
+        except OSError:
+            return False
+        return not any(line.split(" :", 1)[0].startswith("md") and " :" in line for line in text.splitlines())
+
     def collect(self):
         out = []
         for arr in self._arrays():
