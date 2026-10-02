@@ -62,8 +62,8 @@ written with the old `clean_shutdown` name are still read.
 
 At start, the agent reads `boot_id` from `<procfs>/sys/kernel/random/boot_id`;
 if it differs from the previous heartbeat, `classify` returns one of
-`clean_shutdown` (flag set and journal evidence of a host shutdown from the
-previous boot), `kernel_panic` (a fresh pstore record), `agent_stopped` (flag
+`clean_shutdown` (journal evidence of a completed host shutdown from the
+previous boot; the agent stop flag is recorded but not required), `kernel_panic` (a fresh pstore record), `agent_stopped` (flag
 set, no host shutdown evidence), `watchdog_reset`, `unknown_unclean`, or `unknown`.
 Only pstore records read from the configured `HOSTWATCH_PSTORE` root (the same root pstore ingestion uses) whose mtime is later than the previous boot's start (`first_ts` in the heartbeat, the earliest heartbeat time for that boot id) and that no earlier boot event counted (`pstore_classified.json`) count as evidence. A heartbeat without `first_ts` falls back to the last heartbeat time minus
 60 seconds; older ones are listed in `detail.pstore_stale`. A
@@ -76,10 +76,22 @@ message gives `host_shutdown`, a watchdog message gives `watchdog`, and entries 
 shutdown message give `abrupt_end`. If the previous boot's journal cannot be read or is
 empty, no hints are passed and `detail.journal_previous_boot` holds the reason. The
 agent also reads `<sysfs>/class/watchdog/watchdog0/bootstatus`; the
-`WDIOF_CARDRESET` bit (0x20) counts as watchdog evidence and the value is recorded in
+`WDIOF_CARDRESET` bit (0x20) is hardware watchdog evidence and the value is recorded in
 `detail.watchdog_bootstatus`. An abrupt end with no other evidence is `unknown_unclean`,
 not a power loss: a power cut and a hang cannot be told apart without a witness, which
 Phase 6 adds. Kinds are never inferred from absence of evidence.
+
+Precedence when evidence contradicts, strongest first (`boot.PRECEDENCE`):
+fresh pstore panic record, then watchdog bootstatus `card_reset`, then a
+journal shutdown sequence that completed, then a journal watchdog message with
+no completed shutdown, then agent stopped only, then `unknown_unclean`, then
+`unknown`. A watchdog message inside a completed shutdown tail is therefore
+`clean_shutdown`, because the watchdog is normally disarmed during an orderly
+stop. Hardware bootstatus is not overridden by a clean agent stop. When the
+winning class disagrees with other evidence, `detail.contradiction` names each
+disagreement and `detail.evidence_seen` lists every piece of evidence. The
+`unknown` reason states what was actually read (journal unavailable, hints read
+but inconclusive, or journal not checked).
 
 The event kind is `boot.<class>` with dedup key `boot:<boot_id>`. Its `ts` is
 the previous heartbeat time (last known alive), `detail.detected_at` is when the

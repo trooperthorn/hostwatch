@@ -42,6 +42,18 @@ UNKNOWN = "unknown"
 
 PSTORE_SKEW_S = 60.0
 
+# Boot classification precedence, strongest evidence first. Higher entries win
+# when evidence contradicts; the contradiction is recorded in detail.contradiction.
+PRECEDENCE = (
+    "kernel_panic: fresh pstore record",
+    "watchdog_reset: watchdog bootstatus card_reset",
+    "clean_shutdown: journal shutdown sequence completed",
+    "watchdog_reset: journal watchdog message without a completed shutdown",
+    "agent_stopped: agent stopped only",
+    "unknown_unclean: journal ended abruptly",
+    "unknown",
+)
+
 SEVERITY = {CLEAN_SHUTDOWN: "info", AGENT_STOPPED: "warning", WATCHDOG_RESET: "critical", KERNEL_PANIC: "critical",
             UNKNOWN_UNCLEAN: "critical", UNKNOWN: "warning"}
 
@@ -241,24 +253,60 @@ def classify(previous_heartbeat: dict[str, Any] | None, current_boot_id: str,
         detail["watchdog_bootstatus"] = {"value": bootstatus.get("value"),
                                          "card_reset": bootstatus.get("card_reset"),
                                          "unavailable": bootstatus.get("unavailable")}
-        if bootstatus.get("card_reset"):
-            hints = {**hints, "watchdog": True}
-            detail["journal_hints"] = dict(hints)
-    if stopped and hints.get("host_shutdown"):
-        return Classification(CLEAN_SHUTDOWN, {**detail, "evidence": "agent stopped and the previous boot's journal shows a host shutdown"})
+    card_reset = bool(bootstatus and bootstatus.get("card_reset"))
+    shutdown = hints.get("host_shutdown") is True
+    journal_wd = hints.get("watchdog") is True
+    abrupt = hints.get("abrupt_end") is True
+    detail["evidence_seen"] = {
+        "pstore_fresh": list(pstore["fresh"]), "watchdog_bootstatus_card_reset": card_reset,
+        "journal_shutdown_sequence": shutdown, "journal_watchdog_message": journal_wd,
+        "journal_abrupt_end": abrupt, "agent_stopped_cleanly": stopped}
+    detail["precedence"] = list(PRECEDENCE)
+
+    def result(kind: str, evidence: str, contradictions: list[str]) -> Classification:
+        out = {**detail, "evidence": evidence}
+        if contradictions:
+            out["contradiction"] = "; ".join(contradictions)
+        return Classification(kind, out)
+
     if pstore["fresh"]:
-        return Classification(KERNEL_PANIC, {**detail, "evidence": "pstore holds records newer than the previous heartbeat"})
+        notes = []
+        if stopped and shutdown:
+            notes.append("pstore holds a fresh panic record but the agent stopped and the journal shows a completed shutdown")
+        return result(KERNEL_PANIC, "pstore holds records newer than the previous boot's start", notes)
+    if card_reset:
+        notes = []
+        if stopped:
+            notes.append("watchdog bootstatus reports a card reset but the agent stopped cleanly")
+        if shutdown:
+            notes.append("watchdog bootstatus reports a card reset but the journal shows a completed shutdown")
+        return result(WATCHDOG_RESET, "watchdog bootstatus has the card reset bit set, which outranks journal and agent evidence", notes)
+    if shutdown:
+        notes = []
+        if not stopped:
+            notes.append("the journal shows a completed shutdown but the agent did not record a clean stop")
+        if journal_wd:
+            notes.append("a watchdog message appears in the journal but it is part of a completed shutdown sequence")
+        why = "the previous boot's journal shows a completed shutdown sequence"
+        if stopped:
+            why = "agent stopped and " + why
+        return result(CLEAN_SHUTDOWN, why, notes)
+    if journal_wd:
+        notes = ["the journal has a watchdog message but the agent stopped cleanly"] if stopped else []
+        return result(WATCHDOG_RESET, "journal watchdog message with no completed shutdown sequence", notes)
     if stopped:
         return Classification(AGENT_STOPPED, {**detail, "reason": "the agent stopped cleanly but there is no journal evidence "
                                               "of a host shutdown, so a container stop cannot be told from a reboot"})
-    if hints.get("watchdog"):
-        return Classification(WATCHDOG_RESET, {**detail, "evidence": "watchdog hint and the agent did not stop cleanly"})
-    if hints.get("abrupt_end"):
+    if abrupt:
         return Classification(UNKNOWN_UNCLEAN, {**detail, "evidence": "previous journal ended without a shutdown sequence",
                                                 "reason": "a power cut and a hang cannot be told apart without a witness"})
-    reason = "no fresh pstore or journal evidence; a power cut, a hard reset, and a hang cannot be told apart"
     if journal_unavailable:
-        reason = f"previous boot journal unavailable ({journal_unavailable}); {reason}"
+        seen = f"previous boot journal unavailable ({journal_unavailable})"
+    elif hints:
+        seen = "journal hints were read (" + ", ".join(f"{k}={v}" for k, v in sorted(hints.items())) + ") but none shows a shutdown, watchdog or abrupt end"
+    else:
+        seen = "the previous boot's journal was not checked"
+    reason = f"{seen}; no fresh pstore record and no watchdog bootstatus card reset; a power cut, a hard reset, and a hang cannot be told apart"
     return Classification(UNKNOWN, {**detail, "reason": reason})
 
 

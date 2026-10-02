@@ -59,7 +59,8 @@ def test_clean_shutdown_requires_host_shutdown_journal_evidence():
     assert boot.classify(hb, NEW, None, {"host_shutdown": True}).kind == boot.CLEAN_SHUTDOWN
     assert boot.classify(hb, NEW, None, {}).kind == boot.AGENT_STOPPED
     unclean = {"boot_id": OLD, "ts": 1000.0, "agent_stopped_cleanly": False}
-    assert boot.classify(unclean, NEW, None, {"host_shutdown": True}).kind == boot.UNKNOWN
+    # Shutdown evidence alone decides; the missing agent stop is noted, not fatal.
+    assert boot.classify(unclean, NEW, None, {"host_shutdown": True}).kind == boot.CLEAN_SHUTDOWN
 
 
 def test_old_flag_name_in_existing_heartbeat_is_still_read(tmp_path):
@@ -432,3 +433,55 @@ def test_pstore_record_already_classified_in_earlier_boot_is_stale(tmp_path):
     (ev2,) = start(cfg).pending_events[-1:]
     assert ev2.kind == "boot.unknown"
     assert ev2.detail["pstore_stale"] == ["dmesg-efi-0"]
+
+
+def test_shutdown_tail_with_watchdog_line_is_clean_shutdown():
+    hb = {"boot_id": OLD, "ts": 1000.0, "agent_stopped_cleanly": True}
+    r = boot.classify(hb, NEW, None, {"host_shutdown": True, "watchdog": True, "abrupt_end": False})
+    assert r.kind == boot.CLEAN_SHUTDOWN
+    assert "completed shutdown sequence" in r.detail["contradiction"]
+
+
+def test_shutdown_tail_with_watchdog_line_through_journal_hints(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg, clean=True)
+    agent = with_prev_journal(cfg, [jline(1, "watchdog: watchdog0: watchdog did not stop!"),
+                                    jline(2, "Reached target shutdown.target - System Shutdown."),
+                                    jline(3, "systemd-journald[300]: Journal stopped")])
+    agent.start_boot_check()
+    (ev,) = agent.pending_events
+    assert ev.kind == "boot.clean_shutdown"
+
+
+def test_bootstatus_card_reset_with_agent_clean_stop_is_watchdog_reset_with_contradiction():
+    hb = {"boot_id": OLD, "ts": 1000.0, "agent_stopped_cleanly": True}
+    r = boot.classify(hb, NEW, None, {}, bootstatus={"value": 32, "card_reset": True, "unavailable": None})
+    assert r.kind == boot.WATCHDOG_RESET
+    assert "agent stopped cleanly" in r.detail["contradiction"]
+    assert r.detail["evidence_seen"]["agent_stopped_cleanly"] is True
+    assert r.detail["evidence_seen"]["watchdog_bootstatus_card_reset"] is True
+    assert r.detail["watchdog_bootstatus"]["value"] == 32
+
+
+def test_shutdown_seen_but_agent_not_stopped_is_clean_shutdown_noting_agent_state():
+    hb = {"boot_id": OLD, "ts": 1000.0, "agent_stopped_cleanly": False}
+    r = boot.classify(hb, NEW, None, {"host_shutdown": True, "abrupt_end": False})
+    assert r.kind == boot.CLEAN_SHUTDOWN
+    assert "agent did not record a clean stop" in r.detail["contradiction"]
+    assert r.detail["agent_stopped_cleanly"] is False
+
+
+def test_fresh_pstore_outranks_clean_shutdown_evidence():
+    hb = {"boot_id": OLD, "ts": 1000.0, "agent_stopped_cleanly": True}
+    r = boot.classify(hb, NEW, {"unavailable": None, "fresh": ["dmesg-1"], "stale": []}, {"host_shutdown": True})
+    assert r.kind == boot.KERNEL_PANIC
+    assert "contradiction" in r.detail
+
+
+def test_unknown_reason_describes_what_was_read_not_no_journal_evidence():
+    hb = {"boot_id": OLD, "ts": 1000.0, "agent_stopped_cleanly": False}
+    r = boot.classify(hb, NEW, False, {"host_shutdown": False, "watchdog": False, "abrupt_end": False})
+    assert r.kind == boot.UNKNOWN
+    assert "no journal evidence" not in r.detail["reason"]
+    assert "journal hints were read" in r.detail["reason"]
+    assert "was not checked" in boot.classify(hb, NEW, False, {}).detail["reason"]
