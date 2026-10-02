@@ -20,7 +20,7 @@ Current phase: **2 (event engine)**, code complete and not yet deployed. Phase 0
 | `hostwatch/events/journal.py` | Read-only journal watcher (`HOSTWATCH_JOURNAL`, default `/host/journal`): runs `journalctl --directory` on a worker thread with a saved cursor (first read bounded to two boots, falls back to `HOSTWATCH_JOURNAL_VOLATILE`), recovers from a rotated-out cursor with a `journal.cursor_reset` event, marks a capped first read as `journal.backlog_truncated`, names unreadable journal files in the source reason, reports unreadable journals as unavailable, and turns watchdog, md degraded, e1000e, MCE, I/O error, ata link reset and thermal throttle messages into events |
 | `hostwatch/events/thresholds.py` | Edge-triggered threshold events from samples (md degraded, md sync change, source flip, Scrutiny device_status growth), seeded from stored events |
 | `hostwatch/hub.py` | Internal ingest and read API (token-protected, loopback only in Phase 1) |
-| `hostwatch/store.py` | SQLite: raw samples, hourly rollups, source availability, versioned schema with additive events and batch id tables |
+| `hostwatch/store.py` | SQLite: raw samples, hourly rollups, source availability, versioned schema with additive events, batch id and auth tables (users, sessions, API keys, audit log) |
 | `scripts/host-prep.sh` | Phase 0 host check and fixes |
 | `scripts/rapl-access.sh` | Grant RAPL read access to a dedicated group (see its header for the security trade-off) |
 | `deploy/` | Compose file and `.env.example` |

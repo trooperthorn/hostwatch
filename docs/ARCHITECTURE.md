@@ -292,6 +292,17 @@ altered. Version 3 adds the `batch_ids` table (unique per host and batch id) the
 maintenance prunes ids older than the raw retention. If the stored version is newer than the code supports, the store
 refuses to start with `SchemaTooNewError` rather than risk damaging data.
 
+Version 4 adds the auth tables `users`, `sessions`, `api_keys`, `cert_bindings`
+and `audit_log`, with store methods for each. Password hashes are supplied by the
+caller. Session tokens and API keys are random and only their SHA-256 digests
+are stored; a full API key is returned once at creation. Revoking a key or
+session takes effect on the next lookup. The audit log has no update or delete
+method, and SQLite triggers abort UPDATE and DELETE on it. This is an
+application-layer control: anyone who can write the database file directly can
+drop the triggers or edit rows, so it is not tamper-proofing. The tables exist
+but nothing in the hub enforces authentication yet; that arrives in later
+Phase 3 slices, so the hub is still bound to 127.0.0.1 and uses the shared token.
+
 ## Security model
 
 Current (enforced): the hub binds to 127.0.0.1 by default, every endpoint

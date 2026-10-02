@@ -104,3 +104,59 @@ def test_event_dedup_and_query(tmp_path):
     assert store.events("h1", since=15.0)[0]["dedup_key"] == "b"
     assert store.events("h1", kind="md_degraded")[0]["detail"] == {"a": 1}
     assert len(store.events("h1", limit=1)) == 1
+
+
+V3_EXTRA_DDL = """
+CREATE TABLE events (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, host TEXT NOT NULL, ts REAL NOT NULL,
+  kind TEXT NOT NULL, severity TEXT NOT NULL, source TEXT NOT NULL, title TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '{}', dedup_key TEXT NOT NULL, boot_id TEXT,
+  UNIQUE (host, dedup_key)
+);
+CREATE TABLE boot_state (
+  host TEXT PRIMARY KEY, boot_id TEXT, heartbeat_ts REAL NOT NULL, boot_ts REAL, clean_shutdown INTEGER
+);
+CREATE TABLE batch_ids (
+  host TEXT NOT NULL, batch_id TEXT NOT NULL, received REAL NOT NULL, PRIMARY KEY (host, batch_id)
+);
+"""
+
+AUTH_TABLES = {"users", "sessions", "api_keys", "cert_bindings", "audit_log"}
+
+
+def make_v3(path):
+    make_phase1(path)
+    db = sqlite3.connect(path)
+    db.executescript(V3_EXTRA_DDL)
+    db.execute("INSERT INTO events (host, ts, kind, severity, source, title, dedup_key) "
+               "VALUES ('h1',1.0,'k','info','s','t','a')")
+    db.execute("INSERT INTO batch_ids VALUES ('h1','b1',100.0)")
+    db.execute("PRAGMA user_version = 3")
+    db.commit()
+    db.close()
+
+
+def test_v3_database_migrates_to_v4_with_rows_intact(tmp_path):
+    p = tmp_path / "db.sqlite"
+    make_v3(p)
+    assert not (AUTH_TABLES & tables(p))
+    store = Store(p)
+    assert version(p) == 4
+    assert AUTH_TABLES <= tables(p)
+    assert len(store.events("h1")) == 1
+    assert store.agents()[0]["host"] == "h1"
+    db = sqlite3.connect(p)
+    assert db.execute("SELECT batch_id FROM batch_ids").fetchall() == [("b1",)]
+    assert db.execute("SELECT value FROM samples").fetchall() == [(0.5,)]
+    db.close()
+
+
+def test_v4_second_run_is_noop(tmp_path):
+    p = tmp_path / "db.sqlite"
+    make_v3(p)
+    store = Store(p)
+    store.append_audit("a", "k", "GET", "/x", 200, "127.0.0.1")
+    store._migrate()
+    Store(p)
+    assert version(p) == 4
+    assert len(store.audit_rows()) == 1

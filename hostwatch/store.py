@@ -8,7 +8,9 @@ so gaps are visible as gaps, but are excluded from rollup math.
 
 from __future__ import annotations
 
+import hashlib
 import json
+import secrets
 import sqlite3
 import threading
 import time
@@ -43,7 +45,7 @@ CREATE TABLE IF NOT EXISTS agents (
 # a database with user_version 0 is treated as version 1 once its Phase 1 tables
 # exist. Each migration step is additive: it only creates objects and is guarded
 # with IF NOT EXISTS so that running it twice changes nothing.
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: (
@@ -64,6 +66,37 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
   host TEXT NOT NULL, batch_id TEXT NOT NULL, received REAL NOT NULL, PRIMARY KEY (host, batch_id)
 )""",
         "CREATE INDEX IF NOT EXISTS batch_ids_received ON batch_ids(received)",
+    ),
+    4: (
+        """CREATE TABLE IF NOT EXISTS users (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, username TEXT NOT NULL UNIQUE, hash TEXT NOT NULL,
+  disabled INTEGER NOT NULL DEFAULT 0, failed_count INTEGER NOT NULL DEFAULT 0,
+  locked_until REAL, created REAL NOT NULL
+)""",
+        """CREATE TABLE IF NOT EXISTS sessions (
+  id_hash TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), created REAL NOT NULL,
+  expires REAL NOT NULL, last_seen REAL NOT NULL, revoked INTEGER NOT NULL DEFAULT 0
+)""",
+        """CREATE TABLE IF NOT EXISTS api_keys (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, prefix TEXT NOT NULL UNIQUE, hash TEXT NOT NULL,
+  scopes TEXT NOT NULL, owner TEXT NOT NULL, created REAL NOT NULL, revoked_at REAL, last_used REAL
+)""",
+        """CREATE TABLE IF NOT EXISTS cert_bindings (
+  subject TEXT PRIMARY KEY, user_id INTEGER NOT NULL REFERENCES users(id), created REAL NOT NULL,
+  revoked_at REAL
+)""",
+        """CREATE TABLE IF NOT EXISTS audit_log (
+  id INTEGER PRIMARY KEY AUTOINCREMENT, ts REAL NOT NULL, actor TEXT NOT NULL, kind TEXT NOT NULL,
+  method TEXT NOT NULL, path TEXT NOT NULL, status INTEGER NOT NULL, remote TEXT NOT NULL,
+  detail TEXT NOT NULL DEFAULT '{}'
+)""",
+        "CREATE INDEX IF NOT EXISTS audit_log_ts ON audit_log(ts)",
+        # Application-layer protection only. Anyone who can open the database file
+        # directly can drop these triggers or edit the file, so this is not tamper-proofing.
+        """CREATE TRIGGER IF NOT EXISTS audit_log_no_update BEFORE UPDATE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END""",
+        """CREATE TRIGGER IF NOT EXISTS audit_log_no_delete BEFORE DELETE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END""",
     ),
 }
 
@@ -103,6 +136,156 @@ class Store:
                 self._db.execute("ROLLBACK")
                 raise
             version = target
+
+    # ---- Auth: users, sessions, API keys, audit (schema version 4) ----
+    # Secrets are never stored in plain text. Password hashes are produced by the
+    # caller (argon2id). Session tokens and API keys are random with 256 bits, so a
+    # plain SHA-256 of them is sufficient and only the hash is stored.
+
+    @staticmethod
+    def _digest(secret: str) -> str:
+        return hashlib.sha256(secret.encode("utf-8")).hexdigest()
+
+    def _rows(self, sql: str, params: tuple = ()) -> list[dict]:
+        with self._lock:
+            cur = self._db.execute(sql, params)
+            cols = [c[0] for c in cur.description]
+            return [dict(zip(cols, r)) for r in cur.fetchall()]
+
+    def create_user(self, username: str, password_hash: str, now: float | None = None) -> int:
+        """Insert a user and return its id. A duplicate username raises sqlite3.IntegrityError."""
+        with self._lock, self._db:
+            cur = self._db.execute("INSERT INTO users (username, hash, created) VALUES (?,?,?)",
+                                   (username, password_hash, time.time() if now is None else now))
+            return int(cur.lastrowid)
+
+    def get_user(self, username: str) -> dict | None:
+        rows = self._rows("SELECT id, username, hash, disabled, failed_count, locked_until, created "
+                          "FROM users WHERE username = ?", (username,))
+        return rows[0] if rows else None
+
+    def record_login_failure(self, username: str, max_failures: int, lock_seconds: float,
+                             now: float | None = None) -> dict | None:
+        """Count a failed login. Reaching max_failures sets locked_until and restarts the count.
+        Returns the updated user row, or None for an unknown user."""
+        now = time.time() if now is None else now
+        with self._lock, self._db:
+            row = self._db.execute("SELECT failed_count FROM users WHERE username = ?", (username,)).fetchone()
+            if row is None:
+                return None
+            count = row[0] + 1
+            if count >= max_failures:
+                self._db.execute("UPDATE users SET failed_count = 0, locked_until = ? WHERE username = ?",
+                                 (now + lock_seconds, username))
+            else:
+                self._db.execute("UPDATE users SET failed_count = ? WHERE username = ?", (count, username))
+        return self.get_user(username)
+
+    def reset_failures(self, username: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("UPDATE users SET failed_count = 0, locked_until = NULL WHERE username = ?",
+                             (username,))
+
+    def create_session(self, user_id: int, ttl_s: float, now: float | None = None) -> str:
+        """Create a session and return the random token. Only its hash is stored."""
+        now = time.time() if now is None else now
+        token = secrets.token_urlsafe(32)
+        with self._lock, self._db:
+            self._db.execute("INSERT INTO sessions (id_hash, user_id, created, expires, last_seen, revoked) "
+                             "VALUES (?,?,?,?,?,0)", (self._digest(token), user_id, now, now + ttl_s, now))
+        return token
+
+    def get_session(self, token: str, now: float | None = None) -> dict | None:
+        """Return the live session with its username, or None if unknown, revoked, expired,
+        or the user is disabled. Updates last_seen."""
+        now = time.time() if now is None else now
+        h = self._digest(token)
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "SELECT s.id_hash, s.user_id, u.username, s.created, s.expires, s.last_seen FROM sessions s "
+                "JOIN users u ON u.id = s.user_id "
+                "WHERE s.id_hash = ? AND s.revoked = 0 AND s.expires > ? AND u.disabled = 0", (h, now))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            out = dict(zip([c[0] for c in cur.description], row))
+            self._db.execute("UPDATE sessions SET last_seen = ? WHERE id_hash = ?", (now, h))
+            out["last_seen"] = now
+            return out
+
+    def revoke_session(self, token: str) -> bool:
+        with self._lock, self._db:
+            return self._db.execute("UPDATE sessions SET revoked = 1 WHERE id_hash = ? AND revoked = 0",
+                                    (self._digest(token),)).rowcount > 0
+
+    def create_api_key(self, scopes: list[str], owner: str, now: float | None = None) -> tuple[str, dict]:
+        """Create a key. Returns (full key, row). The full key is shown once and is not recoverable."""
+        now = time.time() if now is None else now
+        prefix = secrets.token_hex(4)
+        full = f"hw_{prefix}_{secrets.token_urlsafe(32)}"
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "INSERT INTO api_keys (prefix, hash, scopes, owner, created) VALUES (?,?,?,?,?)",
+                (prefix, self._digest(full), json.dumps(sorted(scopes)), owner, now))
+            key_id = int(cur.lastrowid)
+        return full, {"id": key_id, "prefix": prefix, "scopes": sorted(scopes), "owner": owner,
+                      "created": now, "revoked_at": None, "last_used": None}
+
+    def find_api_key(self, key: str, now: float | None = None) -> dict | None:
+        """Return the active key row for a presented key, or None if unknown or revoked.
+        A revoked key stops matching on the very next call. Updates last_used."""
+        now = time.time() if now is None else now
+        parts = key.split("_", 2)
+        if len(parts) != 3 or parts[0] != "hw":
+            return None
+        with self._lock, self._db:
+            cur = self._db.execute("SELECT id, prefix, hash, scopes, owner, created, revoked_at, last_used "
+                                   "FROM api_keys WHERE prefix = ? AND revoked_at IS NULL", (parts[1],))
+            row = cur.fetchone()
+            if row is None:
+                return None
+            out = dict(zip([c[0] for c in cur.description], row))
+            if not secrets.compare_digest(out.pop("hash"), self._digest(key)):
+                return None
+            self._db.execute("UPDATE api_keys SET last_used = ? WHERE id = ?", (now, out["id"]))
+            out["last_used"] = now
+            out["scopes"] = json.loads(out["scopes"])
+            return out
+
+    def revoke_api_key(self, key_id: int, now: float | None = None) -> bool:
+        with self._lock, self._db:
+            return self._db.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
+                                    (time.time() if now is None else now, key_id)).rowcount > 0
+
+    def append_audit(self, actor: str, kind: str, method: str, path: str, status: int, remote: str,
+                     detail: dict | None = None, now: float | None = None) -> int:
+        """Append one audit row. There is deliberately no update or delete method, and triggers
+        abort UPDATE and DELETE. This is application-layer protection, not tamper-proofing."""
+        with self._lock, self._db:
+            cur = self._db.execute(
+                "INSERT INTO audit_log (ts, actor, kind, method, path, status, remote, detail) "
+                "VALUES (?,?,?,?,?,?,?,?)",
+                (time.time() if now is None else now, actor, kind, method, path, status, remote,
+                 json.dumps(detail or {}, sort_keys=True)))
+            return int(cur.lastrowid)
+
+    def audit_rows(self, limit: int = 100, kind: str | None = None, actor: str | None = None,
+                   before_id: int | None = None) -> list[dict]:
+        """Newest first."""
+        where, params = [], []
+        for col, val in (("kind", kind), ("actor", actor)):
+            if val is not None:
+                where.append(f"{col} = ?")
+                params.append(val)
+        if before_id is not None:
+            where.append("id < ?")
+            params.append(before_id)
+        rows = self._rows("SELECT id, ts, actor, kind, method, path, status, remote, detail FROM audit_log"
+                          + (" WHERE " + " AND ".join(where) if where else "")
+                          + " ORDER BY id DESC LIMIT ?", (*params, limit))
+        for r in rows:
+            r["detail"] = json.loads(r["detail"])
+        return rows
 
     @staticmethod
     def _event_rows(host: str, events: list[dict]) -> list[tuple]:
