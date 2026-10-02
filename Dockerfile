@@ -16,6 +16,11 @@ COPY pyproject.toml ./
 COPY hostwatch ./hostwatch
 RUN pip install --no-cache-dir . && rm -rf /root/.cache
 
+# A fresh named volume copies the ownership of the image directory, so /data is
+# created here owned by the runtime user. Without this the volume would be
+# root-owned and the non-root process could not write to it.
+RUN mkdir /data && chown 10001:10001 /data
+
 USER hostwatch
 VOLUME ["/data"]
 ENTRYPOINT ["python", "-m", "hostwatch"]

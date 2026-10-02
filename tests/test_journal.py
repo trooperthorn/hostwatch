@@ -277,3 +277,82 @@ def test_background_reader_failure_is_unavailable(dirs):
     status, events = bg.read()
     assert not status.available and status.reason == "journalctl is not installed"
     bg._thread.join(5)
+
+
+def test_rejected_cursor_resets_emits_event_and_recovers(monkeypatch, dirs):
+    jdir, data = dirs
+    (data / journal.CURSOR_FILE).write_text("rotated-away")
+    monkeypatch.setattr(journal.shutil, "which", lambda name: "/usr/bin/journalctl")
+    calls = []
+
+    def fake_run(cmd, **kw):
+        calls.append(cmd[1:])
+        if "--after-cursor" in cmd:
+            return completed(cmd, err="Failed to seek to cursor: No data available", code=1)
+        if "--boot=-1" in cmd:
+            return completed(cmd, code=1, err="No journal boot entry found")
+        return completed(cmd, out=json.dumps(entry(1, "ata3: hard resetting link")) + "\n")
+
+    monkeypatch.setattr(journal.subprocess, "run", fake_run)
+    watcher = JournalWatcher(jdir, data)
+    status, events = watcher.read()
+    assert status.available
+    kinds = [e.kind for e in events]
+    assert kinds == ["journal.cursor_reset", "disk.ata_link_reset"]
+    assert events[0].detail["rejected_cursor"] == "rotated-away"
+    assert watcher.load_cursor() == "c1"
+    # The next read uses the new cursor, so no reset is repeated.
+    calls.clear()
+    monkeypatch.setattr(journal.subprocess, "run", lambda cmd, **kw: completed(cmd))
+    status, events = watcher.read()
+    assert status.available and events == []
+
+
+def test_rejected_cursor_with_empty_reread_clears_the_cursor(monkeypatch, dirs):
+    jdir, data = dirs
+    (data / journal.CURSOR_FILE).write_text("gone")
+
+    def reader(directory, cursor):
+        if cursor:
+            raise journal.CursorRejected("rejected")
+        return []
+
+    watcher = JournalWatcher(jdir, data, reader=reader)
+    status, events = watcher.read()
+    assert status.available and [e.kind for e in events] == ["journal.cursor_reset"]
+    assert watcher.load_cursor() is None
+    status, events = watcher.read()
+    assert status.available and events == []
+
+
+def test_capped_first_read_marks_backlog_truncated(monkeypatch, dirs):
+    jdir, data = dirs
+    monkeypatch.setattr(journal, "FIRST_READ_MAX_LINES", 2)
+    monkeypatch.setattr(journal.shutil, "which", lambda name: "/usr/bin/journalctl")
+    monkeypatch.setattr(journal.subprocess, "run", lambda cmd, **kw: completed(
+        cmd, out='{"a": 1}\n{"a": 2}\n') if "--boot=0" in cmd else completed(cmd, code=1, err="none"))
+    status, _ = JournalWatcher(jdir, data).read()
+    assert status.available and "journal.backlog_truncated" in status.reason
+
+
+def test_uncapped_first_read_is_not_marked(monkeypatch, dirs):
+    jdir, data = dirs
+    status, _ = JournalWatcher(jdir, data, reader=FakeReader([entry(1, "x")])).read()
+    assert "backlog_truncated" not in status.reason
+
+
+def test_partial_unreadable_journal_files_are_named(monkeypatch, dirs):
+    jdir, data = dirs
+    (jdir / "bad1.journal").write_bytes(b"x")
+    real_open = journal.Path.open
+
+    def fake_open(self, *a, **kw):
+        if self.name.startswith("bad"):
+            raise PermissionError("denied")
+        return real_open(self, *a, **kw)
+
+    monkeypatch.setattr(journal.Path, "open", fake_open)
+    status, _ = JournalWatcher(jdir, data, reader=FakeReader([entry(1, "x")])).read()
+    assert status.available
+    assert "bad1.journal" in status.reason and "unreadable" in status.reason
+    assert "system.journal" not in status.reason

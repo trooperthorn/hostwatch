@@ -80,3 +80,41 @@ def test_env_example_lists_event_variables():
     text = ENV_EXAMPLE.read_text()
     for name in ("HOSTWATCH_JOURNAL", "HOSTWATCH_JOURNAL_VOLATILE", "HOSTWATCH_PSTORE", "HOSTWATCH_RASDAEMON_DB"):
         assert name in text
+
+
+def _group_add() -> list[str]:
+    items, inside = [], False
+    for line in COMPOSE.read_text().splitlines():
+        if line.startswith("    group_add:"):
+            inside = True
+            continue
+        if inside:
+            stripped = line.strip()
+            if stripped.startswith("- "):
+                items.append(stripped[2:].strip())
+            elif stripped and not stripped.startswith("#"):
+                break
+    return items
+
+
+def test_group_add_has_journal_gid_and_host_mounts_stay_read_only():
+    assert any("HOSTWATCH_JOURNAL_GID" in item for item in _group_add())
+    host_mounts = [v for v in _volumes() if v.startswith("/")]
+    assert host_mounts
+    assert all(v.endswith(":ro") for v in host_mounts)
+
+
+def test_env_example_documents_journal_gid():
+    text = ENV_EXAMPLE.read_text()
+    assert "HOSTWATCH_JOURNAL_GID" in text and "getent group systemd-journal" in text
+
+
+def test_dockerfile_creates_owned_data_dir():
+    text = (Path(__file__).resolve().parent.parent / "Dockerfile").read_text()
+    assert "mkdir /data" in text and "chown 10001:10001 /data" in text
+    assert text.index("chown 10001:10001 /data") < text.index("USER hostwatch")
+
+
+def test_compose_tests_do_not_depend_on_cwd(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    assert COMPOSE.is_file() and ENV_EXAMPLE.is_file()

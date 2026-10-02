@@ -150,7 +150,15 @@ persistent directory has no readable journal files, the watcher reads
 `HOSTWATCH_JOURNAL_VOLATILE` (default `/host/journal-volatile`) instead. The
 first read with no saved cursor is bounded: `--boot=0` and `--boot=-1`, each
 with `-n 5000`; a missing previous boot is tolerated. Later reads use
-`--after-cursor`. The `journalctl` call runs on a worker thread
+`--after-cursor`. If `journalctl` rejects the saved cursor (for example because
+the entry was rotated out), the watcher drops the cursor, repeats the bounded
+first read, emits a `journal.cursor_reset` warning event (dedup key from the
+rejected cursor) and stays available. A first read that reaches the cap adds a
+`journal.backlog_truncated` marker to the source reason, and journal files that
+cannot be opened (partial permission) are named in the reason while the source
+stays available. The container needs the host `systemd-journal` group through
+`group_add` (`HOSTWATCH_JOURNAL_GID` in `deploy/.env`), and the image creates
+`/data` owned by UID 10001 so a fresh named volume is writable. The `journalctl` call runs on a worker thread
 (`BackgroundJournal`) with its own 60 second limit, so a slow journal never
 delays a sample cycle: each agent cycle collects the previous worker's result,
 parses it and starts the next read. Parsing and cursor staging stay on the

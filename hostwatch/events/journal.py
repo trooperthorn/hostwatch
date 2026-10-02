@@ -44,6 +44,18 @@ class ReaderError(Exception):
     """The reader could not produce output; the message becomes the reason."""
 
 
+class CursorRejected(ReaderError):
+    """journalctl refused the saved cursor, for example because the entry it
+    names was rotated out of the journal."""
+
+
+class LineList(list):
+    """Journal lines plus a flag that the read hit its line cap, so older
+    entries were left out."""
+
+    truncated = False
+
+
 # (compiled pattern, event kind, severity, short title). The first match wins,
 # so more specific patterns come first.
 PATTERNS: tuple[tuple[re.Pattern[str], str, str, str], ...] = tuple(
@@ -77,6 +89,9 @@ def _run_journalctl(exe: str, directory: Path, extra: list[str]) -> list[str]:
     except (OSError, subprocess.SubprocessError) as exc:
         raise ReaderError(f"journalctl could not run: {exc}") from exc
     stderr = proc.stderr.strip()
+    if "--after-cursor" in extra and "cursor" in stderr.lower() and (
+            proc.returncode != 0 or not proc.stdout.strip()):
+        raise CursorRejected(f"journalctl rejected the saved cursor: {stderr[:200]}")
     if proc.returncode != 0:
         raise ReaderError(f"journalctl exited {proc.returncode}: {stderr[:200]}")
     lines = proc.stdout.splitlines()
@@ -104,7 +119,10 @@ def default_reader(directory: Path, cursor: str | None) -> Iterable[str]:
         previous = _run_journalctl(exe, directory, ["--boot=-1", *cap])
     except ReaderError:
         previous = []  # a journal with a single boot has no previous boot
-    return [*previous, *current]
+    lines = LineList([*previous, *current])
+    lines.truncated = (len(current) >= FIRST_READ_MAX_LINES
+                       or len(previous) >= FIRST_READ_MAX_LINES)
+    return lines
 
 
 PREVIOUS_BOOT_LINES = 200
@@ -180,6 +198,23 @@ def has_journal_files(directory: Path) -> bool:
     return False
 
 
+def unreadable_journal_files(directory: Path) -> list[str]:
+    """Names of journal files under the directory that cannot be opened, for
+    example because the container user lacks the systemd-journal group."""
+    bad: list[str] = []
+    try:
+        for path in sorted(directory.rglob("*")):
+            if path.suffix in {".journal", ".journal~"} and path.is_file():
+                try:
+                    with path.open("rb") as fh:
+                        fh.read(1)
+                except OSError:
+                    bad.append(path.name)
+    except OSError:
+        pass
+    return bad
+
+
 def _message_text(value: object) -> str | None:
     """journalctl renders a binary MESSAGE as a list of byte values."""
     if isinstance(value, str):
@@ -211,6 +246,9 @@ class JournalWatcher:
         self.volatile = volatile
         self.has_files = has_files
         self._reset_ports: set[str] = set()
+        self._rejected_cursor: str | None = None
+        self._truncated = False
+        self._unreadable: list[str] = []
         self.previous_boot_reader = previous_boot_reader or default_previous_boot_reader
 
     def previous_boot(self, boot_id: str) -> dict[str, bool]:
@@ -260,7 +298,17 @@ class JournalWatcher:
 
     def fetch(self, cursor: str | None) -> list[str]:
         """The blocking part of a read: pick a directory and run the reader."""
-        return list(self.reader(self.choose_directory(), cursor))
+        directory = self.choose_directory()
+        self._unreadable = unreadable_journal_files(directory)
+        self._rejected_cursor = None
+        try:
+            result = self.reader(directory, cursor)
+        except CursorRejected:
+            # The cursor was rotated out. Fall back to the bounded first read.
+            self._rejected_cursor = cursor
+            result = self.reader(directory, None)
+        self._truncated = bool(getattr(result, "truncated", False))
+        return list(result)
 
     def read(self) -> tuple[SourceStatus, list[Event]]:
         cursor = self.load_cursor()
@@ -273,7 +321,14 @@ class JournalWatcher:
     def process(self, cursor: str | None, lines: list[str]) -> tuple[SourceStatus, list[Event]]:
         events: list[Event] = []
         skipped = 0
-        last_cursor = cursor
+        rejected, self._rejected_cursor = self._rejected_cursor, None
+        last_cursor = None if rejected else cursor
+        if rejected:
+            events.append(Event(
+                kind="journal.cursor_reset", severity="warning", source=SOURCE, ts=time.time(),
+                title="Saved journal cursor was rejected and was reset",
+                detail={"rejected_cursor": rejected},
+                dedup_key=f"journal.cursor_reset:{rejected}"))
         for line in lines:
             try:
                 entry = json.loads(line)
@@ -297,14 +352,33 @@ class JournalWatcher:
                 detail={"message": message, "cursor": entry_cursor,
                         "unit": entry.get("_SYSTEMD_UNIT"), "priority": entry.get("PRIORITY")},
                 dedup_key=f"journal:{entry_cursor}"))
-        if last_cursor and last_cursor != cursor:
-            try:
+        parts: list[str] = []
+        try:
+            if last_cursor and last_cursor != cursor:
                 self._save_cursor(last_cursor)
-            except OSError as exc:
-                return SourceStatus(source=SOURCE, available=True,
-                                    reason=f"cursor could not be saved: {exc}"), events
-        reason = f"{skipped} unreadable lines skipped" if skipped else ""
-        return SourceStatus(source=SOURCE, available=True, reason=reason), events
+            elif rejected:
+                self._clear_cursor()
+        except OSError as exc:
+            parts.append(f"cursor could not be saved: {exc}")
+        if skipped:
+            parts.append(f"{skipped} unreadable lines skipped")
+        if self._truncated:
+            parts.append(f"journal.backlog_truncated: the first read was capped at "
+                         f"{FIRST_READ_MAX_LINES} lines per boot, older entries were not read")
+        if self._unreadable:
+            names = ", ".join(self._unreadable[:5])
+            more = len(self._unreadable) - 5
+            parts.append(f"{len(self._unreadable)} journal files are unreadable (permission): "
+                         f"{names}" + (f" and {more} more" if more > 0 else ""))
+        return SourceStatus(source=SOURCE, available=True, reason="; ".join(parts)), events
+
+    def _clear_cursor(self) -> None:
+        if self.markers is not None:
+            self.markers.stage(CURSOR_MARKER, None)
+        try:
+            self.cursor_path.unlink()
+        except FileNotFoundError:
+            pass
 
     def _classify_entry(self, message: str) -> tuple[str, str, str] | None:
         """Like classify, but 'SATA link up' counts only after a reset on the

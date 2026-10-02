@@ -21,6 +21,7 @@ services:
       - no-new-privileges:true
     group_add:
       - "${HOSTWATCH_RAPL_GID:?run scripts/rapl-access.sh and set HOSTWATCH_RAPL_GID in .env}"
+      - "${HOSTWATCH_JOURNAL_GID:?set HOSTWATCH_JOURNAL_GID in .env from: getent group systemd-journal | cut -d: -f3}"
     volumes:
       - /sys:/host/sys:ro
       # Phase 2 event sources, all read-only. The container paths match the

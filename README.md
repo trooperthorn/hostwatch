@@ -17,7 +17,7 @@ Current phase: **2 (event engine)**, code complete and not yet deployed. Phase 0
 | `hostwatch/events/boot.py` | Heartbeat writer and boot classifier (clean shutdown, agent stopped, watchdog reset from journal messages or the watchdog bootstatus, kernel panic using only pstore records from the configured `HOSTWATCH_PSTORE` root that are newer than the previous boot's start and not already counted in an earlier boot event; shutdown hints come from the journal of the heartbeat's own boot id, unknown_unclean for an abrupt end without a witness, unknown; evidence is ranked by an explicit precedence table and contradictions are reported in the event detail) |
 | `hostwatch/events/pstore.py` | Read-only pstore ingestion (`HOSTWATCH_PSTORE`, default `/host/pstore`): crash records become deduplicated events classified by explicit markers, unreadable stores are reported unavailable, and records are never deleted |
 | `hostwatch/events/rasdaemon.py` | Read-only rasdaemon database ingestion (`HOSTWATCH_RASDAEMON_DB`, default `/host/rasdaemon/ras-mc_event.db`): `mc_event`, `aer_event` and `mce_record` rows become `hardware_error` events, each table only if present; progress survives restarts, a recreated database is detected by checking the timestamp of the last row read, an undecodable value is stored as hex, a row that cannot be converted is skipped and counted in the source reason, and zone-less timestamps are read as UTC and flagged |
-| `hostwatch/events/journal.py` | Read-only journal watcher (`HOSTWATCH_JOURNAL`, default `/host/journal`): runs `journalctl --directory` on a worker thread with a saved cursor (first read bounded to two boots, falls back to `HOSTWATCH_JOURNAL_VOLATILE`), reports unreadable journals as unavailable, and turns watchdog, md degraded, e1000e, MCE, I/O error, ata link reset and thermal throttle messages into events |
+| `hostwatch/events/journal.py` | Read-only journal watcher (`HOSTWATCH_JOURNAL`, default `/host/journal`): runs `journalctl --directory` on a worker thread with a saved cursor (first read bounded to two boots, falls back to `HOSTWATCH_JOURNAL_VOLATILE`), recovers from a rotated-out cursor with a `journal.cursor_reset` event, marks a capped first read as `journal.backlog_truncated`, names unreadable journal files in the source reason, reports unreadable journals as unavailable, and turns watchdog, md degraded, e1000e, MCE, I/O error, ata link reset and thermal throttle messages into events |
 | `hostwatch/events/thresholds.py` | Edge-triggered threshold events from samples (md degraded, md sync change, source flip, Scrutiny device_status growth), seeded from stored events |
 | `hostwatch/hub.py` | Internal ingest and read API (token-protected, loopback only in Phase 1) |
 | `hostwatch/store.py` | SQLite: raw samples, hourly rollups, source availability, versioned schema with additive events and batch id tables |
@@ -47,7 +47,8 @@ sudo ./scripts/rapl-access.sh --dry-run
 sudo ./scripts/rapl-access.sh              # prints HOSTWATCH_RAPL_GID
 cp deploy/.env.example deploy/.env
 openssl rand -hex 32                       # paste into HOSTWATCH_INGEST_TOKEN
-nano deploy/.env                           # also set HOSTWATCH_RAPL_GID
+nano deploy/.env                           # also set HOSTWATCH_RAPL_GID and HOSTWATCH_JOURNAL_GID
+                                           # (journal gid: getent group systemd-journal | cut -d: -f3)
 cd deploy && sudo docker compose up -d --build
 ```
 
