@@ -9,6 +9,7 @@ import time
 from hostwatch.agent import Agent
 from hostwatch.config import Config
 from hostwatch.events import boot
+from hostwatch.events.journal import ReaderError
 
 OLD, NEW = "aaaaaaaa-0000-0000-0000-000000000001", "bbbbbbbb-0000-0000-0000-000000000002"
 
@@ -19,7 +20,8 @@ def make_cfg(tmp_path, boot_id=NEW):
     (procfs / "sys/kernel/random/boot_id").write_text(boot_id + "\n")
     sysfs.mkdir()
     data.mkdir()
-    return Config(procfs=procfs, sysfs=sysfs, data_dir=data, ingest_token="x" * 32, host_name="h")
+    return Config(procfs=procfs, sysfs=sysfs, data_dir=data, ingest_token="x" * 32, host_name="h",
+                  journal=tmp_path / "journal", journal_volatile=tmp_path / "journal-volatile")
 
 
 def write_hb(cfg, boot_id=OLD, clean=False, ts=1000.0):
@@ -146,10 +148,118 @@ def test_stale_heartbeat_without_evidence_is_unknown(tmp_path):
     assert "cannot be told apart" in result.detail["reason"]
 
 
-def test_abrupt_journal_end_gives_power_loss():
+def test_abrupt_journal_end_without_witness_is_unknown_unclean_not_power_loss():
     result = boot.classify({"boot_id": OLD, "ts": 1.0, "agent_stopped_cleanly": False}, NEW, False,
                            {"abrupt_end": True})
-    assert result.kind == boot.POWER_LOSS
+    assert result.kind == boot.UNKNOWN_UNCLEAN
+    assert not hasattr(boot, "POWER_LOSS")
+    assert "without a witness" in result.detail["reason"]
+
+
+def jline(n, message):
+    return json.dumps({"__CURSOR": f"p{n}", "MESSAGE": message})
+
+
+def with_prev_journal(cfg, agent_lines):
+    """Give the agent a readable journal directory and a fake previous-boot reader."""
+    cfg.journal.mkdir(parents=True, exist_ok=True)
+    (cfg.journal / "system.journal").write_bytes(b"x")
+    seen = []
+
+    def reader(directory):
+        seen.append(directory)
+        if isinstance(agent_lines, Exception):
+            raise agent_lines
+        return agent_lines
+
+    agent = Agent(cfg)
+    agent.journal_watcher.previous_boot_reader = reader
+    agent.prev_dirs = seen
+    return agent
+
+
+def test_previous_boot_journal_with_shutdown_target_gives_clean_shutdown(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg, clean=True)
+    agent = with_prev_journal(cfg, [jline(1, "Started foo."), jline(2, "Reached target shutdown.target - System Shutdown."),
+                                    jline(3, "systemd-journald[300]: Journal stopped")])
+    agent.start_boot_check()
+    (ev,) = agent.pending_events
+    assert ev.kind == "boot.clean_shutdown"
+    assert ev.detail["journal_hints"]["host_shutdown"] is True
+
+
+def test_bootstatus_cardreset_bit_gives_watchdog_reset(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg)
+    bs = cfg.sysfs / "class/watchdog/watchdog0/bootstatus"
+    bs.parent.mkdir(parents=True)
+    bs.write_text("32\n")
+    agent = with_prev_journal(cfg, ReaderError("no previous boot"))
+    agent.start_boot_check()
+    (ev,) = agent.pending_events
+    assert ev.kind == "boot.watchdog_reset"
+    assert ev.detail["watchdog_bootstatus"]["card_reset"] is True
+
+
+def test_bootstatus_zero_is_not_watchdog_evidence(tmp_path):
+    cfg = make_cfg(tmp_path)
+    bs = cfg.sysfs / "class/watchdog/watchdog0/bootstatus"
+    bs.parent.mkdir(parents=True)
+    bs.write_text("0\n")
+    assert boot.read_bootstatus(cfg.sysfs)["card_reset"] is False
+    assert boot.read_bootstatus(tmp_path / "nowhere")["card_reset"] is None
+
+
+def test_journal_watchdog_message_in_previous_boot_gives_watchdog_reset(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg)
+    agent = with_prev_journal(cfg, [jline(1, "watchdog: watchdog0: watchdog did not stop!")])
+    agent.start_boot_check()
+    assert agent.pending_events[0].kind == "boot.watchdog_reset"
+
+
+def test_abrupt_end_of_previous_journal_gives_unknown_unclean(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg)
+    agent = with_prev_journal(cfg, [jline(1, "Started foo."), jline(2, "eth0: link up")])
+    agent.start_boot_check()
+    (ev,) = agent.pending_events
+    assert ev.kind == "boot.unknown_unclean"
+    assert ev.detail["journal_hints"]["abrupt_end"] is True
+
+
+def test_missing_previous_boot_journal_gives_unknown_with_reason(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg)
+    agent = Agent(cfg)  # no journal directory at all
+    agent.start_boot_check()
+    (ev,) = agent.pending_events
+    assert ev.kind == "boot.unknown"
+    assert "does not exist" in ev.detail["journal_previous_boot"]
+    assert "previous boot journal unavailable" in ev.detail["reason"]
+
+
+def test_empty_previous_boot_journal_is_unavailable_not_abrupt(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg)
+    agent = with_prev_journal(cfg, [])
+    agent.start_boot_check()
+    (ev,) = agent.pending_events
+    assert ev.kind == "boot.unknown"
+    assert "no readable entries" in ev.detail["journal_previous_boot"]
+
+
+def test_default_previous_boot_reader_command_is_read_only(monkeypatch, tmp_path):
+    from hostwatch.events import journal
+    calls = []
+    monkeypatch.setattr(journal.shutil, "which", lambda name: "/usr/bin/journalctl")
+
+    class Done:
+        returncode, stdout, stderr = 0, "{}\n", ""
+    monkeypatch.setattr(journal.subprocess, "run", lambda cmd, **kw: calls.append(cmd) or Done())
+    journal.default_previous_boot_reader(tmp_path)
+    assert calls[0][1:] == [f"--directory={tmp_path}", "-o", "json", "--no-pager", "-b", "-1", "-n", "200"]
 
 
 def test_missing_heartbeat_first_run_is_unknown_not_a_guess(tmp_path):

@@ -107,6 +107,50 @@ def default_reader(directory: Path, cursor: str | None) -> Iterable[str]:
     return [*previous, *current]
 
 
+PREVIOUS_BOOT_LINES = 200
+# Messages systemd and journald log on an orderly stop. Assumed, not yet confirmed
+# on hardware; see UNVERIFIED.md.
+SHUTDOWN_PATTERN = re.compile(
+    r"Reached target.*(Shutdown|Power-Off|Reboot|Final Step)|Journal stopped|"
+    r"systemd-shutdown\[1\]|Shutting down\.", re.IGNORECASE)
+
+
+def default_previous_boot_reader(directory: Path) -> Iterable[str]:
+    """Run journalctl read-only for the last 200 entries of the previous boot."""
+    exe = shutil.which("journalctl")
+    if exe is None:
+        raise ReaderError("journalctl is not installed")
+    return _run_journalctl(exe, directory, ["-b", "-1", "-n", str(PREVIOUS_BOOT_LINES)])
+
+
+def previous_boot_hints(lines: Iterable[str]) -> dict[str, bool]:
+    """Derive boot classifier hints from the previous boot's last journal lines.
+    host_shutdown: a shutdown message is present. watchdog: a watchdog message is
+    present. abrupt_end: entries exist but none shows a shutdown. Raises
+    ReaderError when there are no readable entries, because then nothing can be
+    said either way."""
+    seen = shutdown = watchdog = 0
+    for line in lines:
+        try:
+            entry = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(entry, dict):
+            continue
+        message = _message_text(entry.get("MESSAGE"))
+        if message is None:
+            continue
+        seen += 1
+        if SHUTDOWN_PATTERN.search(message):
+            shutdown += 1
+        hit = classify(message)
+        if hit is not None and hit[0] == "watchdog.event":
+            watchdog += 1
+    if not seen:
+        raise ReaderError("the previous boot's journal has no readable entries")
+    return {"host_shutdown": shutdown > 0, "watchdog": watchdog > 0, "abrupt_end": shutdown == 0}
+
+
 def has_journal_files(directory: Path) -> bool:
     """True when at least one journal file under the directory can be opened."""
     try:
@@ -142,7 +186,8 @@ def classify(message: str) -> tuple[str, str, str] | None:
 class JournalWatcher:
     def __init__(self, directory: Path, data_dir: Path, reader: Reader | None = None,
                  markers: Markers | None = None, volatile: Path | None = None,
-                 has_files: Callable[[Path], bool] = has_journal_files) -> None:
+                 has_files: Callable[[Path], bool] = has_journal_files,
+                 previous_boot_reader: Callable[[Path], Iterable[str]] | None = None) -> None:
         """With markers (the agent outbox), the cursor is staged and becomes
         durable together with the batch that carries the events read. Without
         markers the cursor is saved to a file at once, for standalone use."""
@@ -153,6 +198,13 @@ class JournalWatcher:
         self.volatile = volatile
         self.has_files = has_files
         self._reset_ports: set[str] = set()
+        self.previous_boot_reader = previous_boot_reader or default_previous_boot_reader
+
+    def previous_boot(self) -> dict[str, bool]:
+        """Hints from the previous boot's last entries, read through the same
+        directory choice as the live read. Raises ReaderError with the reason
+        when the previous boot's journal cannot be read."""
+        return previous_boot_hints(self.previous_boot_reader(self.choose_directory()))
 
     def load_cursor(self) -> str | None:
         if self.markers is not None:

@@ -37,13 +37,13 @@ CLEAN_SHUTDOWN = "clean_shutdown"
 AGENT_STOPPED = "agent_stopped"
 WATCHDOG_RESET = "watchdog_reset"
 KERNEL_PANIC = "kernel_panic"
-POWER_LOSS = "power_loss"
+UNKNOWN_UNCLEAN = "unknown_unclean"
 UNKNOWN = "unknown"
 
 PSTORE_SKEW_S = 60.0
 
 SEVERITY = {CLEAN_SHUTDOWN: "info", AGENT_STOPPED: "warning", WATCHDOG_RESET: "critical", KERNEL_PANIC: "critical",
-            POWER_LOSS: "critical", UNKNOWN: "warning"}
+            UNKNOWN_UNCLEAN: "critical", UNKNOWN: "warning"}
 
 
 def read_boot_id(procfs: Path) -> str | None:
@@ -78,6 +78,24 @@ def pstore_evidence(pstore_dir: Path, since_ts: float | None) -> dict[str, Any]:
         else:
             stale.append(path.name)
     return {"unavailable": None, "fresh": fresh, "stale": stale}
+
+
+WATCHDOG_BOOTSTATUS_REL = "class/watchdog/watchdog0/bootstatus"
+WDIOF_CARDRESET = 0x20
+
+
+def read_bootstatus(sysfs: Path) -> dict[str, Any]:
+    """Read the watchdog boot status flags. card_reset is True when the
+    WDIOF_CARDRESET bit (0x20) is set. A missing file gives unavailable with the
+    reason and card_reset None, never False."""
+    path = sysfs / WATCHDOG_BOOTSTATUS_REL
+    try:
+        value = int(path.read_text(encoding="utf-8").strip(), 0)
+    except OSError as exc:
+        return {"value": None, "card_reset": None, "unavailable": f"bootstatus unavailable: cannot read {path}: {exc}"}
+    except ValueError:
+        return {"value": None, "card_reset": None, "unavailable": f"bootstatus unavailable: {path} is not a number"}
+    return {"value": value, "card_reset": bool(value & WDIOF_CARDRESET), "unavailable": None}
 
 
 class Heartbeat:
@@ -139,7 +157,9 @@ class Classification:
 def classify(previous_heartbeat: dict[str, Any] | None, current_boot_id: str,
              pstore: dict[str, Any] | bool | None,
              journal_hints: dict[str, bool] | None = None,
-             now: float | None = None) -> Classification | None:
+             now: float | None = None,
+             journal_unavailable: str | None = None,
+             bootstatus: dict[str, Any] | None = None) -> Classification | None:
     """Classify how the previous boot ended, or return None when boot_id is
     unchanged (the agent merely restarted).
 
@@ -148,7 +168,11 @@ def classify(previous_heartbeat: dict[str, Any] | None, current_boot_id: str,
     "host_shutdown" (the previous boot's journal shows the systemd shutdown
     target or 'Journal stopped'), "watchdog" (a watchdog-caused reset) and
     "abrupt_end" (the journal ends with no shutdown sequence). Missing keys mean
-    the evidence is not available, not that it is negative.
+    the evidence is not available, not that it is negative. journal_unavailable
+    is the reason the previous boot's journal could not be read. bootstatus is
+    the result of read_bootstatus; its card_reset bit counts as watchdog
+    evidence. An abrupt end alone gives unknown_unclean, never power_loss, because
+    a power cut and a hang cannot be separated without an outside witness.
     """
     hints = journal_hints or {}
     now = time.time() if now is None else now
@@ -173,6 +197,15 @@ def classify(previous_heartbeat: dict[str, Any] | None, current_boot_id: str,
     }
     if pstore["unavailable"]:
         detail["pstore"] = pstore["unavailable"]
+    if journal_unavailable:
+        detail["journal_previous_boot"] = journal_unavailable
+    if bootstatus is not None:
+        detail["watchdog_bootstatus"] = {"value": bootstatus.get("value"),
+                                         "card_reset": bootstatus.get("card_reset"),
+                                         "unavailable": bootstatus.get("unavailable")}
+        if bootstatus.get("card_reset"):
+            hints = {**hints, "watchdog": True}
+            detail["journal_hints"] = dict(hints)
     if stopped and hints.get("host_shutdown"):
         return Classification(CLEAN_SHUTDOWN, {**detail, "evidence": "agent stopped and the previous boot's journal shows a host shutdown"})
     if pstore["fresh"]:
@@ -183,9 +216,12 @@ def classify(previous_heartbeat: dict[str, Any] | None, current_boot_id: str,
     if hints.get("watchdog"):
         return Classification(WATCHDOG_RESET, {**detail, "evidence": "watchdog hint and the agent did not stop cleanly"})
     if hints.get("abrupt_end"):
-        return Classification(POWER_LOSS, {**detail, "evidence": "previous journal ended without a shutdown sequence"})
-    return Classification(UNKNOWN, {**detail, "reason": "no fresh pstore or journal evidence; "
-                                    "a power cut, a hard reset, and a hang cannot be told apart"})
+        return Classification(UNKNOWN_UNCLEAN, {**detail, "evidence": "previous journal ended without a shutdown sequence",
+                                                "reason": "a power cut and a hang cannot be told apart without a witness"})
+    reason = "no fresh pstore or journal evidence; a power cut, a hard reset, and a hang cannot be told apart"
+    if journal_unavailable:
+        reason = f"previous boot journal unavailable ({journal_unavailable}); {reason}"
+    return Classification(UNKNOWN, {**detail, "reason": reason})
 
 
 def boot_event(c: Classification, now: float | None = None) -> Event:

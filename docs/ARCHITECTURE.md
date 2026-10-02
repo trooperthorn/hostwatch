@@ -64,13 +64,22 @@ At start, the agent reads `boot_id` from `<procfs>/sys/kernel/random/boot_id`;
 if it differs from the previous heartbeat, `classify` returns one of
 `clean_shutdown` (flag set and journal evidence of a host shutdown from the
 previous boot), `kernel_panic` (a fresh pstore record), `agent_stopped` (flag
-set, no host shutdown evidence), `watchdog_reset`, `power_loss`, or `unknown`.
+set, no host shutdown evidence), `watchdog_reset`, `unknown_unclean`, or `unknown`.
 Only pstore records whose mtime is later than the previous heartbeat time minus
 60 seconds count as evidence; older ones are listed in `detail.pstore_stale`. A
 pstore directory that cannot be read is reported in `detail.pstore` as
 unavailable, never as no records. A missing or malformed heartbeat gives
-`unknown`. The journal hints (host shutdown, watchdog, abrupt end) are not wired
-yet, so until a later slice adds them no boot is classified `clean_shutdown`.
+`unknown`. The journal hints come from `journalctl --directory=<dir> -b -1 -n 200 -o json`,
+run through `JournalWatcher.previous_boot` with a pluggable reader (a callable taking
+the directory), only when the boot_id changed. A shutdown target or "Journal stopped"
+message gives `host_shutdown`, a watchdog message gives `watchdog`, and entries with no
+shutdown message give `abrupt_end`. If the previous boot's journal cannot be read or is
+empty, no hints are passed and `detail.journal_previous_boot` holds the reason. The
+agent also reads `<sysfs>/class/watchdog/watchdog0/bootstatus`; the
+`WDIOF_CARDRESET` bit (0x20) counts as watchdog evidence and the value is recorded in
+`detail.watchdog_bootstatus`. An abrupt end with no other evidence is `unknown_unclean`,
+not a power loss: a power cut and a hang cannot be told apart without a witness, which
+Phase 6 adds. Kinds are never inferred from absence of evidence.
 
 The event kind is `boot.<class>` with dedup key `boot:<boot_id>`. Its `ts` is
 the previous heartbeat time (last known alive), `detail.detected_at` is when the

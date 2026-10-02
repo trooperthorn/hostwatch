@@ -24,7 +24,7 @@ from . import __version__
 from .collectors import build_collectors
 from .config import Config
 from .events import boot, pstore
-from .events.journal import BackgroundJournal, JournalWatcher
+from .events.journal import BackgroundJournal, JournalWatcher, ReaderError
 from .events.rasdaemon import RasdaemonReader
 from .events.thresholds import ThresholdEngine
 from .outbox import OUTBOX_FILE, Outbox
@@ -61,8 +61,9 @@ class Agent:
         self._stop = threading.Event()
         self.heartbeat: boot.Heartbeat | None = None
         self.thresholds = ThresholdEngine()
-        journal = BackgroundJournal(JournalWatcher(cfg.journal, cfg.data_dir, markers=self.outbox,
-                                                   volatile=cfg.journal_volatile))
+        self.journal_watcher = JournalWatcher(cfg.journal, cfg.data_dir, markers=self.outbox,
+                                              volatile=cfg.journal_volatile)
+        journal = BackgroundJournal(self.journal_watcher)
         rasdaemon = RasdaemonReader(cfg.rasdaemon_db, markers=self.outbox)
         self.event_sources: dict[str, EventSource] = {
             "pstore": self._read_pstore,
@@ -168,7 +169,16 @@ class Agent:
         previous = boot.load_heartbeat(self.cfg.data_dir)
         pstore = boot.pstore_evidence(self.cfg.sysfs / "fs/pstore",
                                       previous.get("ts") if previous else None)
-        result = boot.classify(previous, boot_id, pstore, {})
+        hints: dict[str, bool] = {}
+        journal_unavailable: str | None = None
+        bootstatus = boot.read_bootstatus(self.cfg.sysfs)
+        if previous is not None and previous.get("boot_id") != boot_id:
+            try:
+                hints = self.journal_watcher.previous_boot()
+            except ReaderError as exc:
+                journal_unavailable = str(exc)
+        result = boot.classify(previous, boot_id, pstore, hints, journal_unavailable=journal_unavailable,
+                               bootstatus=bootstatus)
         if result is not None:
             self._stage_pending([*self.pending_events, boot.boot_event(result)])
             self.outbox.commit_staged()

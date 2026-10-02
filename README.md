@@ -14,7 +14,7 @@ Current phase: **2 (event engine)**, code complete and not yet deployed. Phase 0
 | `hostwatch/collectors/` | One module per source: `cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `scrutiny` |
 | `hostwatch/agent.py` | Detect, collect, push to hub; durable outbox while the hub is down; writes the boot heartbeat |
 | `hostwatch/outbox.py` | Durable agent outbox (`outbox.db` in the data directory): batches stay until the hub answers 2xx, a 4xx other than 401, 408 and 429 dead-letters the batch, overflow drops the oldest samples first and keeps events, and source progress markers commit in the same transaction as the batch |
-| `hostwatch/events/boot.py` | Heartbeat writer and boot classifier (clean shutdown, agent stopped, watchdog reset, kernel panic using only pstore records newer than the previous heartbeat, power loss, unknown) |
+| `hostwatch/events/boot.py` | Heartbeat writer and boot classifier (clean shutdown, agent stopped, watchdog reset from journal messages or the watchdog bootstatus, kernel panic using only pstore records newer than the previous heartbeat, unknown_unclean for an abrupt end without a witness, unknown) |
 | `hostwatch/events/pstore.py` | Read-only pstore ingestion (`HOSTWATCH_PSTORE`, default `/host/pstore`): crash records become deduplicated events classified by explicit markers, unreadable stores are reported unavailable, and records are never deleted |
 | `hostwatch/events/rasdaemon.py` | Read-only rasdaemon database ingestion (`HOSTWATCH_RASDAEMON_DB`, default `/host/rasdaemon/ras-mc_event.db`): `mc_event`, `aer_event` and `mce_record` rows become `hardware_error` events, each table only if present; progress survives restarts, a recreated database is detected, and zone-less timestamps are read as UTC and flagged |
 | `hostwatch/events/journal.py` | Read-only journal watcher (`HOSTWATCH_JOURNAL`, default `/host/journal`): runs `journalctl --directory` on a worker thread with a saved cursor (first read bounded to two boots, falls back to `HOSTWATCH_JOURNAL_VOLATILE`), reports unreadable journals as unavailable, and turns watchdog, md degraded, e1000e, MCE, I/O error, ata link reset and thermal throttle messages into events |
@@ -71,6 +71,16 @@ curl -s -H "Authorization: Bearer $TOKEN"   "http://127.0.0.1:8090/internal/v1/e
 sudo docker exec hostwatch ls /host/journal /host/pstore /host/rasdaemon
 sudo docker exec hostwatch which journalctl
 curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8090/internal/v1/sources | python3 -m json.tool
+
+# Phase 2 exit tests on MediaIn-SVR (owner-run). After each, read the newest boot event:
+#   curl -s -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8090/internal/v1/events?source=boot&limit=1" | python3 -m json.tool
+# 1. Clean reboot: run `sudo systemctl reboot`. Expect kind boot.clean_shutdown.
+# 2. Watchdog hang: stop the watchdog feeder or hang the host so the watchdog resets it.
+#    Expect boot.watchdog_reset.
+# 3. Power pull: remove power with the host running. Expect boot.unknown_unclean, because
+#    a power cut cannot be separated from a hang without a witness (Phase 6).
+# 4. Test-array failure: `sudo mdadm /dev/<test-array> --fail /dev/<member>`. Expect an
+#    md.degraded event (query with kind=md.degraded).
 
 # Phase 1 exit test, after 24 hours (expect gap_count 0):
 curl -s -H "Authorization: Bearer $TOKEN" \
