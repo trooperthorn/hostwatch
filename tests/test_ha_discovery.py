@@ -364,3 +364,43 @@ def test_colliding_host_slugs_get_distinct_identifiers_and_warning(tmp_path, cap
     assert any("Media-SVR" in m and "media_svr" in m for m in warnings)
     pub.tick()
     assert len([r for r in caplog.records if "same Home Assistant identifier" in r.getMessage()]) == 1
+
+
+def _hosted_publisher(cfg, store, broker, hosts):
+    client = MqttClient(cfg, FakeTransport(broker), clock=lambda: 0.0)
+    return HomeAssistantPublisher(cfg, client, store, hosts=lambda: list(hosts))
+
+
+def test_collision_appearing_later_retires_the_old_unsuffixed_device(tmp_path):
+    cfg = make_config(tmp_path)
+    store = Store(tmp_path / "db.sqlite")
+    broker = FakeBroker()
+    hosts = ["Media-SVR"]
+    pub = _hosted_publisher(cfg, store, broker, hosts)
+    pub.tick()
+    old = "homeassistant/sensor/hostwatch_media_svr/cpu_utilization/config"
+    assert broker.retained[old] != ""
+    hosts.append("media_svr")
+    pub.tick()
+    assert broker.retained[old] == ""
+    assert broker.retained["hostwatch/media_svr/cpu_utilization/availability"] == "offline"
+    # The retirement is persisted, so a restart does not retire it a second time or lose track.
+    pub2 = _hosted_publisher(cfg, Store(tmp_path / "db.sqlite"), broker, hosts)
+    assert "hostwatch_media_svr" not in pub2._known
+
+
+def test_host_that_disappears_has_its_entities_retired(tmp_path):
+    cfg = make_config(tmp_path)
+    store = Store(tmp_path / "db.sqlite")
+    broker = FakeBroker()
+    hosts = ["alpha", "beta"]
+    pub = _hosted_publisher(cfg, store, broker, hosts)
+    pub.tick()
+    topic = "homeassistant/sensor/hostwatch_beta/cpu_utilization/config"
+    assert broker.retained[topic] != ""
+    hosts.remove("beta")
+    pub2 = _hosted_publisher(cfg, Store(tmp_path / "db.sqlite"), broker, hosts)
+    pub2.tick()
+    assert broker.retained[topic] == ""
+    assert broker.retained["hostwatch/beta/cpu_utilization/availability"] == "offline"
+    assert broker.retained["homeassistant/sensor/hostwatch_alpha/cpu_utilization/config"] != ""

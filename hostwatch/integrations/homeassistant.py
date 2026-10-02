@@ -170,7 +170,7 @@ class HomeAssistantPublisher:
             tmp.write_text(json.dumps({k: sorted(v) for k, v in sorted(self._known.items())}), encoding="utf-8")
             os.replace(tmp, self._keys_path)
         except OSError as exc:
-            log.warning("Could not save the Home Assistant discovery key list (%s)", type(exc).__name__)
+            log.error("Could not save the Home Assistant discovery key list (%s); entities retired before a restart may keep stale retained configs", type(exc).__name__)
 
     def _assign_slugs(self, hosts: list[str]) -> None:
         """Hosts whose slugs collide (case or punctuation only) each get a hash suffix of the exact
@@ -269,18 +269,32 @@ class HomeAssistantPublisher:
             # last "online" state: mark it unavailable, then clear the config.
             node = self._node(host)
             current = {f"{e.component}/{e.key}" for e in entities}
-            for entry in sorted(self._known.get(node, set()) - current):
-                component, key = entry.split("/", 1)
-                topic = f"{self.config.mqtt_discovery_prefix}/{component}/{node}/{key}/config"
-                if (not self.client.publish(f"{self._state_base(host)}/{key}/availability", NOT_AVAILABLE,
-                                            retain=True)
-                        or not self.client.publish(topic, "", retain=True)):
-                    self._epoch = -1
-                    return False
-                self._published.pop(topic, None)
+            if not self._retire(node, self._known.get(node, set()) - current):
+                return False
             if self._known.get(node) != current:
                 self._known[node] = current
                 self._save_known()
+        # Nodes that are no longer any current host's node (a host that disappeared, or one whose
+        # identifier changed when a slug collision appeared or went away) retire every entry.
+        live = {self._node(h) for h in hosts}
+        for node in sorted(set(self._known) - live):
+            if not self._retire(node, self._known[node]):
+                return False
+            del self._known[node]
+            self._save_known()
+        return True
+
+    def _retire(self, node: str, entries: set[str]) -> bool:
+        """Mark each entry unavailable and clear its retained discovery config."""
+        slug_part = node.removeprefix("hostwatch_")
+        for entry in sorted(entries):
+            component, key = entry.split("/", 1)
+            topic = f"{self.config.mqtt_discovery_prefix}/{component}/{node}/{key}/config"
+            avail = f"{self.config.mqtt_base_topic}/{slug_part}/{key}/availability"
+            if not self.client.publish(avail, NOT_AVAILABLE, retain=True)                     or not self.client.publish(topic, "", retain=True):
+                self._epoch = -1
+                return False
+            self._published.pop(topic, None)
         return True
 
     def _publish_entity(self, host: str, entity: Entity) -> bool:
