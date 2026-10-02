@@ -18,6 +18,7 @@ it behind a login, with API access for Home Assistant and SolarWinds Orion.
 |---|---|---|---|
 | MediaIn-SVR | amd64 | Primary target, hub | RAPL, mdadm RAID1, Scrutiny, UEFI pstore, iTCO watchdog |
 | ai-pi | arm64 | Second validation host, agent | No RAPL (vcgencmd throttle flags instead), no RAID, no UEFI pstore |
+| TrueNAS-SVR | amd64 | Agent after Debian passes | ZFS instead of md (pool state from `/proc/spl/kstat/zfs`, per-disk errors and alerts from the TrueNAS JSON-RPC API with a READONLY_ADMIN key), no rasdaemon, watchdog not armed, deploy as a TrueNAS custom app with a Post Init script for RAPL |
 
 ## Phases
 
