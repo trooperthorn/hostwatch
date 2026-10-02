@@ -258,4 +258,4 @@ def test_boot_event_survives_agent_restart_before_delivery(tmp_path):
     second = Agent(cfg)
     second.start_boot_check()  # same boot, so nothing is classified again
     (ev,) = second.collect_once().events
-    assert ev.kind == "boot.clean_shutdown" and ev.dedup_key == f"boot:{NEW}"
+    assert ev.kind == "boot.agent_stopped" and ev.dedup_key == f"boot:{NEW}"

@@ -55,19 +55,31 @@ heartbeat into typed events stored in their own table.
 `hostwatch/events/boot.py` holds the heartbeat writer and the classifier. Each
 agent cycle atomically rewrites `heartbeat.json` in the data directory (temp
 file, fsync, rename) with the current `boot_id`, a timestamp, and
-`clean_shutdown: false`. On stop (SIGTERM) the agent writes the same file with
-the flag true and stops updating it. At start, the agent reads `boot_id` from
-`<procfs>/sys/kernel/random/boot_id`; if it differs from the previous
-heartbeat, `classify` returns one of `clean_shutdown`, `kernel_panic` (flag not
-set and pstore under `<sysfs>/fs/pstore` is non-empty), `watchdog_reset`,
-`power_loss`, or `unknown`, with the evidence in the event detail. A missing or
-malformed heartbeat gives `unknown`. The watchdog and power loss hints come from
-journal watchers that a later slice adds, so until then those boots are
-`unknown`. The event kind is `boot.<class>` with dedup key `boot:<boot_id>`,
-held in the outbox as a pending event and committed at once, so an agent restart
-before delivery does not lose it. The next batch carries it and clears the
-pending marker in the same transaction. The source `boot` is reported unavailable
-when the boot_id cannot be read.
+`agent_stopped_cleanly: false`. On stop (SIGTERM) the agent writes the same file
+with the flag true and stops updating it. The flag says only that the agent
+stopped, because stopping the container is not a host shutdown. Heartbeats
+written with the old `clean_shutdown` name are still read.
+
+At start, the agent reads `boot_id` from `<procfs>/sys/kernel/random/boot_id`;
+if it differs from the previous heartbeat, `classify` returns one of
+`clean_shutdown` (flag set and journal evidence of a host shutdown from the
+previous boot), `kernel_panic` (a fresh pstore record), `agent_stopped` (flag
+set, no host shutdown evidence), `watchdog_reset`, `power_loss`, or `unknown`.
+Only pstore records whose mtime is later than the previous heartbeat time minus
+60 seconds count as evidence; older ones are listed in `detail.pstore_stale`. A
+pstore directory that cannot be read is reported in `detail.pstore` as
+unavailable, never as no records. A missing or malformed heartbeat gives
+`unknown`. The journal hints (host shutdown, watchdog, abrupt end) are not wired
+yet, so until a later slice adds them no boot is classified `clean_shutdown`.
+
+The event kind is `boot.<class>` with dedup key `boot:<boot_id>`. Its `ts` is
+the previous heartbeat time (last known alive), `detail.detected_at` is when the
+agent noticed, and the `events.boot_id` column holds the new boot's id. The
+event is held in the outbox as a pending event and committed at once, so an
+agent restart before delivery does not lose it. The next batch carries it and
+clears the pending marker in the same transaction. The source `boot` is reported
+unavailable when the boot_id cannot be read or a heartbeat write fails, and
+returns to available on the next successful heartbeat write.
 
 ## pstore ingestion
 

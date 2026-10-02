@@ -49,6 +49,7 @@ class Event(BaseModel):
     title: str
     detail: dict[str, Any] = Field(default_factory=dict)
     dedup_key: str = Field(min_length=1, description="stable key; the hub keeps one row per host and key")
+    boot_id: str | None = Field(default=None, description="kernel boot_id the event belongs to, when known")
 
 
 class Batch(BaseModel):

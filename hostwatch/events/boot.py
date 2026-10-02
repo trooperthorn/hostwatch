@@ -1,11 +1,13 @@
 """Heartbeat-based boot classifier.
 
 The agent rewrites a small heartbeat file in the data directory on every cycle.
-The file holds the current boot_id, a timestamp, and a clean_shutdown flag that
-is false while running and set true only when the agent is told to stop (SIGTERM
-during an orderly shutdown). At the next start, a different boot_id means the
-host rebooted, and the previous heartbeat plus any pstore and journal evidence
-say how the previous boot ended.
+The file holds the current boot_id, a timestamp, and an agent_stopped_cleanly
+flag that is false while running and set true only when the agent is told to stop
+(SIGTERM). That flag says only that the agent stopped. A container stop is not a
+host shutdown, so a clean host shutdown also needs journal evidence from the
+previous boot. At the next start, a different boot_id means the host rebooted,
+and the previous heartbeat plus fresh pstore and journal evidence say how the
+previous boot ended.
 
 Classification never guesses. Without a previous heartbeat, or without evidence
 that separates the unclean causes, the result is "unknown" and the detail says
@@ -32,12 +34,15 @@ HEARTBEAT_FILE = "heartbeat.json"
 BOOT_ID_REL = "sys/kernel/random/boot_id"
 
 CLEAN_SHUTDOWN = "clean_shutdown"
+AGENT_STOPPED = "agent_stopped"
 WATCHDOG_RESET = "watchdog_reset"
 KERNEL_PANIC = "kernel_panic"
 POWER_LOSS = "power_loss"
 UNKNOWN = "unknown"
 
-SEVERITY = {CLEAN_SHUTDOWN: "info", WATCHDOG_RESET: "critical", KERNEL_PANIC: "critical",
+PSTORE_SKEW_S = 60.0
+
+SEVERITY = {CLEAN_SHUTDOWN: "info", AGENT_STOPPED: "warning", WATCHDOG_RESET: "critical", KERNEL_PANIC: "critical",
             POWER_LOSS: "critical", UNKNOWN: "warning"}
 
 
@@ -50,12 +55,29 @@ def read_boot_id(procfs: Path) -> str | None:
     return value or None
 
 
-def pstore_has_records(pstore_dir: Path) -> bool:
-    """True when the pstore directory exists and holds at least one record."""
+def pstore_evidence(pstore_dir: Path, since_ts: float | None) -> dict[str, Any]:
+    """Split pstore records into fresh and stale. A record is fresh only when its
+    mtime is later than since_ts (the previous heartbeat) minus PSTORE_SKEW_S;
+    older records predate the previous boot's last sign of life and cannot be
+    evidence of how it ended. An unreadable directory is reported as
+    unavailable, never as no records."""
     try:
-        return any(pstore_dir.iterdir())
-    except OSError:
-        return False
+        entries = sorted(pstore_dir.iterdir())
+    except OSError as exc:
+        return {"unavailable": f"pstore unavailable: cannot read {pstore_dir}: {exc}",
+                "fresh": [], "stale": []}
+    fresh: list[str] = []
+    stale: list[str] = []
+    for path in entries:
+        try:
+            mtime = path.lstat().st_mtime
+        except OSError:
+            continue
+        if since_ts is None or mtime > since_ts - PSTORE_SKEW_S:
+            fresh.append(path.name)
+        else:
+            stale.append(path.name)
+    return {"unavailable": None, "fresh": fresh, "stale": stale}
 
 
 class Heartbeat:
@@ -70,7 +92,7 @@ class Heartbeat:
         self._clean = False
 
     def _write(self, clean: bool) -> None:
-        payload = {"boot_id": self.boot_id, "ts": time.time(), "clean_shutdown": clean}
+        payload = {"boot_id": self.boot_id, "ts": time.time(), "agent_stopped_cleanly": clean}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + ".tmp")
         with open(tmp, "w", encoding="utf-8") as fh:
@@ -102,6 +124,9 @@ def load_heartbeat(data_dir: Path) -> dict[str, Any] | None:
     if not isinstance(raw, dict) or not isinstance(raw.get("boot_id"), str) \
             or not isinstance(raw.get("ts"), (int, float)):
         return None
+    if "agent_stopped_cleanly" not in raw:
+        # Heartbeats from the previous version used the old flag name.
+        raw["agent_stopped_cleanly"] = raw.get("clean_shutdown") is True
     return raw
 
 
@@ -112,48 +137,66 @@ class Classification:
 
 
 def classify(previous_heartbeat: dict[str, Any] | None, current_boot_id: str,
-             pstore_present: bool, journal_hints: dict[str, bool] | None = None,
+             pstore: dict[str, Any] | bool | None,
+             journal_hints: dict[str, bool] | None = None,
              now: float | None = None) -> Classification | None:
     """Classify how the previous boot ended, or return None when boot_id is
     unchanged (the agent merely restarted).
 
-    journal_hints keys, all optional booleans: "watchdog" (the previous boot's
-    journal or the kernel log shows a watchdog-caused reset) and "abrupt_end"
-    (the previous boot's journal ends with no shutdown sequence). Missing keys
-    mean the evidence is not available, not that it is negative.
+    pstore is the result of pstore_evidence (a bare bool means fresh records
+    present or absent). journal_hints keys, all optional booleans:
+    "host_shutdown" (the previous boot's journal shows the systemd shutdown
+    target or 'Journal stopped'), "watchdog" (a watchdog-caused reset) and
+    "abrupt_end" (the journal ends with no shutdown sequence). Missing keys mean
+    the evidence is not available, not that it is negative.
     """
     hints = journal_hints or {}
     now = time.time() if now is None else now
+    if isinstance(pstore, bool):
+        pstore = {"unavailable": None, "fresh": ["(unnamed)"] if pstore else [], "stale": []}
+    pstore = pstore or {"unavailable": "pstore unavailable: not checked", "fresh": [], "stale": []}
     if previous_heartbeat is None:
         return Classification(UNKNOWN, {"reason": "no previous heartbeat (first run or unreadable file)",
                                         "boot_id": current_boot_id})
     prev_id = previous_heartbeat.get("boot_id")
     if prev_id == current_boot_id:
         return None
+    stopped = previous_heartbeat.get("agent_stopped_cleanly") is True or \
+        previous_heartbeat.get("clean_shutdown") is True
     detail: dict[str, Any] = {
         "boot_id": current_boot_id, "previous_boot_id": prev_id,
         "heartbeat_ts": previous_heartbeat.get("ts"),
         "heartbeat_age_s": round(now - float(previous_heartbeat["ts"]), 1),
-        "clean_shutdown_flag": previous_heartbeat.get("clean_shutdown") is True,
-        "pstore_present": pstore_present, "journal_hints": dict(hints),
+        "agent_stopped_cleanly": stopped,
+        "pstore_fresh": list(pstore["fresh"]), "pstore_stale": list(pstore["stale"]),
+        "journal_hints": dict(hints), "detected_at": now,
     }
-    if previous_heartbeat.get("clean_shutdown") is True:
-        return Classification(CLEAN_SHUTDOWN, {**detail, "evidence": "clean flag set by agent at stop"})
-    if pstore_present:
-        return Classification(KERNEL_PANIC, {**detail, "evidence": "pstore holds records and the flag was not set"})
+    if pstore["unavailable"]:
+        detail["pstore"] = pstore["unavailable"]
+    if stopped and hints.get("host_shutdown"):
+        return Classification(CLEAN_SHUTDOWN, {**detail, "evidence": "agent stopped and the previous boot's journal shows a host shutdown"})
+    if pstore["fresh"]:
+        return Classification(KERNEL_PANIC, {**detail, "evidence": "pstore holds records newer than the previous heartbeat"})
+    if stopped:
+        return Classification(AGENT_STOPPED, {**detail, "reason": "the agent stopped cleanly but there is no journal evidence "
+                                              "of a host shutdown, so a container stop cannot be told from a reboot"})
     if hints.get("watchdog"):
-        return Classification(WATCHDOG_RESET, {**detail, "evidence": "watchdog hint and the flag was not set"})
+        return Classification(WATCHDOG_RESET, {**detail, "evidence": "watchdog hint and the agent did not stop cleanly"})
     if hints.get("abrupt_end"):
         return Classification(POWER_LOSS, {**detail, "evidence": "previous journal ended without a shutdown sequence"})
-    return Classification(UNKNOWN, {**detail, "reason": "flag not set and no pstore or journal evidence; "
+    return Classification(UNKNOWN, {**detail, "reason": "no fresh pstore or journal evidence; "
                                     "a power cut, a hard reset, and a hang cannot be told apart"})
 
 
 def boot_event(c: Classification, now: float | None = None) -> Event:
     """Build the wire event. dedup_key carries boot_id so the hub keeps one row
-    per boot even if the agent resends."""
+    per boot even if the agent resends. The event time is the previous heartbeat
+    (last known alive); the time of detection is in detail.detected_at. With no
+    previous heartbeat, the current time is used."""
     boot_id = c.detail.get("boot_id", "unknown")
-    return Event(kind=f"boot.{c.kind}", severity=SEVERITY[c.kind], source="boot",
-                 ts=time.time() if now is None else now,
+    hb_ts = c.detail.get("heartbeat_ts")
+    ts = float(hb_ts) if isinstance(hb_ts, (int, float)) else (time.time() if now is None else now)
+    return Event(kind=f"boot.{c.kind}", severity=SEVERITY[c.kind], source="boot", ts=ts,
                  title=f"Previous boot ended: {c.kind.replace('_', ' ')}",
-                 detail=c.detail, dedup_key=f"boot:{boot_id}")
+                 detail=c.detail, dedup_key=f"boot:{boot_id}",
+                 boot_id=boot_id if boot_id != "unknown" else None)

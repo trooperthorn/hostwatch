@@ -166,7 +166,8 @@ class Agent:
                                                reason=f"cannot read {self.cfg.procfs / boot.BOOT_ID_REL}")
             return
         previous = boot.load_heartbeat(self.cfg.data_dir)
-        pstore = boot.pstore_has_records(self.cfg.sysfs / "fs/pstore")
+        pstore = boot.pstore_evidence(self.cfg.sysfs / "fs/pstore",
+                                      previous.get("ts") if previous else None)
         result = boot.classify(previous, boot_id, pstore, {})
         if result is not None:
             self._stage_pending([*self.pending_events, boot.boot_event(result)])
@@ -261,6 +262,9 @@ class Agent:
             return
         try:
             self.heartbeat.beat()
+            current = self.status.get("boot")
+            if current is not None and not current.available:
+                self.status["boot"] = SourceStatus(source="boot", available=True, reason="")
         except OSError as exc:
             log.warning("heartbeat write failed: %s", exc)
             self.status["boot"] = SourceStatus(source="boot", available=False,
