@@ -737,3 +737,13 @@ def test_sigterm_during_a_heartbeat_write_completes_shutdown_with_the_clean_flag
     agent.run()  # a handler that took the heartbeat lock would deadlock here
     assert seen["signalled"]
     assert boot.load_heartbeat(cfg.data_dir)["agent_stopped_cleanly"] is True
+
+
+def test_first_cycle_detects_sources_on_a_freshly_booted_host(tmp_path, monkeypatch):
+    """Regression: time.monotonic() counts from host boot on Linux, so a host up
+    for less than redetect_s used to skip detection and fail every cycle."""
+    import hostwatch.agent as agent_mod
+    monkeypatch.setattr(agent_mod.time, "monotonic", lambda: 5.0)
+    agent = Agent(make_cfg(tmp_path))
+    agent.collect_once()
+    assert all(c.id in agent.status for c in agent.collectors)

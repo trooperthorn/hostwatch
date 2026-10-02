@@ -58,7 +58,10 @@ class Agent:
         self.platform = detect_platform(cfg.sysfs)
         self.status: dict[str, SourceStatus] = {}
         self.outbox = Outbox(cfg.data_dir / OUTBOX_FILE, MAX_QUEUE)
-        self._last_detect = 0.0
+        # None means detection has never run. A numeric zero would compare
+        # against time.monotonic(), which counts from host boot on Linux, so a
+        # host up for less than redetect_s would never detect its sources.
+        self._last_detect: float | None = None
         self._stop = threading.Event()
         self.heartbeat: boot.Heartbeat | None = None
         self.thresholds = ThresholdEngine()
@@ -284,7 +287,7 @@ class Agent:
         self._last_detect = time.monotonic()
 
     def collect_once(self) -> Batch:
-        if time.monotonic() - self._last_detect > self.cfg.redetect_s:
+        if self._last_detect is None or time.monotonic() - self._last_detect > self.cfg.redetect_s:
             self.detect()
         samples = []
         for c in self.collectors:
