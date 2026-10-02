@@ -97,6 +97,7 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
                   for e in exc.errors()]
         return JSONResponse(status_code=422, content={"detail": errors})
 
+    name_key = auth.audit_name_key(cfg)
     legacy_noted: list = []  # one deprecation audit row per hub process; every use is still audited
 
     def _resolve(request: Request) -> Principal | None:
@@ -113,6 +114,11 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
                 if key:
                     return Principal(f"key:{key['prefix']}", "api_key", frozenset(key["scopes"]),
                                      {"owner": key["owner"]})
+                prefix, why = store.classify_api_key_failure(token)
+                extra = {"key_reason": why}
+                if prefix:
+                    extra["key_prefix"] = prefix
+                request.state.audit_extra = extra
             elif cfg.ingest_token and hmac.compare_digest(token.encode(), cfg.ingest_token.encode()):
                 if cfg.legacy_token_disabled:
                     request.state.auth_reason = "legacy shared ingest token is disabled"
@@ -153,20 +159,39 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
 
     @app.middleware("http")
     async def audit(request: Request, call_next):
-        response = await call_next(request)
+        # The row is written in finally so a request that raises still leaves one (status 500).
+        status = 500
+        response = None
+        try:
+            response = await call_next(request)
+            status = response.status_code
+        finally:
+            if not await _write_audit(request, status):
+                if response is not None:
+                    response = JSONResponse(status_code=500, content={"detail": "audit unavailable"})
+        return response
+
+    async def _write_audit(request: Request, status: int) -> bool:
+        """Append the audit row for this request. Returns False only if the write failed."""
         if request.url.path == "/internal/v1/health":
-            return response
+            return True
         principal = getattr(request.state, "principal", None)
         override = getattr(request.state, "audit", None)
-        if principal is None and override is None and response.status_code != 401:
-            return response
+        presented = bool(request.cookies or request.headers.get("authorization"))
+        # 404 and 405 are routed before authentication runs, so they are audited only when the
+        # caller presented credentials, which keeps unauthenticated scanner noise out of the log.
+        if principal is None and override is None and status != 401 and not presented:
+            return True
         detail = dict(principal.detail) if principal else {}
         if override:
             detail.update(override["detail"])
+        detail.update(getattr(request.state, "audit_extra", None) or {})
         reason = getattr(request.state, "auth_reason", None)
         if reason:
             detail["reason"] = reason
-        kind = "auth_failure" if response.status_code in (401, 403) else "access"
+        elif principal is None and override is None and status != 401:
+            detail["reason"] = "credentials presented but the request did not authenticate"
+        kind = "auth_failure" if status in (401, 403) else "access"
         actor = principal.actor if principal else "anonymous"
         if override:
             actor, kind = override["actor"], override["kind"]
@@ -175,11 +200,11 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
         remote = request.client.host if request.client else "unknown"
         try:
             await asyncio.to_thread(store.append_audit, actor, kind,
-                                    request.method, request.url.path, response.status_code, remote, detail)
+                                    request.method, request.url.path, status, remote, detail)
         except Exception as exc:
             log.error("audit write failed: %s", exc)
-            return JSONResponse(status_code=500, content={"detail": "audit unavailable"})
-        return response
+            return False
+        return True
 
     def _uniform_401() -> JSONResponse:
         return JSONResponse(status_code=401, content={"detail": "invalid credentials"})
@@ -189,7 +214,13 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
         """Every failure (unknown user, wrong password, locked, disabled) returns the same
         401. The real reason goes to the audit log only."""
         result = auth.check_login(store, cfg, body.username, body.password)
-        detail = {"username_attempted": body.username[:64], "reason": result.reason}
+        # An unknown name may be a mistyped password, so its text is never stored; only a keyed
+        # fingerprint, so repeated attempts can be correlated.
+        if store.get_user(body.username) is not None:
+            detail = {"username_attempted": body.username[:64], "reason": result.reason}
+        else:
+            detail = {"unknown_user": True, "reason": result.reason,
+                      "username_hmac": auth.name_fingerprint(name_key, body.username)}
         if not result.ok:
             request.state.audit = {"actor": "anonymous", "kind": "auth_failure", "detail": detail}
             return _uniform_401()
@@ -198,10 +229,10 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
         csrf = csrf_token_for(token)
         resp = JSONResponse(content={"username": result.user["username"], "csrf_token": csrf})
         resp.set_cookie(SESSION_COOKIE, token, max_age=int(cfg.session_ttl_s), path="/",
-                        httponly=True, secure=cfg.tls_enabled, samesite="strict")
+                        httponly=True, secure=cfg.tls_active, samesite="strict")
         # Readable by page script on purpose: the script copies it into the CSRF header.
         resp.set_cookie(CSRF_COOKIE, csrf, max_age=int(cfg.session_ttl_s), path="/",
-                        httponly=False, secure=cfg.tls_enabled, samesite="strict")
+                        httponly=False, secure=cfg.tls_active, samesite="strict")
         return resp
 
     @app.post("/api/v1/logout")
@@ -211,8 +242,8 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
         store.revoke_session(request.state.session_token)
         request.state.audit = {"actor": principal.actor, "kind": "logout", "detail": {}}
         resp = JSONResponse(content={"status": "logged out"})
-        resp.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=cfg.tls_enabled, samesite="strict")
-        resp.delete_cookie(CSRF_COOKIE, path="/", secure=cfg.tls_enabled, samesite="strict")
+        resp.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=cfg.tls_active, samesite="strict")
+        resp.delete_cookie(CSRF_COOKIE, path="/", secure=cfg.tls_active, samesite="strict")
         return resp
 
     @app.get("/internal/v1/health")

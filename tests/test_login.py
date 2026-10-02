@@ -116,7 +116,7 @@ def test_every_attempt_is_audited_without_secrets(env):
     login(client)
     rows = list(reversed(store.audit_rows()))
     assert [(r["kind"], r["status"]) for r in rows] == [("auth_failure", 401), ("auth_failure", 401), ("login", 200)]
-    assert rows[0]["actor"] == "anonymous" and "nobody" in str(rows[0]["detail"])
+    assert rows[0]["actor"] == "anonymous" and "nobody" not in str(rows[0]["detail"]) and rows[0]["detail"]["unknown_user"]
     assert rows[2]["actor"] == "alice"
     dump = str(rows)
     assert "secret-one" not in dump and "secret-two" not in dump and PASSWORD not in dump
@@ -126,3 +126,92 @@ def test_every_attempt_is_audited_without_secrets(env):
 def test_logout_without_session_is_unauthorized(env):
     client, _ = env
     assert client.post("/api/v1/logout").status_code == 401
+
+
+# ---- Audit privacy, completeness and the Secure flag (pre-production audit fixes) ----
+
+def _session_cookie_header(resp):
+    return [c for c in resp.headers.get_list("set-cookie") if c.startswith(SESSION_COOKIE)][0].lower()
+
+
+def test_cookie_secure_when_hub_terminates_tls(tmp_path):
+    cert, key = tmp_path / "c.pem", tmp_path / "k.pem"
+    cert.write_text("x")
+    key.write_text("x")
+    client, _ = build(tmp_path, tls_cert=str(cert), tls_key=str(key))
+    assert client.app and "secure" in _session_cookie_header(login(client))
+    csrf = login(client).json()["csrf_token"]
+    out = client.post("/api/v1/logout", headers={"X-CSRF-Token": csrf})
+    assert all("secure" in c.lower() for c in out.headers.get_list("set-cookie"))
+
+
+def test_password_typed_as_username_is_never_audited_and_attempts_correlate(tmp_path, caplog):
+    client, store = build(tmp_path)
+    typed = "Tr0ub4dor&3-typed-in-the-wrong-box"
+    login(client, user=typed, pw="whatever")
+    login(client, user=typed, pw="other")
+    login(client, user="someone-else", pw="x")
+    dump = repr(store._db.execute("SELECT * FROM audit_log").fetchall()) + caplog.text
+    assert typed not in dump and "someone-else" not in dump
+    rows = store.audit_rows(kind="auth_failure")
+    unknown = [r for r in rows if r["detail"].get("unknown_user")]
+    assert len(unknown) == 3 and all("username_attempted" not in r["detail"] for r in unknown)
+    by_hmac = {}
+    for r in unknown:
+        by_hmac[r["detail"]["username_hmac"]] = by_hmac.get(r["detail"]["username_hmac"], 0) + 1
+    assert sorted(by_hmac.values()) == [1, 2]  # the repeated name shares one HMAC, the other differs
+
+
+def test_existing_username_is_still_recorded(env):
+    client, store = env
+    login(client, pw="wrong password")
+    d = store.audit_rows(kind="auth_failure")[0]["detail"]
+    assert d["username_attempted"] == "alice" and "unknown_user" not in d
+
+
+def test_revoked_key_records_prefix_and_reason(env):
+    client, store = env
+    full, row = auth.generate_api_key(store, "read:metrics", "t")
+    store.revoke_api_key(row["id"])
+    assert client.get("/internal/v1/latest", headers={"Authorization": f"Bearer {full}"}).status_code == 401
+    d = store.audit_rows(kind="auth_failure")[0]["detail"]
+    assert d["key_prefix"] == row["prefix"] and d["key_reason"] == "revoked"
+    assert full not in repr(store._db.execute("SELECT * FROM audit_log").fetchall())
+
+
+def test_unknown_and_bad_secret_keys(env):
+    client, store = env
+    full, row = auth.generate_api_key(store, "read:metrics", "t")
+    bad = f"hw_{row['prefix']}_not-the-secret"
+    unknown = "hw_deadbeef_whatever"
+    for k in (bad, unknown):
+        client.get("/internal/v1/latest", headers={"Authorization": f"Bearer {k}"})
+    rows = {r["detail"]["key_reason"]: r["detail"] for r in store.audit_rows(kind="auth_failure")}
+    assert rows["bad_secret"]["key_prefix"] == row["prefix"]
+    assert rows["unknown"].get("key_prefix") is None
+    assert "deadbeef" not in repr(store._db.execute("SELECT * FROM audit_log").fetchall())
+
+
+def test_route_that_raises_still_leaves_an_audit_row(tmp_path):
+    client, store = build(tmp_path)
+    full, _ = auth.generate_api_key(store, "read:metrics", "t")
+
+    def boom(*a, **k):
+        raise RuntimeError("store exploded")
+    store.latest = boom
+    c = TestClient(client.app, raise_server_exceptions=False)
+    assert c.get("/internal/v1/latest", headers={"Authorization": f"Bearer {full}"}).status_code == 500
+    row = [r for r in store.audit_rows() if r["path"] == "/internal/v1/latest"][0]
+    assert row["status"] == 500 and row["actor"].startswith("key:")
+
+
+def test_method_not_allowed_after_credentials_is_audited(env):
+    client, store = env
+    full, _ = auth.generate_api_key(store, "read:metrics", "t")
+    r = client.delete("/internal/v1/latest", headers={"Authorization": f"Bearer {full}"})
+    assert r.status_code == 405
+    row = store.audit_rows()[0]
+    assert row["status"] == 405 and row["method"] == "DELETE"
+    n = len(store.audit_rows())
+    client.delete("/internal/v1/latest")  # no credentials: scanner noise stays out
+    assert len(store.audit_rows()) == n

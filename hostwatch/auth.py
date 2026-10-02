@@ -9,6 +9,10 @@ as SHA-256 digests (the store does the digesting). Secrets are never logged.
 
 from __future__ import annotations
 
+import hashlib
+import hmac
+import os
+import secrets
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -139,3 +143,30 @@ def mint_internal_ingest_key(cfg: Config, store: Store) -> str:
     store.revoke_api_keys_by_owner(INTERNAL_AGENT_OWNER)
     full, _ = store.create_api_key(["ingest", "read:events"], INTERNAL_AGENT_OWNER)
     return full
+
+
+AUDIT_KEY_FILE = "audit_hmac.key"
+
+
+def audit_name_key(cfg: Config) -> bytes:
+    """Return the key used to fingerprint attempted usernames in the audit log.
+
+    It is generated once and kept in the data directory with owner-only permissions where the
+    platform supports them. It is a random key, not a password, so an attacker who reads the audit
+    log alone cannot confirm a guessed name. Whoever can read the data directory can.
+    """
+    path = cfg.data_dir / AUDIT_KEY_FILE
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return bytes.fromhex(path.read_text().strip())
+    key = secrets.token_bytes(32)
+    with os.fdopen(fd, "w") as fh:
+        fh.write(key.hex())
+    return key
+
+
+def name_fingerprint(key: bytes, name: str) -> str:
+    """Keyed HMAC of an attempted username, so repeats correlate without storing the text."""
+    return hmac.new(key, name.encode("utf-8"), hashlib.sha256).hexdigest()

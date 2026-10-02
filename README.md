@@ -57,15 +57,19 @@ Enforced:
   no writable host mount.
 
 - Browser login: `POST /api/v1/login` with a JSON username and password sets an
-  `HttpOnly`, `SameSite=Strict` session cookie (`Secure` when `HOSTWATCH_TLS=1`,
+  `HttpOnly`, `SameSite=Strict` session cookie (`Secure` when the hub serves TLS or `HOSTWATCH_TLS=1`,
   lifetime `HOSTWATCH_SESSION_TTL_S`, default 28800). Every failure (unknown
   user, wrong password, locked account) returns the same 401; the reason is in
   the audit log only. `POST /api/v1/logout` revokes the session server side. A
   cookie-authenticated POST, PUT, PATCH or DELETE must send the `X-CSRF-Token`
   header, whose value the login response returns, or it is refused with 403.
-  `HOSTWATCH_TLS` only marks the cookie `Secure`; it does not start a TLS
-  listener. Set `HOSTWATCH_TLS_CERT` and `HOSTWATCH_TLS_KEY` for that, and set
-  `HOSTWATCH_TLS=1` as well so the cookie is marked `Secure`.
+  The cookie is marked `Secure` whenever `HOSTWATCH_TLS_CERT` and
+  `HOSTWATCH_TLS_KEY` are set (enforced). `HOSTWATCH_TLS=1` does not start a TLS
+  listener; it declares a TLS proxy in front and marks the cookie `Secure`
+  (advisory, the hub cannot verify the proxy). The audit log never stores the
+  text of a username that matches no account, only a keyed HMAC kept with a key
+  in the data directory, and a rejected API key is recorded by its non-secret
+  prefix (only when it matches a stored key) and a reason.
 
 Operator commands (run inside the container or with the data directory set;
 they open the database directly, so shell access to the data directory is the

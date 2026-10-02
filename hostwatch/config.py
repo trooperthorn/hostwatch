@@ -96,6 +96,14 @@ class Config:
         """True when the hub itself will terminate TLS with an operator supplied certificate."""
         return bool(self.tls_cert and self.tls_key)
 
+    @property
+    def tls_active(self) -> bool:
+        """True when clients reach the hub over TLS: the hub terminates it (certificate and key
+        configured) or the operator declares a TLS proxy in front with HOSTWATCH_TLS. Cookies are
+        marked Secure whenever this is true. With a proxy this relies on the operator setting
+        HOSTWATCH_TLS; the hub cannot verify it (advisory)."""
+        return self.tls_configured or self.tls_enabled
+
     def _validate_bind(self) -> None:
         """Exposure control: refuse a non-loopback bind unless TLS is on or the override is set.
 

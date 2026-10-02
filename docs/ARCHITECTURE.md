@@ -320,11 +320,17 @@ over HTTP by the login endpoint described next.
 `POST /api/v1/login` takes a JSON username and password and calls
 `check_login`. On success it creates a server-side session and sets
 `hostwatch_session` with `HttpOnly`, `SameSite=Strict`, `Path=/`, a `Max-Age` of
-`HOSTWATCH_SESSION_TTL_S` and `Secure` when `HOSTWATCH_TLS=1`. Without TLS the
+`HOSTWATCH_SESSION_TTL_S` and `Secure` whenever `Config.tls_active` is true: the hub terminates TLS (certificate and key set, enforced) or `HOSTWATCH_TLS=1` declares a TLS proxy (advisory). Without TLS the
 cookie travels in clear text, so keep the hub on loopback. Every failure
 (unknown user, wrong password, locked, disabled) returns the same 401 body with
-no cookie; the reason and the attempted username (truncated) are written to the
-audit log as an `auth_failure` row under the actor `anonymous`. A success is a
+no cookie; the reason is written to the audit log as an `auth_failure` row under
+the actor `anonymous`. The attempted username is recorded only when it matches an
+existing account. Otherwise the row has `unknown_user: true` and `username_hmac`,
+an HMAC-SHA256 keyed with a random key generated once and stored in the data
+directory as `audit_hmac.key`, because an unknown name may be a mistyped password.
+Repeated attempts share an HMAC; the text is not recoverable from the log alone
+(whoever can read the data directory can test guesses, so this is privacy
+hygiene, not a boundary). A success is a
 `login` row and a logout is a `logout` row. Passwords are never logged.
 
 `POST /api/v1/logout` needs a session and marks it revoked in the database, so
@@ -355,9 +361,14 @@ carry both read scopes and never `ingest`. `admin` satisfies every scope except
 An HTTP middleware appends one `audit_log` row for each authenticated request
 and each 401 or 403, with actor, method, path, status and remote address.
 Secrets are never written; a failed attempt is recorded under the actor
-`anonymous` with a reason. If the audit write fails the request answers 500, so
-an access is never served unrecorded. Requests to unknown paths and to health
-are not audited. A test enumerates `app.routes` and fails if any route other
+`anonymous` with a reason. The row is written in a `finally` block, so a request
+whose handler raises leaves a row with status 500. A rejected `hw_` key records
+`key_reason` (`unknown`, `revoked` or `bad_secret`) and `key_prefix`, the
+non-secret lookup prefix, only when it matches a stored key. If the audit write
+fails the request answers 500, so an access is never served unrecorded. Health is
+not audited. A 404 or 405 is routed before authentication, so it is audited only
+when the request carried a cookie or Authorization header, which keeps
+unauthenticated scanner traffic out of the log. A test enumerates `app.routes` and fails if any route other
 than health answers without credentials.
 
 Consequence: an agent that has only the shared token can ingest but gets 403
@@ -440,8 +451,9 @@ to uvicorn as `ssl_certfile` and `ssl_keyfile` by `uvicorn_kwargs` in
 certificates requested but not required. `Config.validate` refuses a
 non-loopback `HOSTWATCH_HUB_BIND` without a certificate and key, unless
 `HOSTWATCH_ALLOW_INSECURE_BIND=1`, which logs a warning. The bind check is
-exposure control only and is not authentication. `HOSTWATCH_TLS=1` still only
-marks cookies `Secure`.
+exposure control only and is not authentication. `HOSTWATCH_TLS=1` does not start
+a listener; it only marks cookies `Secure` (advisory), and a configured certificate
+and key mark them `Secure` too.
 
 Operator CLI (enforced by file access, not by the network): `cli.py` provides
 `bootstrap-admin`, `user create|disable|unlock|passwd` and `key create|list|revoke`.

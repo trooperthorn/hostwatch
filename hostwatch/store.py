@@ -300,6 +300,21 @@ class Store:
             out["scopes"] = json.loads(out["scopes"])
             return out
 
+    def classify_api_key_failure(self, key: str) -> tuple[str | None, str]:
+        """Explain why a presented key was rejected. Returns (prefix, reason). The prefix is
+        non-secret and is returned only when it matches a stored key; reason is unknown, revoked
+        or bad_secret. Does not touch last_used."""
+        parts = key.split("_", 2)
+        if len(parts) != 3 or parts[0] != "hw":
+            return None, "unknown"
+        with self._lock:
+            rows = self._db.execute("SELECT revoked_at FROM api_keys WHERE prefix = ?", (parts[1],)).fetchall()
+        if not rows:
+            return None, "unknown"
+        if any(r[0] is None for r in rows):
+            return parts[1], "bad_secret"
+        return parts[1], "revoked"
+
     def revoke_api_key(self, key_id: int, now: float | None = None) -> bool:
         with self._lock, self._db:
             return self._db.execute("UPDATE api_keys SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL",
