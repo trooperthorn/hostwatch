@@ -50,6 +50,15 @@ Enforced:
   serves TLS itself; `HOSTWATCH_TLS_CLIENT_CA` optionally asks clients for a
   certificate without requiring one) or `HOSTWATCH_ALLOW_INSECURE_BIND=1`
   is set, which logs a warning and sends credentials in clear text.
+  Without TLS the hub may also bind to one specific host address (never
+  `0.0.0.0` or `::`) when `HOSTWATCH_ALLOWED_CLIENTS` lists individual client
+  IPv4 or IPv6 addresses (no CIDR ranges or hostnames). Requests from any other
+  socket peer get 403 and an audit row before authentication runs; loopback is
+  always allowed. This allowlist is exposure control, not authentication:
+  allowed clients still need a session or API key, and traffic is unencrypted.
+  It relies on `network_mode: host` so the hub sees real client addresses;
+  behind NAT or a proxy, list the proxy's address. TLS deployments may use the
+  allowlist too.
   The container runs as UID 10001, read-only root
   filesystem, all capabilities dropped, `no-new-privileges`.
 - `/sys` is mounted read-only. The host `/proc` is not mounted.

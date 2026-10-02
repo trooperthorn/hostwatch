@@ -438,6 +438,7 @@ operator deploys it.
 | One audit row per authenticated request and per 401 or 403, none for health | Enforced; append-only at the application layer only | `tests/test_phase3_exit.py` |
 | Password lockout, uniform login failure, CSRF token on cookie writes | Enforced | `tests/test_login.py` |
 | Non-loopback bind refused without TLS | Enforced, override `HOSTWATCH_ALLOW_INSECURE_BIND=1` | `tests/test_config.py` |
+| Specific-IP plain HTTP bind with `HOSTWATCH_ALLOWED_CLIENTS`; other socket peers get 403 and a `source_denied` audit row before authentication | Enforced as exposure control only, not authentication; relies on `network_mode: host` for real client addresses | `tests/test_source_allowlist.py`, `tests/test_config.py` |
 | Loopback as the default bind | Advisory: it limits exposure and is not authentication | none |
 | Proxy mode client certificates | Peer allowlist and binding lookup enforced; proxy verification and header stripping advisory | `tests/test_mtls.py` |
 | Operator CLI | Advisory: protected only by access to the data directory | `tests/test_cli.py` |
@@ -472,7 +473,19 @@ to uvicorn as `ssl_certfile` and `ssl_keyfile` by `uvicorn_kwargs` in
 certificates requested but not required. `Config.validate` refuses a
 non-loopback `HOSTWATCH_HUB_BIND` without a certificate and key, unless
 `HOSTWATCH_ALLOW_INSECURE_BIND=1`, which logs a warning. The bind check is
-exposure control only and is not authentication. `HOSTWATCH_TLS=1` does not start
+exposure control only and is not authentication. Without TLS, a non-loopback bind
+is also accepted when `HOSTWATCH_HUB_BIND` is one specific address (not 0.0.0.0, `::`
+or any unspecified address) and `HOSTWATCH_ALLOWED_CLIENTS` is a non-empty list of
+individual IPv4 or IPv6 addresses (parsed with `ipaddress`; CIDR ranges, hostnames and
+empty entries are refused naming the entry); startup logs a warning that traffic is
+unencrypted. With TLS the list is optional. When set, a middleware that runs before
+authentication compares the socket peer (`request.client.host`, never a forwarded
+header, IPv4-mapped IPv6 normalised) with the list and always admits loopback so the
+local agent can ingest. Other peers get 403 and an audit row (actor `anonymous`,
+kind `source_denied`). The allowlist is exposure control, not authentication: allowed
+clients still need a session or key. It depends on `network_mode: host` so the hub
+sees real client addresses; behind NAT or a proxy, list the proxy's address, which then
+admits everything that proxy forwards. `HOSTWATCH_TLS=1` does not start
 a listener; it only marks cookies `Secure` (advisory), and a configured certificate
 and key mark them `Secure` too.
 

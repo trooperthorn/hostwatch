@@ -70,6 +70,7 @@ class Config:
     tls_key: str = field(default_factory=lambda: _env("HOSTWATCH_TLS_KEY", ""))
     tls_client_ca: str = field(default_factory=lambda: _env("HOSTWATCH_TLS_CLIENT_CA", ""))
     allow_insecure_bind: bool = field(default_factory=lambda: parse_bool("HOSTWATCH_ALLOW_INSECURE_BIND"))
+    allowed_clients: str = field(default_factory=lambda: _env("HOSTWATCH_ALLOWED_CLIENTS", ""))
     mtls_mode: str = field(default_factory=lambda: _env("HOSTWATCH_MTLS_MODE", "off").lower())
     mtls_trusted_proxies: str = field(default_factory=lambda: _env("HOSTWATCH_MTLS_TRUSTED_PROXIES", ""))
     scrutiny_url: str = field(default_factory=lambda: _env("HOSTWATCH_SCRUTINY_URL", ""))
@@ -147,18 +148,62 @@ class Config:
                            ("HOSTWATCH_TLS_CLIENT_CA", self.tls_client_ca)):
             if path and not Path(path).is_file():
                 raise ValueError(f"{name} does not point to a readable file: {path}")
+        allowed = parse_allowed_clients(self.allowed_clients)
         if self.role == "agent" or _is_loopback(self.hub_bind) or self.tls_configured:
             return
-        if not self.allow_insecure_bind:
+        if self.allow_insecure_bind:
+            log.warning(
+                "HOSTWATCH_ALLOW_INSECURE_BIND=1: the hub listens on %s without TLS. Passwords, session "
+                "cookies and API keys cross the network in clear text. Use this only behind a TLS proxy "
+                "you control.", self.hub_bind)
+            return
+        if allowed and _is_specific_address(self.hub_bind):
+            log.warning(
+                "The hub listens on %s without TLS, limited to the clients in HOSTWATCH_ALLOWED_CLIENTS. "
+                "Passwords, session cookies and API keys cross that network unencrypted. The allowlist is "
+                "exposure control, not authentication.", self.hub_bind)
+            return
+        raise ValueError(
+            f"HOSTWATCH_HUB_BIND={self.hub_bind} is not a loopback address and TLS is not configured. "
+            "Set HOSTWATCH_TLS_CERT and HOSTWATCH_TLS_KEY, bind to 127.0.0.1, bind to one specific host "
+            "address (not 0.0.0.0 or ::) together with a non-empty HOSTWATCH_ALLOWED_CLIENTS, "
+            "or set HOSTWATCH_ALLOW_INSECURE_BIND=1 to accept plain HTTP off-host."
+        )
+
+
+def normalize_ip(value: str):
+    """Parse one address with ipaddress and map an IPv4-mapped IPv6 address to its IPv4 form."""
+    addr = ipaddress.ip_address(value)
+    if isinstance(addr, ipaddress.IPv6Address) and addr.ipv4_mapped is not None:
+        return addr.ipv4_mapped
+    return addr
+
+
+def parse_allowed_clients(raw: str) -> frozenset:
+    """Parse HOSTWATCH_ALLOWED_CLIENTS: a comma separated list of individual addresses. CIDR
+    ranges, hostnames and empty entries raise ValueError naming the entry."""
+    if not raw.strip():
+        return frozenset()
+    out = set()
+    for item in raw.split(","):
+        entry = item.strip()
+        if not entry:
+            raise ValueError("HOSTWATCH_ALLOWED_CLIENTS contains an empty entry")
+        try:
+            out.add(normalize_ip(entry))
+        except ValueError:
             raise ValueError(
-                f"HOSTWATCH_HUB_BIND={self.hub_bind} is not a loopback address and TLS is not configured. "
-                "Set HOSTWATCH_TLS_CERT and HOSTWATCH_TLS_KEY, bind to 127.0.0.1, "
-                "or set HOSTWATCH_ALLOW_INSECURE_BIND=1 to accept plain HTTP off-host."
-            )
-        log.warning(
-            "HOSTWATCH_ALLOW_INSECURE_BIND=1: the hub listens on %s without TLS. Passwords, session "
-            "cookies and API keys cross the network in clear text. Use this only behind a TLS proxy "
-            "you control.", self.hub_bind)
+                f"HOSTWATCH_ALLOWED_CLIENTS entry {entry!r} is not an individual IPv4 or IPv6 address "
+                "(CIDR ranges and hostnames are not accepted)") from None
+    return frozenset(out)
+
+
+def _is_specific_address(host: str) -> bool:
+    try:
+        addr = normalize_ip(host)
+    except ValueError:
+        return False
+    return not addr.is_unspecified and not addr.is_multicast
 
 
 def _is_loopback(host: str) -> bool:

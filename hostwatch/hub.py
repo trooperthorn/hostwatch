@@ -26,7 +26,7 @@ from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
 
 from . import __version__, auth
-from .config import Config
+from .config import Config, normalize_ip, parse_allowed_clients
 from .schema import Batch
 from .store import Store
 
@@ -163,6 +163,8 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
             return principal
         return check
 
+    allowed_clients = parse_allowed_clients(cfg.allowed_clients)
+
     @app.middleware("http")
     async def audit(request: Request, call_next):
         # The row is written in finally so a request that raises still leaves one (status 500).
@@ -211,6 +213,28 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
             log.error("audit write failed: %s", exc)
             return False
         return True
+
+    if allowed_clients:
+        @app.middleware("http")
+        async def source_filter(request: Request, call_next):
+            """Exposure control, not authentication: reject peers not on the allowlist before any
+            credential is looked at. Uses the socket peer, never a forwarded header. Loopback is
+            always allowed so the local agent can ingest."""
+            peer = request.client.host if request.client else ""
+            try:
+                addr = normalize_ip(peer)
+                permitted = addr.is_loopback or addr in allowed_clients
+            except ValueError:
+                permitted = False
+            if permitted:
+                return await call_next(request)
+            try:
+                await asyncio.to_thread(store.append_audit, "anonymous", "source_denied", request.method,
+                                        request.url.path, 403, peer or "unknown",
+                                        {"reason": "client address is not in HOSTWATCH_ALLOWED_CLIENTS"})
+            except Exception as exc:
+                log.error("audit write failed: %s", exc)
+            return JSONResponse(status_code=403, content={"detail": "forbidden"})
 
     def _uniform_401() -> JSONResponse:
         return JSONResponse(status_code=401, content={"detail": "invalid credentials"})

@@ -262,3 +262,40 @@ def test_env_example_documents_spellings():
     text = ENV_EXAMPLE.read_text()
     for word in ("true", "yes", "on", "false", "no", "off"):
         assert word in text
+
+
+# ---- Specific-IP bind with a source address allowlist (exposure control, not authentication) ----
+
+def test_specific_ip_with_allowlist_passes_and_warns(caplog):
+    with caplog.at_level(logging.WARNING, logger="hostwatch.config"):
+        _cfg(hub_bind="10.0.0.2", allowed_clients="10.0.0.5,fd00::5").validate()
+    assert any("unencrypted" in r.getMessage() for r in caplog.records)
+
+
+@pytest.mark.parametrize("bind", ["0.0.0.0", "::", "::ffff:0.0.0.0"])
+def test_wildcard_bind_with_allowlist_is_refused(bind):
+    with pytest.raises(ValueError, match="not a loopback"):
+        _cfg(hub_bind=bind, allowed_clients="10.0.0.5").validate()
+
+
+def test_specific_ip_without_allowlist_is_refused():
+    with pytest.raises(ValueError, match="not a loopback"):
+        _cfg(hub_bind="10.0.0.2").validate()
+
+
+@pytest.mark.parametrize("raw,named", [("10.0.0.0/24", "10.0.0.0/24"), ("lab.example", "lab.example"),
+                                       ("10.0.0.5,,10.0.0.6", "empty"), ("10.0.0.5,", "empty")])
+def test_bad_allowlist_entries_are_refused(raw, named):
+    with pytest.raises(ValueError, match=named):
+        _cfg(hub_bind="10.0.0.2", allowed_clients=raw).validate()
+
+
+def test_tls_with_or_without_allowlist_passes(tmp_path):
+    cert, key = _make_cert(tmp_path, "hub")
+    _cfg(hub_bind="0.0.0.0", tls_cert=cert, tls_key=key).validate()
+    _cfg(hub_bind="0.0.0.0", tls_cert=cert, tls_key=key, allowed_clients="10.0.0.5").validate()
+
+
+def test_allowlist_read_from_environment(monkeypatch):
+    monkeypatch.setenv("HOSTWATCH_ALLOWED_CLIENTS", "10.0.0.5")
+    assert Config().allowed_clients == "10.0.0.5"
