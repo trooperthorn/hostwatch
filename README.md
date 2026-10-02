@@ -35,7 +35,14 @@ Enforced:
   bearer API key, and the deprecated shared ingest token, which may only
   ingest. `latest`, `sources` and `gaps` need `read:metrics`, `events` needs
   `read:events`, `ingest` needs `ingest`. A revoked key is rejected on its next
-  request. An mTLS identity hook exists but is not wired to a TLS listener yet.
+  request. Optional client certificate login
+  (`HOSTWATCH_MTLS_MODE=off|uvicorn|proxy`, default off) maps a certificate
+  subject or SAN through the `cert_bindings` table to a user with read scopes
+  only. In `proxy` mode the identity headers are honoured only from peers listed
+  in `HOSTWATCH_MTLS_TRUSTED_PROXIES`; that peer check is enforced here, but
+  whether the proxy really verifies certificates and strips client supplied
+  headers is the proxy configuration's job and is not checked by hostwatch.
+  Smart card (YubiKey/PIV) behaviour is unverified, see `UNVERIFIED.md`.
 - The hub binds to 127.0.0.1. The container runs as UID 10001, read-only root
   filesystem, all capabilities dropped, `no-new-privileges`.
 - `/sys` is mounted read-only. The host `/proc` is not mounted.

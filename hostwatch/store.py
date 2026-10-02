@@ -159,6 +159,26 @@ class Store:
                                    (username, password_hash, time.time() if now is None else now))
             return int(cur.lastrowid)
 
+    def bind_cert(self, subject: str, user_id: int, now: float | None = None) -> None:
+        """Map a certificate subject (or `san:<entry>`) to a user. Re-binding replaces and un-revokes."""
+        with self._lock, self._db:
+            self._db.execute("INSERT INTO cert_bindings (subject, user_id, created, revoked_at) VALUES (?,?,?,NULL) "
+                             "ON CONFLICT(subject) DO UPDATE SET user_id=excluded.user_id, "
+                             "created=excluded.created, revoked_at=NULL",
+                             (subject, user_id, time.time() if now is None else now))
+
+    def revoke_cert(self, subject: str, now: float | None = None) -> bool:
+        with self._lock, self._db:
+            cur = self._db.execute("UPDATE cert_bindings SET revoked_at=? WHERE subject=? AND revoked_at IS NULL",
+                                   (time.time() if now is None else now, subject))
+            return cur.rowcount > 0
+
+    def find_cert_user(self, subject: str) -> dict | None:
+        """The enabled user bound to a subject by an unrevoked binding, or None."""
+        rows = self._rows("SELECT u.id, u.username FROM cert_bindings b JOIN users u ON u.id = b.user_id "
+                          "WHERE b.subject = ? AND b.revoked_at IS NULL AND u.disabled = 0", (subject,))
+        return rows[0] if rows else None
+
     def get_user(self, username: str) -> dict | None:
         rows = self._rows("SELECT id, username, hash, disabled, failed_count, locked_until, created "
                           "FROM users WHERE username = ?", (username,))

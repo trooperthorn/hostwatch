@@ -344,10 +344,9 @@ known username for the lock window, and there is no per-address throttle yet.
 
 Every route except `/internal/v1/health` depends on one `authenticate`
 function. It tries, in order: the `hostwatch_session` cookie, a bearer API key
-(`hw_` prefix, looked up by digest), an mTLS identity from a hook (a stub that
-returns nothing until a later slice wires a TLS listener, so it is advisory
-plumbing only), and the legacy `HOSTWATCH_INGEST_TOKEN`, which grants the
-`ingest` scope only and is marked deprecated in the audit detail. A
+(`hw_` prefix, looked up by digest), the legacy `HOSTWATCH_INGEST_TOKEN`, which grants the
+`ingest` scope only and is marked deprecated in the audit detail, and last an
+mTLS identity (see below). A
 `require_scope` check then applies: `latest`, `sources` and `gaps` need
 `read:metrics`, `events` needs `read:events`, `ingest` needs `ingest`. Sessions
 carry both read scopes and never `ingest`. `admin` satisfies every scope except
@@ -365,6 +364,29 @@ Consequence: an agent that has only the shared token can ingest but gets 403
 when it seeds threshold state from `/internal/v1/events`. Until the key CLI lands,
 an agent can be given a scoped key holding `ingest` and `read:events` in
 `HOSTWATCH_INGEST_TOKEN`, which the agent sends as its bearer token.
+
+### Client certificate identity (optional, off by default)
+
+`hostwatch/mtls.py` implements `HOSTWATCH_MTLS_MODE`. In `off` mode no
+certificate or header is read. In `uvicorn` mode the name comes from the ASGI
+TLS extension (`client_cert_name`), which exists only if the server verified
+the client certificate; headers are ignored. In `proxy` mode the hub reads
+`X-SSL-Client-Verify` (must be `SUCCESS`), `X-SSL-Client-Subject` and
+`X-SSL-Client-SAN` (comma separated, e.g. `email:a@b.example`), but only when the
+TCP peer address is inside `HOSTWATCH_MTLS_TRUSTED_PROXIES`; otherwise the
+headers are ignored as if absent. The subject, then each SAN as `san:<entry>`,
+is looked up in `cert_bindings` (unrevoked binding, enabled user). A match
+yields a principal with the session read scopes, never `ingest`. A presented
+but unmapped name gives 401 and an `auth_failure` audit row with the name.
+
+Enforced: the peer allowlist, the verify header value, the binding lookup and
+the audit. Advisory (depends on deployment): that the proxy verifies the
+certificate against the intended CA, removes client supplied copies of these
+headers, and is the only network path to the hub. Header mode is only as strong
+as that configuration. Whether the uvicorn listener populates the TLS extension
+and how smart card certificates present their subject are unverified, see
+`UNVERIFIED.md`. The CLI to create bindings arrives with the key CLI slice;
+`Store.bind_cert` is the interface.
 
 ## Security model
 
@@ -385,8 +407,7 @@ else was widened (no privileged mode, no added capability, no writable host moun
 The image installs `journalctl` from the `systemd` package. Reading the journal
 may need the `systemd-journal` group, which is recorded in `UNVERIFIED.md`.
 
-Planned (rest of Phase 3): optional
-mTLS client certificates, key management CLI and TLS serving. The bind
+Planned (rest of Phase 3): key management CLI and TLS serving. The bind
 address must not widen before that work lands.
 
 ## Isolation for tests and agents

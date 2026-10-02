@@ -3,9 +3,8 @@
 Every route except health goes through one authenticate dependency and a scope
 check, and every authenticated request and every authentication failure is
 appended to the audit log. Credentials are tried in this order: a session
-cookie, a scoped bearer API key, an mTLS identity (a hook that is not wired to a
-TLS listener yet), and the legacy shared ingest token, which is accepted for the
-ingest scope only and is deprecated. POST /api/v1/login and /api/v1/logout manage
+cookie, a scoped bearer API key, the legacy shared ingest token (accepted for the
+ingest scope only, deprecated), and last an mTLS identity (see mtls.py, off by default). POST /api/v1/login and /api/v1/logout manage
 browser sessions; a cookie-authenticated state-changing request must carry the
 CSRF header (see docs/ARCHITECTURE.md). TLS serving and the Home Assistant and
 Orion endpoints arrive in later slices, so keep the hub on loopback until then.
@@ -63,12 +62,12 @@ class Principal:
         return scope in self.scopes or ("admin" in self.scopes and scope != "ingest")
 
 
-def _no_mtls(request: Request):
-    return None
-
-
 def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
-               mtls_identity: Callable[[Request], Principal | None] = _no_mtls) -> FastAPI:
+               mtls_identity: Callable[[Request], Principal | None] | None = None) -> FastAPI:
+    if mtls_identity is None:
+        from .mtls import make_identity
+        mtls_identity = make_identity(cfg, store)
+
     async def maintenance_loop():
         while True:
             await asyncio.sleep(3600)
