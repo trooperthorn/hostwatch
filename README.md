@@ -110,6 +110,11 @@ nano deploy/.env                           # also set HOSTWATCH_RAPL_GID and HOS
 cd deploy && sudo docker compose up -d --build
 ```
 
+Boolean settings (`HOSTWATCH_TLS`, `HOSTWATCH_LEGACY_TOKEN_DISABLED`,
+`HOSTWATCH_ALLOW_INSECURE_BIND`) accept `1`, `true`, `yes`, `on` as true and `0`,
+`false`, `no`, `off` or empty as false, in any letter case. Any other value stops
+startup with an error naming the variable (enforced).
+
 ## Create the first admin and API keys
 
 The hub denies every route except health until a caller presents a session or a

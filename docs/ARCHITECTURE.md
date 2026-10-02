@@ -460,6 +460,12 @@ else was widened (no privileged mode, no added capability, no writable host moun
 The image installs `journalctl` from the `systemd` package. Reading the journal
 may need the `systemd-journal` group, which is recorded in `UNVERIFIED.md`.
 
+Boolean environment variables (enforced): every boolean setting is read by one
+helper, `parse_bool` in `config.py`. It accepts 1, true, yes, on as true and 0,
+false, no, off or empty as false, case-insensitively, and raises a `ValueError`
+naming the variable for anything else, so a misspelt value cannot silently
+disable `HOSTWATCH_ALLOW_INSECURE_BIND` or `HOSTWATCH_LEGACY_TOKEN_DISABLED`.
+
 TLS serving (enforced): `HOSTWATCH_TLS_CERT` and `HOSTWATCH_TLS_KEY` are passed
 to uvicorn as `ssl_certfile` and `ssl_keyfile` by `uvicorn_kwargs` in
 `__main__.py`; `HOSTWATCH_TLS_CLIENT_CA` adds `ssl_ca_certs` with client

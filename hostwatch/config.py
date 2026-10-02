@@ -23,6 +23,22 @@ def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
 
+_TRUE = {"1", "true", "yes", "on"}
+_FALSE = {"0", "false", "no", "off", ""}
+
+
+def parse_bool(name: str, default: str = "0") -> bool:
+    """Read a boolean environment variable. Accepts 1, true, yes, on as true and 0, false, no, off
+    or empty as false (case-insensitive, surrounding spaces ignored). Anything else raises, naming
+    the variable, so a typo can never silently turn a security setting off."""
+    raw = os.environ.get(name, default).strip().lower()
+    if raw in _TRUE:
+        return True
+    if raw in _FALSE:
+        return False
+    raise ValueError(f"{name} must be one of 1, true, yes, on, 0, false, no, off (got {raw!r})")
+
+
 @dataclass(frozen=True)
 class Config:
     role: str = field(default_factory=lambda: _env("HOSTWATCH_ROLE", "all"))
@@ -42,18 +58,18 @@ class Config:
     ingest_token: str = field(default_factory=lambda: _env("HOSTWATCH_INGEST_TOKEN", ""))
     ingest_key: str = field(default_factory=lambda: _env("HOSTWATCH_INGEST_KEY", ""))
     legacy_token_disabled: bool = field(
-        default_factory=lambda: _env("HOSTWATCH_LEGACY_TOKEN_DISABLED", "0").lower() in {"1", "true", "yes"})
+        default_factory=lambda: parse_bool("HOSTWATCH_LEGACY_TOKEN_DISABLED"))
     argon2_time_cost: int = field(default_factory=lambda: int(_env("HOSTWATCH_ARGON2_TIME_COST", "3")))
     argon2_memory_kib: int = field(default_factory=lambda: int(_env("HOSTWATCH_ARGON2_MEMORY_KIB", "65536")))
     argon2_parallelism: int = field(default_factory=lambda: int(_env("HOSTWATCH_ARGON2_PARALLELISM", "4")))
     login_max_failures: int = field(default_factory=lambda: int(_env("HOSTWATCH_LOGIN_MAX_FAILURES", "5")))
     login_lock_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_LOGIN_LOCK_S", "900")))
     session_ttl_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_SESSION_TTL_S", "28800")))
-    tls_enabled: bool = field(default_factory=lambda: _env("HOSTWATCH_TLS", "0").lower() in {"1", "true", "yes"})
+    tls_enabled: bool = field(default_factory=lambda: parse_bool("HOSTWATCH_TLS"))
     tls_cert: str = field(default_factory=lambda: _env("HOSTWATCH_TLS_CERT", ""))
     tls_key: str = field(default_factory=lambda: _env("HOSTWATCH_TLS_KEY", ""))
     tls_client_ca: str = field(default_factory=lambda: _env("HOSTWATCH_TLS_CLIENT_CA", ""))
-    allow_insecure_bind: bool = field(default_factory=lambda: _env("HOSTWATCH_ALLOW_INSECURE_BIND", "0") == "1")
+    allow_insecure_bind: bool = field(default_factory=lambda: parse_bool("HOSTWATCH_ALLOW_INSECURE_BIND"))
     mtls_mode: str = field(default_factory=lambda: _env("HOSTWATCH_MTLS_MODE", "off").lower())
     mtls_trusted_proxies: str = field(default_factory=lambda: _env("HOSTWATCH_MTLS_TRUSTED_PROXIES", ""))
     scrutiny_url: str = field(default_factory=lambda: _env("HOSTWATCH_SCRUTINY_URL", ""))

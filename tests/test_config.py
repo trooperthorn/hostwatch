@@ -182,7 +182,7 @@ def test_insecure_override_passes_and_warns(caplog):
 def test_override_read_from_environment(monkeypatch):
     monkeypatch.setenv("HOSTWATCH_ALLOW_INSECURE_BIND", "1")
     assert Config().allow_insecure_bind is True
-    monkeypatch.setenv("HOSTWATCH_ALLOW_INSECURE_BIND", "yes")
+    monkeypatch.setenv("HOSTWATCH_ALLOW_INSECURE_BIND", "0")
     assert Config().allow_insecure_bind is False
 
 
@@ -222,3 +222,43 @@ def test_legacy_token_with_api_key_prefix_fails_validation():
 def test_mtls_uvicorn_mode_raises_at_validation():
     with pytest.raises(ValueError, match="does not expose the verified peer certificate.*proxy"):
         Config(mtls_mode="uvicorn").validate()
+
+
+BOOL_VARS = (
+    ("HOSTWATCH_ALLOW_INSECURE_BIND", "allow_insecure_bind"),
+    ("HOSTWATCH_LEGACY_TOKEN_DISABLED", "legacy_token_disabled"),
+    ("HOSTWATCH_TLS", "tls_enabled"),
+)
+
+
+@pytest.mark.parametrize("var,attr", BOOL_VARS)
+@pytest.mark.parametrize("raw", ["1", "true", "TRUE", "Yes", "on", "ON", " true "])
+def test_bool_true_spellings(monkeypatch, var, attr, raw):
+    monkeypatch.setenv(var, raw)
+    assert getattr(Config(), attr) is True
+
+
+@pytest.mark.parametrize("var,attr", BOOL_VARS)
+@pytest.mark.parametrize("raw", ["0", "false", "FALSE", "No", "off", "OFF", ""])
+def test_bool_false_spellings(monkeypatch, var, attr, raw):
+    monkeypatch.setenv(var, raw)
+    assert getattr(Config(), attr) is False
+
+
+@pytest.mark.parametrize("var,attr", BOOL_VARS)
+def test_bool_unset_is_false(monkeypatch, var, attr):
+    monkeypatch.delenv(var, raising=False)
+    assert getattr(Config(), attr) is False
+
+
+@pytest.mark.parametrize("var,attr", BOOL_VARS)
+def test_bool_invalid_value_names_variable(monkeypatch, var, attr):
+    monkeypatch.setenv(var, "maybe")
+    with pytest.raises(ValueError, match=var):
+        Config()
+
+
+def test_env_example_documents_spellings():
+    text = ENV_EXAMPLE.read_text()
+    for word in ("true", "yes", "on", "false", "no", "off"):
+        assert word in text
