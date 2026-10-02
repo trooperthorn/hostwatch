@@ -86,13 +86,13 @@ The agent reads it every cycle and sends each record once per process.
 `HOSTWATCH_RASDAEMON_DB` (default `/host/rasdaemon/ras-mc_event.db`) with a
 `file:` URI and `mode=ro`, so SQLite refuses writes. The tables `mc_event`,
 `aer_event` and `mce_record` are each read only when they exist. Rows become
-`hardware_error` events with the dedup key `rasdaemon:<table>:<row id>`. Severity
+`hardware_error` events with the dedup key `rasdaemon:<table>:<row id>:<timestamp text>`, so a recreated database that reuses ids does not collide with old rows. Severity
 is `warning` for corrected errors, `critical` for uncorrected or fatal errors and
 for every machine check record. The reader keeps a high-water row id per table as
-a progress marker and reads at most 500 rows per table per call. A missing database, or a
+a progress marker and reads at most 500 rows per table per call, so a larger backlog drains over successive cycles and a restart resumes from the committed marker. If a table's maximum id is lower than its marker, the database was recreated: the marker resets to zero and the new events carry `database_recreated` in the detail. A missing database, or a
 database with none of the three tables, yields source `rasdaemon` unavailable
 with a reason; a single missing table is skipped and named in the reason of an
-otherwise available source. A row whose timestamp cannot be parsed keeps the raw
+otherwise available source. A timestamp with an explicit offset is parsed exactly; one without a zone is read as UTC, independent of the process time zone, and flagged `ts_uncertain` in the detail. A row whose timestamp cannot be parsed keeps the raw
 text in the detail and is stamped with the read time, flagged by
 `ts_is_read_time`. The agent reads it every cycle. The high-water ids are progress markers that
 commit with the batch carrying the rows (see the outbox section).

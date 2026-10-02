@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 
 from ..outbox import MemoryMarkers, Markers
@@ -44,18 +44,27 @@ DETAIL_COLUMNS = {
 }
 
 
-def parse_timestamp(value: object) -> float | None:
-    """Parse the rasdaemon timestamp text; return None when it cannot be read."""
+def parse_timestamp(value: object) -> tuple[float | None, bool]:
+    """Parse the rasdaemon timestamp text into (epoch seconds, uncertain).
+
+    A timestamp with an explicit offset is exact. One without a zone is read as
+    UTC and reported uncertain, because the zone rasdaemon used is not known and
+    the process time zone must never decide the answer. Unreadable text gives
+    (None, False)."""
     if isinstance(value, (int, float)):
-        return float(value)
+        return float(value), False
     if not isinstance(value, str):
-        return None
-    for fmt in ("%Y-%m-%d %H:%M:%S %z", "%Y-%m-%d %H:%M:%S"):
-        try:
-            return datetime.strptime(value.strip(), fmt).timestamp()
-        except ValueError:
-            continue
-    return None
+        return None, False
+    text = value.strip()
+    try:
+        return datetime.strptime(text, "%Y-%m-%d %H:%M:%S %z").timestamp(), False
+    except ValueError:
+        pass
+    try:
+        naive = datetime.strptime(text, "%Y-%m-%d %H:%M:%S")
+    except ValueError:
+        return None, False
+    return naive.replace(tzinfo=timezone.utc).timestamp(), True
 
 
 def classify_severity(table: str, row: dict) -> str:
@@ -127,6 +136,15 @@ class RasdaemonReader:
             wanted.append("timestamp")
         select = ", ".join(["id", *wanted])
         last = self._high_water(table)
+        recreated = False
+        newest = conn.execute(f"SELECT MAX(id) FROM {table}").fetchone()[0]
+        if last > 0 and (newest or 0) < last:
+            # Ids only grow in a live database, so a lower maximum means it was
+            # recreated. Start over; the timestamp in the dedup key keeps the
+            # hub from merging new rows with old rows that reused an id.
+            recreated = True
+            last = 0
+            self.markers.stage(f"rasdaemon.high_water.{table}", "0")
         rows = conn.execute(
             f"SELECT {select} FROM {table} WHERE id > ? ORDER BY id LIMIT ?",
             (last, MAX_ROWS_PER_READ)).fetchall()
@@ -135,9 +153,14 @@ class RasdaemonReader:
             data = dict(row)
             rid = data.pop("id")
             raw_ts = data.pop("timestamp", None)
-            ts = parse_timestamp(raw_ts)
+            ts, uncertain = parse_timestamp(raw_ts)
             detail = {k: v for k, v in data.items() if v is not None}
             detail["table"] = table
+            if recreated:
+                detail["database_recreated"] = True
+            if uncertain:
+                detail["ts_uncertain"] = True
+                detail["timestamp_raw"] = raw_ts
             if ts is None:
                 # Unavailable beats wrong: keep the raw text and mark the time as read time.
                 detail["timestamp_raw"] = raw_ts
@@ -147,6 +170,6 @@ class RasdaemonReader:
             events.append(Event(
                 kind=KIND, severity=classify_severity(table, data), source=SOURCE, ts=ts,
                 title=f"rasdaemon {table} {rid}: {msg}",
-                detail=detail, dedup_key=f"rasdaemon:{table}:{rid}"))
+                detail=detail, dedup_key=f"rasdaemon:{table}:{rid}:{raw_ts}"))
             self.markers.stage(f"rasdaemon.high_water.{table}", str(rid))
         return events
