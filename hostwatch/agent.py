@@ -24,7 +24,7 @@ from . import __version__
 from .collectors import build_collectors
 from .config import Config
 from .events import boot, pstore
-from .events.journal import JournalWatcher
+from .events.journal import BackgroundJournal, JournalWatcher
 from .events.rasdaemon import RasdaemonReader
 from .events.thresholds import ThresholdEngine
 from .outbox import OUTBOX_FILE, Outbox
@@ -61,7 +61,8 @@ class Agent:
         self._stop = threading.Event()
         self.heartbeat: boot.Heartbeat | None = None
         self.thresholds = ThresholdEngine()
-        journal = JournalWatcher(cfg.journal, cfg.data_dir, markers=self.outbox)
+        journal = BackgroundJournal(JournalWatcher(cfg.journal, cfg.data_dir, markers=self.outbox,
+                                                   volatile=cfg.journal_volatile))
         rasdaemon = RasdaemonReader(cfg.rasdaemon_db, markers=self.outbox)
         self.event_sources: dict[str, EventSource] = {
             "pstore": self._read_pstore,

@@ -108,6 +108,7 @@ class FakeReader:
 def journal_agent(tmp_path, entries):
     jdir = tmp_path / "journal"
     jdir.mkdir(exist_ok=True)
+    (jdir / "system.journal").write_bytes(b"x")
     agent = Agent(make_cfg(tmp_path, journal=jdir))
     watcher = JournalWatcher(jdir, agent.cfg.data_dir, FakeReader(entries), markers=agent.outbox)
     agent.event_sources = {"journal": watcher.read}

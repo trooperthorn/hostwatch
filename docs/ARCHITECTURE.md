@@ -109,8 +109,22 @@ not repeat entries. A table of patterns maps message text to the kinds
 `disk.io_error`, `disk.ata_link_reset` and `thermal.throttle`; the first match
 wins and unmatched lines give no events. The dedup key is `journal:<cursor>`.
 A missing directory, a missing `journalctl` binary or a failing run yields
-source `journal` unavailable with a reason. The first read with no saved cursor
-reads the whole journal. The agent reads it every cycle. The cursor is a progress marker that commits
+source `journal` unavailable with a reason, and so does a directory that holds
+no readable `*.journal` file. When `journalctl` exits 0 with empty output and
+an error on stderr (for example a permission problem) that stderr text is the
+unavailable reason, because a quiet healthy journal prints no error. When the
+persistent directory has no readable journal files, the watcher reads
+`HOSTWATCH_JOURNAL_VOLATILE` (default `/host/journal-volatile`) instead. The
+first read with no saved cursor is bounded: `--boot=0` and `--boot=-1`, each
+with `-n 5000`; a missing previous boot is tolerated. Later reads use
+`--after-cursor`. The `journalctl` call runs on a worker thread
+(`BackgroundJournal`) with its own 60 second limit, so a slow journal never
+delays a sample cycle: each agent cycle collects the previous worker's result,
+parses it and starts the next read. Parsing and cursor staging stay on the
+agent thread so the cursor remains tied to the events it produced. The
+`ataN: SATA link up` message counts as a link reset only after a reset on the
+same port was seen, and RAID `[U_]` status needs an `mdN` or `md/raid` context.
+The cursor is a progress marker that commits
 with the batch carrying the entries read, so a crash after a read re-reads the
 entries instead of skipping them. An older `journal.cursor` file is imported once
 when no marker exists.
@@ -213,7 +227,7 @@ else was widened (no privileged mode, no added capability, no writable host moun
 | Host path | Container path | Config variable |
 |---|---|---|
 | `/var/log/journal` | `/host/journal` | `HOSTWATCH_JOURNAL` |
-| `/run/log/journal` | `/host/journal-volatile` | none yet; mounted for later use, the watcher reads only `HOSTWATCH_JOURNAL` |
+| `/run/log/journal` | `/host/journal-volatile` | `HOSTWATCH_JOURNAL_VOLATILE`; read only when the persistent directory has no readable journal files |
 | `/sys/fs/pstore` | `/host/pstore` | `HOSTWATCH_PSTORE` |
 | `/var/lib/rasdaemon` | `/host/rasdaemon` | `HOSTWATCH_RASDAEMON_DB` (file `ras-mc_event.db`) |
 

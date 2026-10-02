@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import json
 import subprocess
+import threading
+import time
 
 import pytest
 
 from hostwatch.events import journal
-from hostwatch.events.journal import JournalWatcher, ReaderError
+from hostwatch.events.journal import BackgroundJournal, JournalWatcher, ReaderError
 
 
 def entry(n, message, **extra):
@@ -35,6 +37,7 @@ class FakeReader:
 def dirs(tmp_path):
     jdir = tmp_path / "journal"
     jdir.mkdir()
+    (jdir / "system.journal").write_bytes(b"x")
     data = tmp_path / "data"
     data.mkdir()
     return jdir, data
@@ -135,3 +138,142 @@ def test_default_reader_nonzero_exit(monkeypatch, tmp_path):
                         lambda cmd, **kw: subprocess.CompletedProcess(cmd, 1, stdout="", stderr="boom"))
     with pytest.raises(ReaderError, match="exited 1: boom"):
         journal.default_reader(tmp_path, None)
+
+
+def completed(cmd, out="", err="", code=0):
+    return subprocess.CompletedProcess(cmd, code, stdout=out, stderr=err)
+
+
+def test_exit_zero_with_permission_stderr_is_unavailable(monkeypatch, dirs):
+    jdir, data = dirs
+    monkeypatch.setattr(journal.shutil, "which", lambda name: "/usr/bin/journalctl")
+    monkeypatch.setattr(journal.subprocess, "run", lambda cmd, **kw: completed(
+        cmd, err="Failed to open journal file: Permission denied"))
+    status, events = JournalWatcher(jdir, data).read()
+    assert not status.available and "Permission denied" in status.reason and events == []
+
+
+def test_no_entries_notice_is_not_an_error(monkeypatch, dirs):
+    jdir, data = dirs
+    monkeypatch.setattr(journal.shutil, "which", lambda name: "/usr/bin/journalctl")
+    monkeypatch.setattr(journal.subprocess, "run", lambda cmd, **kw: completed(cmd, err="-- No entries --"))
+    status, events = JournalWatcher(jdir, data).read()
+    assert status.available and events == []
+
+
+def test_first_read_is_bounded_to_two_boots(monkeypatch, tmp_path):
+    cmds = []
+    monkeypatch.setattr(journal.shutil, "which", lambda name: "/usr/bin/journalctl")
+
+    def fake_run(cmd, **kw):
+        cmds.append(cmd[1:])
+        if "--boot=-1" in cmd:
+            return completed(cmd, err="No journal boot entry found", code=1)  # single-boot journal
+        return completed(cmd, out='{"a": 1}\n')
+
+    monkeypatch.setattr(journal.subprocess, "run", fake_run)
+    assert journal.default_reader(tmp_path, None) == ['{"a": 1}']
+    cap = ["-n", str(journal.FIRST_READ_MAX_LINES)]
+    base = [f"--directory={tmp_path}", "-o", "json", "--no-pager"]
+    assert cmds == [[*base, "--boot=0", *cap], [*base, "--boot=-1", *cap]]
+
+
+def test_directory_without_journal_files_is_unavailable(tmp_path):
+    jdir = tmp_path / "journal"
+    jdir.mkdir()
+    (jdir / "notes.txt").write_text("x")
+    status, events = JournalWatcher(jdir, tmp_path, FakeReader([entry(1, "ata3: hard resetting link")])).read()
+    assert not status.available and "no readable journal files" in status.reason and events == []
+
+
+def test_volatile_is_used_when_persistent_is_empty(tmp_path):
+    persistent, volatile = tmp_path / "p", tmp_path / "v"
+    persistent.mkdir()
+    volatile.mkdir()
+    (volatile / "system.journal").write_bytes(b"x")
+    used = []
+
+    def reader(directory, cursor):
+        used.append(directory)
+        return [json.dumps(entry(1, "ata3: hard resetting link"))]
+
+    status, events = JournalWatcher(persistent, tmp_path, reader, volatile=volatile).read()
+    assert status.available and len(events) == 1 and used == [volatile]
+
+
+def test_persistent_wins_when_it_has_files(dirs, tmp_path):
+    jdir, data = dirs
+    volatile = tmp_path / "v"
+    volatile.mkdir()
+    (volatile / "system.journal").write_bytes(b"x")
+    used = []
+    JournalWatcher(jdir, data, lambda d, c: used.append(d) or [], volatile=volatile).read()
+    assert used == [jdir]
+
+
+def test_sata_link_up_at_normal_boot_gives_no_event(dirs):
+    jdir, data = dirs
+    reader = FakeReader([entry(1, "ata1: SATA link up 6.0 Gbps (SStatus 133 SControl 300)")])
+    status, events = JournalWatcher(jdir, data, reader).read()
+    assert status.available and events == []
+
+
+def test_sata_link_up_after_reset_on_same_port_counts(dirs):
+    jdir, data = dirs
+    reader = FakeReader([entry(1, "ata2: hard resetting link"),
+                         entry(2, "ata2: SATA link up 3.0 Gbps (SStatus 123 SControl 300)"),
+                         entry(3, "ata1: SATA link up 6.0 Gbps (SStatus 133 SControl 300)")])
+    _, events = JournalWatcher(jdir, data, reader).read()
+    assert [e.dedup_key for e in events] == ["journal:c1", "journal:c2"]
+
+
+def test_stray_raid_status_line_gives_no_event(dirs):
+    jdir, data = dirs
+    reader = FakeReader([entry(1, "some tool printed [U_] in a table"),
+                         entry(2, "md127: array status [UU]")])
+    _, events = JournalWatcher(jdir, data, reader).read()
+    assert events == []
+
+
+def test_md_status_with_context_is_degraded(dirs):
+    jdir, data = dirs
+    _, events = JournalWatcher(jdir, data, FakeReader([entry(1, "md127: raid1 status [U_]")])).read()
+    assert [e.kind for e in events] == ["md.degraded"]
+
+
+def test_slow_reader_does_not_delay_the_sample_cycle(dirs):
+    jdir, data = dirs
+    release = threading.Event()
+    started = threading.Event()
+    inner = FakeReader([entry(1, "ata3: hard resetting link")])
+
+    def slow(directory, cursor):
+        started.set()
+        assert release.wait(30)
+        return inner(directory, cursor)
+
+    bg = BackgroundJournal(JournalWatcher(jdir, data, slow))
+    t0 = time.monotonic()
+    status, events = bg.read()
+    _, none = bg.read()
+    assert time.monotonic() - t0 < 1.0
+    assert started.wait(5) and events == [] and none == [] and not status.available
+    release.set()
+    bg._thread.join(5)
+    status, events = bg.read()
+    assert status.available and [e.dedup_key for e in events] == ["journal:c1"]
+    bg._thread.join(5)
+
+
+def test_background_reader_failure_is_unavailable(dirs):
+    jdir, data = dirs
+
+    def failing(directory, cursor):
+        raise ReaderError("journalctl is not installed")
+
+    bg = BackgroundJournal(JournalWatcher(jdir, data, failing))
+    bg.read()
+    bg._thread.join(5)
+    status, events = bg.read()
+    assert not status.available and status.reason == "journalctl is not installed"
+    bg._thread.join(5)

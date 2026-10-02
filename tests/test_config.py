@@ -27,10 +27,11 @@ def _volumes() -> list[str]:
 
 
 def test_event_source_defaults(monkeypatch):
-    for name in ("HOSTWATCH_JOURNAL", "HOSTWATCH_PSTORE", "HOSTWATCH_RASDAEMON_DB"):
+    for name in ("HOSTWATCH_JOURNAL", "HOSTWATCH_JOURNAL_VOLATILE", "HOSTWATCH_PSTORE", "HOSTWATCH_RASDAEMON_DB"):
         monkeypatch.delenv(name, raising=False)
     cfg = Config()
     assert cfg.journal == Path("/host/journal")
+    assert cfg.journal_volatile == Path("/host/journal-volatile")
     assert cfg.pstore == Path("/host/pstore")
     assert cfg.rasdaemon_db == Path("/host/rasdaemon/ras-mc_event.db")
 
@@ -59,11 +60,12 @@ def test_host_proc_is_not_mounted():
 
 
 def test_mount_points_match_config_defaults(monkeypatch):
-    for name in ("HOSTWATCH_JOURNAL", "HOSTWATCH_PSTORE", "HOSTWATCH_RASDAEMON_DB"):
+    for name in ("HOSTWATCH_JOURNAL", "HOSTWATCH_JOURNAL_VOLATILE", "HOSTWATCH_PSTORE", "HOSTWATCH_RASDAEMON_DB"):
         monkeypatch.delenv(name, raising=False)
     targets = {v.split(":")[1] for v in _volumes() if v.startswith("/")}
     cfg = Config()
     assert cfg.journal.as_posix() in targets
+    assert cfg.journal_volatile.as_posix() in targets
     assert cfg.pstore.as_posix() in targets
     assert cfg.rasdaemon_db.parent.as_posix() in targets
 
@@ -76,5 +78,5 @@ def test_no_privileged_or_capabilities_added():
 
 def test_env_example_lists_event_variables():
     text = ENV_EXAMPLE.read_text()
-    for name in ("HOSTWATCH_JOURNAL", "HOSTWATCH_PSTORE", "HOSTWATCH_RASDAEMON_DB"):
+    for name in ("HOSTWATCH_JOURNAL", "HOSTWATCH_JOURNAL_VOLATILE", "HOSTWATCH_PSTORE", "HOSTWATCH_RASDAEMON_DB"):
         assert name in text
