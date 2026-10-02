@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import re
 import time
 
 from fastapi.testclient import TestClient
@@ -181,12 +182,14 @@ def test_default_deny_every_route_but_health(tmp_path):
         # grants nothing without a correct password (tests/test_login.py).
         if not methods or route.path in ("/internal/v1/health", "/api/v1/login"):
             continue
-        assert "{" not in route.path, "a parameterised route needs an explicit default-deny case"
+        # Path parameters get a placeholder value: authentication runs before the handler, so
+        # the value is never looked up and every parameterised route must still answer 401.
+        path = re.sub(r"\{[^}]+\}", "x", route.path)
         for m in methods - {"HEAD", "OPTIONS"}:
             seen.append((m, route.path))
-            assert client.request(m, route.path).status_code == 401, (m, route.path)
+            assert client.request(m, path).status_code == 401, (m, route.path)
             bad = {"Authorization": "Bearer wrong"}
-            assert client.request(m, route.path, headers=bad).status_code == 401, (m, route.path)
+            assert client.request(m, path, headers=bad).status_code == 401, (m, route.path)
     assert ("POST", "/internal/v1/ingest") in seen and len(seen) >= 5
     assert client.get("/internal/v1/health").status_code == 200
     assert store.audit_rows(kind="auth_failure")

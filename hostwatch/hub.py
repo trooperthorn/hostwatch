@@ -28,6 +28,8 @@ from pydantic import BaseModel, Field
 
 from . import __version__, auth
 from .config import Config, normalize_ip, parse_allowed_clients
+from .integrations import orion as orion_doc
+from .integrations.summary import build_host_summary
 from .schema import Batch
 from .store import Store
 
@@ -355,5 +357,30 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
         import time
         found = store.gaps(host, source, metric, time.time() - hours * 3600, max_gap_s)
         return {"gap_count": len(found), "gaps": found}
+
+    def orion_summary(host: str):
+        if not any(a["host"] == host for a in store.agents()) and not any(r["host"] == host for r in store.sources()):
+            raise HTTPException(status_code=404, detail="unknown host")
+        return build_host_summary(store, host, time.time())
+
+    @app.get("/api/v1/orion/hosts", dependencies=[Depends(require_scope("read:metrics"))])
+    def orion_hosts():
+        names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
+        out: dict = {"host_count": len(names)}
+        for i, name in enumerate(names):
+            s = build_host_summary(store, name, time.time())
+            out[f"host_{i}_name"] = name
+            out[f"host_{i}_status"] = orion_doc.summary_document(s)["overall_status"]
+        return out
+
+    @app.get("/api/v1/orion/hosts/{host}/summary", dependencies=[Depends(require_scope("read:metrics"))])
+    def orion_host_summary(host: str):
+        return orion_doc.summary_document(orion_summary(host))
+
+    @app.get("/api/v1/orion/hosts/{host}/{group}", dependencies=[Depends(require_scope("read:metrics"))])
+    def orion_group(host: str, group: str):
+        if group not in orion_doc.GROUPS:
+            raise HTTPException(status_code=404, detail="unknown group")
+        return orion_doc.group_document(orion_summary(host), group)
 
     return app

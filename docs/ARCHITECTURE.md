@@ -304,6 +304,27 @@ and 60 C), memory used at 90 percent warns and 97 is critical, an md array with
 warns. These limits are defaults, listed in `UNVERIFIED.md`. `HostSummary.status`
 is the worst known component status, or `None` when nothing is known.
 
+## Orion API Poller endpoints
+
+`hostwatch/integrations/orion.py` renders the shared `HostSummary` as flat JSON
+and `hub.py` serves it under `/api/v1/orion`, read-only, each route behind
+`require_scope("read:metrics")` so the Phase 3 source allowlist and
+authentication apply unchanged. Routes: `GET /api/v1/orion/hosts`,
+`/hosts/{host}/summary` and `/hosts/{host}/{group}` for the groups `cpu`,
+`memory`, `power`, `temperatures`, `raid`, `pools`, `disks` and `sources`. A host
+is known if it has an agent row or a source row; otherwise the answer is 404, as
+it is for an unknown group.
+
+Documents are one level deep. Keys are snake_case and stable: item keys are built
+from slugged labels (`temp_k10temp_tctl_c`, `md_md0_degraded_devices`,
+`disk_<wwn>_device_status`, `source_<name>_up`). Every group has
+`<group>_status` (0, 1 or 2) and `<group>_available` (1 or 0). When nothing in a
+group is known, the value keys are omitted, `<group>_available` is 0, the group
+status is 1 (the same warning the summary gives an unavailable source) and
+`<group>_reason` says why. The `pools` group reports unavailable until a pool
+collector exists. Nothing is stored by this layer, so a restart or a recreated
+app on the same database gives the same answers.
+
 ## Storage
 
 SQLite in `/data`. Raw samples are kept for `HOSTWATCH_RAW_RETENTION_DAYS`,

@@ -114,7 +114,14 @@ password go to stdout once and cannot be shown again, because only hashes are
 stored. Every command, including a refused one, writes an audit row of kind
 `cli`.
 
-Not yet present (later slices and phases): Home Assistant and Orion endpoints.
+The hub serves read-only SolarWinds Orion API Poller endpoints under
+`/api/v1/orion`, behind a key with the `read:metrics` scope: `hosts`,
+`hosts/{host}/summary` and `hosts/{host}/{cpu|memory|power|temperatures|raid|pools|disks|sources}`.
+Each answers flat JSON with numeric values and a numeric status per group (0 ok,
+1 warning, 2 critical). An unavailable value is left out and the group reports
+`<group>_available` 0 with a `<group>_reason`. An unknown host answers 404.
+
+Not yet present (later slices and phases): Home Assistant and Prometheus outputs.
 The read examples below that use the shared token answer 403; use a key with
 the matching scope, created with `key create`.
 
