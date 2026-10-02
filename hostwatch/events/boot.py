@@ -49,8 +49,8 @@ PRECEDENCE = (
     "watchdog_reset: watchdog bootstatus card_reset",
     "clean_shutdown: journal shutdown sequence completed",
     "watchdog_reset: journal watchdog message without a completed shutdown",
-    "agent_stopped: agent stopped only",
-    "unknown_unclean: journal ended abruptly",
+    "unknown_unclean: journal read and ended abruptly, even if the agent stopped",
+    "agent_stopped: agent stopped and the journal could not be read",
     "unknown",
 )
 
@@ -294,12 +294,15 @@ def classify(previous_heartbeat: dict[str, Any] | None, current_boot_id: str,
     if journal_wd:
         notes = ["the journal has a watchdog message but the agent stopped cleanly"] if stopped else []
         return result(WATCHDOG_RESET, "journal watchdog message with no completed shutdown sequence", notes)
+    if abrupt:
+        why = "previous journal ended without a shutdown sequence"
+        if stopped:
+            why += ", although the agent stopped cleanly (a container stop is not a host shutdown)"
+        return Classification(UNKNOWN_UNCLEAN, {**detail, "evidence": why,
+                                                "reason": "a power cut and a hang cannot be told apart without a witness"})
     if stopped:
         return Classification(AGENT_STOPPED, {**detail, "reason": "the agent stopped cleanly but there is no journal evidence "
                                               "of a host shutdown, so a container stop cannot be told from a reboot"})
-    if abrupt:
-        return Classification(UNKNOWN_UNCLEAN, {**detail, "evidence": "previous journal ended without a shutdown sequence",
-                                                "reason": "a power cut and a hang cannot be told apart without a witness"})
     if journal_unavailable:
         seen = f"previous boot journal unavailable ({journal_unavailable})"
     elif hints:
@@ -308,6 +311,41 @@ def classify(previous_heartbeat: dict[str, Any] | None, current_boot_id: str,
         seen = "the previous boot's journal was not checked"
     reason = f"{seen}; no fresh pstore record and no watchdog bootstatus card reset; a power cut, a hard reset, and a hang cannot be told apart"
     return Classification(UNKNOWN, {**detail, "reason": reason})
+
+
+def intermediate_boots(boots: list[dict], heartbeat_boot_id: str, current_boot_id: str) -> list[dict]:
+    """Boots strictly between the heartbeat's boot and the current boot in a
+    chronological boot list. Empty when either end is not in the list, because
+    then the order cannot be known."""
+    ids = [b["boot_id"] for b in boots]
+    try:
+        lo = ids.index(heartbeat_boot_id.replace("-", "").lower())
+        hi = ids.index(current_boot_id.replace("-", "").lower())
+    except ValueError:
+        return []
+    return boots[lo + 1:hi] if lo < hi else []
+
+
+def dashed(flat: str) -> str:
+    return f"{flat[:8]}-{flat[8:12]}-{flat[12:16]}-{flat[16:20]}-{flat[20:]}"
+
+
+def missed_boot_classification(rec: dict, hints: dict[str, bool] | None, unavailable: str | None,
+                               previous_boot_id: str, now: float | None = None) -> Classification:
+    """An unknown event for a boot the agent never observed (the container was
+    down for the whole boot). Its own journal hints are recorded as evidence but
+    do not change the kind, because no heartbeat describes that boot."""
+    now = time.time() if now is None else now
+    detail: dict[str, Any] = {
+        "boot_id": dashed(rec["boot_id"]), "previous_boot_id": previous_boot_id,
+        "heartbeat_ts": rec.get("last_ts"), "detected_at": now,
+        "journal_hints": dict(hints or {}),
+        "reason": "the agent did not run during this boot, so how it ended was not observed"}
+    if rec.get("first_ts") is not None:
+        detail["boot_first_entry_ts"] = rec["first_ts"]
+    if unavailable:
+        detail["journal_previous_boot"] = unavailable
+    return Classification(UNKNOWN, detail)
 
 
 def boot_event(c: Classification, now: float | None = None) -> Event:

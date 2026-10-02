@@ -215,7 +215,9 @@ class Agent:
         result = boot.classify(previous, boot_id, pstore, hints, journal_unavailable=journal_unavailable,
                                bootstatus=bootstatus)
         if result is not None:
-            self._stage_pending([*self.pending_events, boot.boot_event(result)])
+            events = [boot.boot_event(result), *self._missed_boot_events(previous, boot_id)]
+            have = {e.dedup_key for e in self.pending_events}
+            self._stage_pending([*self.pending_events, *(e for e in events if e.dedup_key not in have)])
             self.outbox.commit_staged()
             if pstore.get("fresh_keys"):
                 try:
@@ -225,6 +227,26 @@ class Agent:
             log.info("boot classified as %s", result.kind)
         self.heartbeat = boot.Heartbeat(self.cfg.data_dir, boot_id)
         self.status["boot"] = SourceStatus(source="boot", available=True, reason="")
+
+    def _missed_boot_events(self, previous: dict | None, boot_id: str) -> list:
+        """Unknown events for boots that began and ended while the agent was not
+        running, found through the pluggable boot list reader."""
+        if previous is None or previous.get("boot_id") == boot_id:
+            return []
+        try:
+            boots = self.journal_watcher.list_boots()
+        except ReaderError:
+            return []  # the boot list is optional evidence; the main event stands
+        out = []
+        prev_id = previous["boot_id"]
+        for rec in boot.intermediate_boots(boots, prev_id, boot_id):
+            hints, why = None, None
+            try:
+                hints = self.journal_watcher.previous_boot(rec["boot_id"])
+            except ReaderError as exc:
+                why = str(exc)
+            out.append(boot.boot_event(boot.missed_boot_classification(rec, hints, why, prev_id)))
+        return out
 
     def detect(self) -> None:
         for c in self.collectors:

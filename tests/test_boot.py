@@ -158,8 +158,8 @@ def test_abrupt_journal_end_without_witness_is_unknown_unclean_not_power_loss():
     assert "without a witness" in result.detail["reason"]
 
 
-def jline(n, message):
-    return json.dumps({"__CURSOR": f"p{n}", "MESSAGE": message})
+def jline(n, message, **fields):
+    return json.dumps({"__CURSOR": f"p{n}", "MESSAGE": message, **fields})
 
 
 def with_prev_journal(cfg, agent_lines):
@@ -183,8 +183,8 @@ def with_prev_journal(cfg, agent_lines):
 def test_previous_boot_journal_with_shutdown_target_gives_clean_shutdown(tmp_path):
     cfg = make_cfg(tmp_path)
     write_hb(cfg, clean=True)
-    agent = with_prev_journal(cfg, [jline(1, "Started foo."), jline(2, "Reached target shutdown.target - System Shutdown."),
-                                    jline(3, "systemd-journald[300]: Journal stopped")])
+    agent = with_prev_journal(cfg, [jline(1, "Started foo."), jline(2, "Reached target shutdown.target - System Shutdown.", _PID="1", _COMM="systemd"),
+                                    jline(3, "Journal stopped", _PID="1", _COMM="systemd")])
     agent.start_boot_check()
     (ev,) = agent.pending_events
     assert ev.kind == "boot.clean_shutdown"
@@ -362,7 +362,7 @@ def test_previous_boot_journal_uses_heartbeat_boot_id_not_minus_one(tmp_path, mo
     (cfg.journal / "system.journal").write_bytes(b"x")
     other = "cccccccc0000000000000000000000cc"
     # A fake journal in which -b -1 is a different boot than the heartbeat's.
-    by_boot = {OLD.replace("-", ""): [jline(1, "Reached target shutdown.target - System Shutdown.")],
+    by_boot = {OLD.replace("-", ""): [jline(1, "Reached target shutdown.target - System Shutdown.", _PID="1")],
                other: [jline(2, "eth0: link up")]}
     monkeypatch.setattr(journal.shutil, "which", lambda name: "/usr/bin/journalctl")
 
@@ -375,6 +375,8 @@ def test_previous_boot_journal_uses_heartbeat_boot_id_not_minus_one(tmp_path, mo
     def run(cmd, **kw):
         assert "-b" not in cmd
         match = [a for a in cmd if a.startswith("_BOOT_ID=")]
+        if not match:
+            return Done([])
         return Done(by_boot.get(match[0].split("=", 1)[1], []))
     monkeypatch.setattr(journal.subprocess, "run", run)
     agent = Agent(cfg)
@@ -446,8 +448,8 @@ def test_shutdown_tail_with_watchdog_line_through_journal_hints(tmp_path):
     cfg = make_cfg(tmp_path)
     write_hb(cfg, clean=True)
     agent = with_prev_journal(cfg, [jline(1, "watchdog: watchdog0: watchdog did not stop!"),
-                                    jline(2, "Reached target shutdown.target - System Shutdown."),
-                                    jline(3, "systemd-journald[300]: Journal stopped")])
+                                    jline(2, "Reached target shutdown.target - System Shutdown.", _PID="1", _COMM="systemd"),
+                                    jline(3, "Journal stopped", _PID="1", _COMM="systemd")])
     agent.start_boot_check()
     (ev,) = agent.pending_events
     assert ev.kind == "boot.clean_shutdown"
@@ -485,3 +487,84 @@ def test_unknown_reason_describes_what_was_read_not_no_journal_evidence():
     assert "no journal evidence" not in r.detail["reason"]
     assert "journal hints were read" in r.detail["reason"]
     assert "was not checked" in boot.classify(hb, NEW, False, {}).detail["reason"]
+
+
+def test_agent_stopped_plus_abrupt_journal_end_gives_unknown_unclean(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg, clean=True)
+    agent = with_prev_journal(cfg, [jline(1, "Started foo."), jline(2, "eth0: link up")])
+    agent.start_boot_check()
+    (ev,) = agent.pending_events
+    assert ev.kind == "boot.unknown_unclean"
+    assert ev.severity == "critical"
+    assert ev.detail["agent_stopped_cleanly"] is True
+
+
+def test_agent_stopped_with_unreadable_journal_is_still_agent_stopped(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg, clean=True)
+    agent = with_prev_journal(cfg, ReaderError("nope"))
+    agent.start_boot_check()
+    assert agent.pending_events[0].kind == "boot.agent_stopped"
+
+
+def test_shutting_down_from_another_service_with_abrupt_end_is_not_clean_shutdown(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg)
+    agent = with_prev_journal(cfg, [
+        jline(1, "Shutting down.", _PID="812", _COMM="mydaemon", SYSLOG_IDENTIFIER="mydaemon"),
+        jline(2, "Journal stopped", _PID="300", _COMM="systemd-journal", SYSLOG_IDENTIFIER="systemd-journald"),
+        jline(3, "eth0: link up")])
+    agent.start_boot_check()
+    (ev,) = agent.pending_events
+    assert ev.kind == "boot.unknown_unclean"
+    assert ev.detail["journal_hints"]["host_shutdown"] is False
+
+
+def test_systemd_shutdown_entries_are_matched_by_pid_comm_or_identifier():
+    from hostwatch.events import journal
+    for fields in ({"_PID": "1"}, {"_COMM": "systemd-shutdown"}, {"SYSLOG_IDENTIFIER": "systemd"},
+                   {"SYSLOG_IDENTIFIER": "systemd-shutdown"}):
+        hints = journal.previous_boot_hints([jline(1, "Shutting down.", **fields)])
+        assert hints["host_shutdown"] is True, fields
+
+
+def test_two_boots_missed_while_container_down_give_one_event_per_boot(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg, clean=True)
+    mid1, mid2 = "11111111" * 4, "22222222" * 4
+    listing = json.dumps([
+        {"index": -3, "boot_id": OLD.replace("-", ""), "first_entry": 1_000_000, "last_entry": 2_000_000},
+        {"index": -2, "boot_id": mid1, "first_entry": 3_000_000, "last_entry": 4_000_000},
+        {"index": -1, "boot_id": mid2, "first_entry": 5_000_000, "last_entry": 6_000_000},
+        {"index": 0, "boot_id": NEW.replace("-", ""), "first_entry": 7_000_000, "last_entry": 8_000_000}])
+    by_boot = {OLD.replace("-", ""): [jline(1, "Shutting down.", _PID="1")],
+               mid1: [jline(2, "eth0: link up")],
+               mid2: [jline(3, "Reached target reboot.target.", _PID="1")]}
+    agent = with_prev_journal(cfg, [])
+    agent.journal_watcher.previous_boot_reader = lambda d, b: by_boot[b.replace('-', '')]
+    agent.journal_watcher.list_boots_reader = lambda d: [listing]
+    agent.start_boot_check()
+    events = {e.dedup_key: e for e in agent.pending_events}
+    assert len(agent.pending_events) == 3
+    main = events[f"boot:{NEW}"]
+    assert main.kind == "boot.clean_shutdown"
+    one = events[f"boot:{boot.dashed(mid1)}"]
+    two = events[f"boot:{boot.dashed(mid2)}"]
+    assert one.kind == two.kind == "boot.unknown"
+    assert one.detail["journal_hints"]["abrupt_end"] is True
+    assert two.detail["journal_hints"]["host_shutdown"] is True
+    assert one.boot_id == boot.dashed(mid1)
+    assert one.ts == 4.0 and two.ts == 6.0
+
+
+def test_intermediate_boot_event_is_not_duplicated_when_already_pending(tmp_path):
+    cfg = make_cfg(tmp_path)
+    write_hb(cfg)
+    mid = "11111111" * 4
+    listing = json.dumps([{"boot_id": OLD.replace("-", "")}, {"boot_id": mid}, {"boot_id": NEW.replace("-", "")}])
+    agent = with_prev_journal(cfg, [jline(1, "x")])
+    agent.journal_watcher.list_boots_reader = lambda d: [listing]
+    agent.start_boot_check()
+    keys = [e.dedup_key for e in agent.pending_events]
+    assert len(keys) == len(set(keys)) == 2

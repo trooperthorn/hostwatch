@@ -71,8 +71,11 @@ pstore directory that cannot be read is reported in `detail.pstore` as
 unavailable, never as no records. A missing or malformed heartbeat gives
 `unknown`. The journal hints come from `journalctl --directory=<dir> _BOOT_ID=<32 hex of the heartbeat's boot id> -n 200 -o json` (not `-b -1`, which may be another boot; an invalid id or an id absent from the journal makes the hint source unavailable with a reason),
 run through `JournalWatcher.previous_boot` with a pluggable reader (a callable taking
-the directory), only when the boot_id changed. A shutdown target or "Journal stopped"
-message gives `host_shutdown`, a watchdog message gives `watchdog`, and entries with no
+the directory), only when the boot_id changed. A shutdown target, "Journal stopped",
+"Shutting down." or systemd-shutdown message gives `host_shutdown` only when systemd
+PID 1 or systemd-shutdown wrote it (`_PID=1`, or `_COMM` or `SYSLOG_IDENTIFIER` of
+`systemd` or `systemd-shutdown`); the same text from another service or a mid-boot
+journald restart does not count. A watchdog message gives `watchdog`, a watchdog message gives `watchdog`, and entries with no
 shutdown message give `abrupt_end`. If the previous boot's journal cannot be read or is
 empty, no hints are passed and `detail.journal_previous_boot` holds the reason. The
 agent also reads `<sysfs>/class/watchdog/watchdog0/bootstatus`; the
@@ -84,14 +87,23 @@ Phase 6 adds. Kinds are never inferred from absence of evidence.
 Precedence when evidence contradicts, strongest first (`boot.PRECEDENCE`):
 fresh pstore panic record, then watchdog bootstatus `card_reset`, then a
 journal shutdown sequence that completed, then a journal watchdog message with
-no completed shutdown, then agent stopped only, then `unknown_unclean`, then
-`unknown`. A watchdog message inside a completed shutdown tail is therefore
+no completed shutdown, then `unknown_unclean` (the journal was read and ended
+abruptly, even when the agent stopped cleanly, because a container stop before a
+power cut is not a clean host stop), then agent stopped (only when the journal could
+not be read), then `unknown`. A watchdog message inside a completed shutdown tail is therefore
 `clean_shutdown`, because the watchdog is normally disarmed during an orderly
 stop. Hardware bootstatus is not overridden by a clean agent stop. When the
 winning class disagrees with other evidence, `detail.contradiction` names each
 disagreement and `detail.evidence_seen` lists every piece of evidence. The
 `unknown` reason states what was actually read (journal unavailable, hints read
 but inconclusive, or journal not checked).
+
+When more than one boot passed while the agent was down, `JournalWatcher.list_boots`
+runs `journalctl --list-boots -o json` through a pluggable reader. The heartbeat's boot
+is classified from its own journal as above, and each boot strictly between it and the
+current boot gets a `boot.unknown` event with dedup key `boot:<its boot id>`, its own
+journal hints in `detail.journal_previous_boot` or `detail.journal_hints`, and no
+guessed cause. If the list cannot be read, only the main event is emitted.
 
 The event kind is `boot.<class>` with dedup key `boot:<boot_id>`. Its `ts` is
 the previous heartbeat time (last known alive), `detail.detected_at` is when the

@@ -126,6 +126,9 @@ def default_reader(directory: Path, cursor: str | None) -> Iterable[str]:
 
 
 PREVIOUS_BOOT_LINES = 200
+# Shutdown evidence counts only when systemd itself (PID 1) or systemd-shutdown
+# wrote the entry, so other services and a mid-boot journald restart do not match.
+SHUTDOWN_WRITERS = {"systemd", "systemd-shutdown"}
 # Messages systemd and journald log on an orderly stop. Assumed, not yet confirmed
 # on hardware; see UNVERIFIED.md.
 SHUTDOWN_PATTERN = re.compile(
@@ -154,6 +157,56 @@ def default_previous_boot_reader(directory: Path, boot_id: str) -> Iterable[str]
     return _run_journalctl(exe, directory, [f"_BOOT_ID={flat}", "-n", str(PREVIOUS_BOOT_LINES)])
 
 
+def is_systemd_shutdown_entry(entry: dict) -> bool:
+    """True when the entry was written by systemd PID 1 or systemd-shutdown,
+    judged by _PID, _COMM or SYSLOG_IDENTIFIER."""
+    if str(entry.get("_PID", "")).strip() == "1":
+        return True
+    for key in ("_COMM", "SYSLOG_IDENTIFIER"):
+        value = entry.get(key)
+        if isinstance(value, str) and value.strip() in SHUTDOWN_WRITERS:
+            return True
+    return False
+
+
+def default_list_boots_reader(directory: Path) -> Iterable[str]:
+    """Run journalctl read-only to list the boots the journal holds."""
+    exe = shutil.which("journalctl")
+    if exe is None:
+        raise ReaderError("journalctl is not installed")
+    return _run_journalctl(exe, directory, ["--list-boots"])
+
+
+def parse_boot_list(lines: Iterable[str]) -> list[dict]:
+    """Parse `journalctl --list-boots -o json` output (a JSON array, oldest boot
+    first) into dicts with a normalized 32 hex "boot_id" and optional "first_ts"
+    and "last_ts" in seconds. Raises ReaderError when nothing can be read."""
+    text = "\n".join(lines).strip()
+    try:
+        raw = json.loads(text)
+    except (ValueError, TypeError) as exc:
+        raise ReaderError("the boot list is not valid JSON") from exc
+    if not isinstance(raw, list):
+        raise ReaderError("the boot list is not a JSON array")
+    boots: list[dict] = []
+    for item in raw:
+        if not isinstance(item, dict) or not isinstance(item.get("boot_id"), str):
+            continue
+        try:
+            bid = normalize_boot_id(item["boot_id"])
+        except ReaderError:
+            continue
+        rec: dict = {"boot_id": bid}
+        for src, dst in (("first_entry", "first_ts"), ("last_entry", "last_ts")):
+            v = item.get(src)
+            if isinstance(v, (int, float)):
+                rec[dst] = v / 1_000_000
+        boots.append(rec)
+    if not boots:
+        raise ReaderError("the boot list is empty")
+    return boots
+
+
 def previous_boot_hints(lines: Iterable[str]) -> dict[str, bool]:
     """Derive boot classifier hints from the previous boot's last journal lines.
     host_shutdown: a shutdown message is present. watchdog: a watchdog message is
@@ -172,7 +225,7 @@ def previous_boot_hints(lines: Iterable[str]) -> dict[str, bool]:
         if message is None:
             continue
         seen += 1
-        if SHUTDOWN_PATTERN.search(message):
+        if is_systemd_shutdown_entry(entry) and SHUTDOWN_PATTERN.search(message):
             shutdown += 1
         hit = classify(message)
         if hit is not None and hit[0] == "watchdog.event":
@@ -235,7 +288,8 @@ class JournalWatcher:
     def __init__(self, directory: Path, data_dir: Path, reader: Reader | None = None,
                  markers: Markers | None = None, volatile: Path | None = None,
                  has_files: Callable[[Path], bool] = has_journal_files,
-                 previous_boot_reader: Callable[[Path, str], Iterable[str]] | None = None) -> None:
+                 previous_boot_reader: Callable[[Path, str], Iterable[str]] | None = None,
+                 list_boots_reader: Callable[[Path], Iterable[str]] | None = None) -> None:
         """With markers (the agent outbox), the cursor is staged and becomes
         durable together with the batch that carries the events read. Without
         markers the cursor is saved to a file at once, for standalone use."""
@@ -250,6 +304,15 @@ class JournalWatcher:
         self._truncated = False
         self._unreadable: list[str] = []
         self.previous_boot_reader = previous_boot_reader or default_previous_boot_reader
+        self.list_boots_reader = list_boots_reader or default_list_boots_reader
+
+    def list_boots(self) -> list[dict]:
+        """The boots the journal holds, oldest first. Raises ReaderError."""
+        directory = self.choose_directory()
+        try:
+            return parse_boot_list(self.list_boots_reader(directory))
+        except ReaderError as exc:
+            raise ReaderError(f"boot list: {exc}") from exc
 
     def previous_boot(self, boot_id: str) -> dict[str, bool]:
         """Hints from the previous boot's last entries, read through the same
