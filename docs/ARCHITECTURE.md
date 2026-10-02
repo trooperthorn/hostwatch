@@ -67,6 +67,19 @@ journal watchers that a later slice adds, so until then those boots are
 queued for the next batch. The source `boot` is reported unavailable when the
 boot_id cannot be read.
 
+## pstore ingestion
+
+`hostwatch/events/pstore.py` reads the directory named by `HOSTWATCH_PSTORE`
+(default `/host/pstore`) read-only. Every regular file becomes one event:
+`pstore.kernel_panic` or `pstore.kernel_oops` for `dmesg-*` files whose text
+carries a panic or oops marker, otherwise `pstore.record`. The dedup key is
+`pstore:<file name>:<first 16 hex of the content sha256>`, so re-reading gives
+the same key and a rewritten record gives a new one. Files are never deleted or
+modified. A missing or unreadable directory yields source `pstore` unavailable
+with a reason and no events; an empty directory is available with no events.
+The reader is not yet called from the agent cycle; wiring and the compose mount
+come in later slices.
+
 ## Storage
 
 SQLite in `/data`. Raw samples are kept for `HOSTWATCH_RAW_RETENTION_DAYS`,

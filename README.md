@@ -14,6 +14,7 @@ Current phase: **1 (collector core)**. Phase 0 is complete on MediaIn-SVR.
 | `hostwatch/collectors/` | One module per source: `cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `scrutiny` |
 | `hostwatch/agent.py` | Detect, collect, push to hub; bounded queue while the hub is down; writes the boot heartbeat |
 | `hostwatch/events/boot.py` | Heartbeat writer and boot classifier (clean shutdown, watchdog reset, kernel panic, power loss, unknown) |
+| `hostwatch/events/pstore.py` | Read-only pstore ingestion (`HOSTWATCH_PSTORE`, default `/host/pstore`): crash records become deduplicated events and are never deleted |
 | `hostwatch/hub.py` | Internal ingest and read API (token-protected, loopback only in Phase 1) |
 | `hostwatch/store.py` | SQLite: raw samples, hourly rollups, source availability, versioned schema with an additive events table |
 | `scripts/host-prep.sh` | Phase 0 host check and fixes |
