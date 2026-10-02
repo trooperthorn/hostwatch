@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import logging
 import random
+import threading
 import time
 from typing import Callable, Protocol
 
@@ -67,6 +68,7 @@ class MqttClient:
         self._clock = clock
         self._rng = rng
         self._keepalive = keepalive
+        self._lock = threading.RLock()  # the discovery loop and the events thread share one client
         self.connected = False
         self.failures = 0
         self.next_attempt: float | None = None
@@ -99,6 +101,10 @@ class MqttClient:
         return text.replace(password, "***") if password else text
 
     def ensure_connected(self) -> bool:
+        with self._lock:
+            return self._ensure_connected()
+
+    def _ensure_connected(self) -> bool:
         """Connect if needed and due. Returns True when connected. Safe to call every tick: after a
         failure it does nothing until the backoff delay has passed on the injected clock."""
         if not self.enabled:
@@ -136,25 +142,27 @@ class MqttClient:
 
     def publish(self, topic: str, payload: str, *, retain: bool = False, qos: int = 1) -> bool:
         """Publish if connected. Returns False and does nothing when not connected."""
-        if not self.connected:
-            return False
-        try:
-            self.transport.publish(topic, payload, qos, retain)
-        except Exception as exc:  # noqa: BLE001
-            self.connected = False
-            log.warning("MQTT publish failed (%s); will reconnect", type(exc).__name__)
-            return False
-        return True
+        with self._lock:
+            if not self.connected:
+                return False
+            try:
+                self.transport.publish(topic, payload, qos, retain)
+            except Exception as exc:  # noqa: BLE001
+                self.connected = False
+                log.warning("MQTT publish failed (%s); will reconnect", type(exc).__name__)
+                return False
+            return True
 
     def close(self) -> None:
         """Clean shutdown. A clean disconnect does not fire the will, so say offline explicitly."""
-        if self.connected:
-            try:
-                self.transport.publish(self.availability_topic, OFFLINE, 1, True)
-                self.transport.disconnect()
-            except Exception as exc:  # noqa: BLE001
-                log.warning("MQTT close failed (%s)", type(exc).__name__)
-        self.connected = False
+        with self._lock:
+            if self.connected:
+                try:
+                    self.transport.publish(self.availability_topic, OFFLINE, 1, True)
+                    self.transport.disconnect()
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("MQTT close failed (%s)", type(exc).__name__)
+            self.connected = False
 
 
 class PahoTransport:

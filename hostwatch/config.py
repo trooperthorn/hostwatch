@@ -88,6 +88,7 @@ class Config:
     mqtt_tls_insecure: bool = field(default_factory=lambda: parse_bool("HOSTWATCH_MQTT_TLS_INSECURE"))
     mqtt_discovery_prefix: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_DISCOVERY_PREFIX", "homeassistant"))
     mqtt_base_topic: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_BASE_TOPIC", "hostwatch"))
+    mqtt_events_interval: float = field(default_factory=lambda: float(_env("HOSTWATCH_MQTT_EVENTS_INTERVAL", "10")))
 
     def validate(self) -> None:
         if self.role not in {"all", "hub", "agent"}:
@@ -157,6 +158,9 @@ class Config:
             return
         if not 1 <= self.mqtt_port <= 65535:
             raise ValueError(f"HOSTWATCH_MQTT_PORT must be between 1 and 65535 (got {self.mqtt_port})")
+        if not self.mqtt_events_interval > 0:
+            raise ValueError("HOSTWATCH_MQTT_EVENTS_INTERVAL must be greater than 0 seconds "
+                             f"(got {self.mqtt_events_interval})")
         if self.mqtt_password and self.mqtt_password_file:
             raise ValueError("Set only one of HOSTWATCH_MQTT_PASSWORD and HOSTWATCH_MQTT_PASSWORD_FILE")
         has_password = bool(self.mqtt_password or self.mqtt_password_file)

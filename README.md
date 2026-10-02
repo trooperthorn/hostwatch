@@ -220,7 +220,8 @@ The Home Assistant publisher stays off until `HOSTWATCH_MQTT_HOST` is set. Relat
 `HOSTWATCH_MQTT_PORT` (1883), `HOSTWATCH_MQTT_USERNAME` with `HOSTWATCH_MQTT_PASSWORD_FILE`
 (preferred) or `HOSTWATCH_MQTT_PASSWORD`, `HOSTWATCH_MQTT_TLS`, `HOSTWATCH_MQTT_TLS_CA`,
 `HOSTWATCH_MQTT_TLS_CERT` with `HOSTWATCH_MQTT_TLS_KEY`, `HOSTWATCH_MQTT_TLS_INSECURE`,
-`HOSTWATCH_MQTT_DISCOVERY_PREFIX` (homeassistant) and `HOSTWATCH_MQTT_BASE_TOPIC` (hostwatch).
+`HOSTWATCH_MQTT_DISCOVERY_PREFIX` (homeassistant), `HOSTWATCH_MQTT_BASE_TOPIC` (hostwatch) and
+`HOSTWATCH_MQTT_EVENTS_INTERVAL` (10 seconds between checks for new events).
 Half-set credentials or missing files stop startup with a message naming the setting. The
 password is never logged.
 
@@ -229,8 +230,11 @@ sensors for CPU, memory, package power, temperatures, RAID array and disk health
 sensors for each data source, and problem binary sensors (device class `problem`). Discovery
 messages are retained and republished after every reconnect, when Home Assistant publishes its
 birth message on `<discovery prefix>/status`, and after a hub restart. A value that cannot be
-known is shown by Home Assistant as unavailable, never as zero. The events topic and pool
-health arrive in later Phase 4 slices.
+known is shown by Home Assistant as unavailable, never as zero. Boot classifications and
+hardware events (pstore, rasdaemon, threshold and journal) go to `<base topic>/events` as
+non-retained JSON, once each, with a cursor kept in the database so a restart neither replays
+nor drops them; the first run starts at the newest existing event. Pool health arrives in a
+later Phase 4 slice.
 
 ## Tests
 

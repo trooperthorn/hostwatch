@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS agents (
 # a database with user_version 0 is treated as version 1 once its Phase 1 tables
 # exist. Each migration step is additive: it only creates objects and is guarded
 # with IF NOT EXISTS so that running it twice changes nothing.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: (
@@ -97,6 +97,12 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END""",
         """CREATE TRIGGER IF NOT EXISTS audit_log_no_delete BEFORE DELETE ON audit_log
 BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END""",
+    ),
+    5: (
+        # Publish progress per consumer: the last events.id already sent. Additive, no existing row changes.
+        """CREATE TABLE IF NOT EXISTS publish_cursors (
+  name TEXT PRIMARY KEY, last_id INTEGER NOT NULL, updated REAL NOT NULL
+)""",
     ),
 }
 
@@ -421,6 +427,36 @@ class Store:
         params.append(limit)
         with self._lock:
             cur = self._db.execute(sql, params)
+            cols = [c[0] for c in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            r["detail"] = json.loads(r["detail"])
+        return rows
+
+    def get_cursor(self, name: str) -> int | None:
+        """The last events.id a publisher reported as sent, or None if it has never run."""
+        with self._lock:
+            row = self._db.execute("SELECT last_id FROM publish_cursors WHERE name = ?", (name,)).fetchone()
+        return None if row is None else int(row[0])
+
+    def set_cursor(self, name: str, last_id: int, now: float | None = None) -> None:
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO publish_cursors (name, last_id, updated) VALUES (?,?,?) "
+                "ON CONFLICT(name) DO UPDATE SET last_id = excluded.last_id, updated = excluded.updated",
+                (name, last_id, time.time() if now is None else now))
+
+    def max_event_id(self) -> int:
+        with self._lock:
+            return int(self._db.execute("SELECT COALESCE(MAX(id), 0) FROM events").fetchone()[0])
+
+    def events_after(self, last_id: int, sources: tuple[str, ...], limit: int = 100) -> list[dict]:
+        """Events with id above `last_id` from the given sources, oldest id first."""
+        marks = ",".join("?" for _ in sources)
+        with self._lock:
+            cur = self._db.execute(
+                "SELECT id, host, ts, kind, severity, source, title, detail, boot_id FROM events "
+                f"WHERE id > ? AND source IN ({marks}) ORDER BY id LIMIT ?", (last_id, *sources, limit))
             cols = [c[0] for c in cur.description]
             rows = [dict(zip(cols, r)) for r in cur.fetchall()]
         for r in rows:

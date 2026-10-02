@@ -141,7 +141,7 @@ def test_v3_database_migrates_to_v4_with_rows_intact(tmp_path):
     make_v3(p)
     assert not (AUTH_TABLES & tables(p))
     store = Store(p)
-    assert version(p) == 4
+    assert version(p) == SCHEMA_VERSION
     assert AUTH_TABLES <= tables(p)
     assert len(store.events("h1")) == 1
     assert store.agents()[0]["host"] == "h1"
@@ -158,5 +158,5 @@ def test_v4_second_run_is_noop(tmp_path):
     store.append_audit("a", "k", "GET", "/x", 200, "127.0.0.1")
     store._migrate()
     Store(p)
-    assert version(p) == 4
+    assert version(p) == SCHEMA_VERSION
     assert len(store.audit_rows()) == 1

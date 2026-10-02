@@ -130,6 +130,31 @@ def serve_hub(app, cfg: Config) -> None:
             s.close()
 
 
+def build_ha(cfg: Config, store, transport_factory=None):
+    """The Home Assistant discovery publisher and events publisher, sharing one MQTT client, or
+    (None, None) when MQTT is not configured. Only the hub and all roles call this."""
+    if not cfg.mqtt_enabled:
+        return None, None
+    from .integrations.ha_events import HomeAssistantEventPublisher
+    from .integrations.homeassistant import HomeAssistantPublisher
+    from .integrations.mqtt_client import MqttClient, PahoTransport
+    transport = transport_factory() if transport_factory else PahoTransport("hostwatch-hub")
+    client = MqttClient(cfg, transport)
+    return HomeAssistantPublisher(cfg, client, store), HomeAssistantEventPublisher(cfg, client, store)
+
+
+def chain(*hooks):
+    """One callable that runs each non-None hook in order, or None when there are none."""
+    active = [h for h in hooks if h]
+    if not active:
+        return None
+
+    def run() -> None:
+        for hook in active:
+            hook()
+    return run
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -158,14 +183,10 @@ def main(argv: list[str] | None = None) -> int:
                                   hub_url=local_agent_hub_url(cfg))
     agent = Agent(cfg) if cfg.role == "all" else None
     thread = threading.Thread(target=agent.run, name="agent", daemon=True) if agent else None
-    ha_publisher = None
-    if cfg.mqtt_enabled:
-        from .integrations.homeassistant import HomeAssistantPublisher
-        from .integrations.mqtt_client import MqttClient, PahoTransport
-        ha_publisher = HomeAssistantPublisher(cfg, MqttClient(cfg, PahoTransport("hostwatch-hub")), store)
+    ha_publisher, ha_events = build_ha(cfg, store)
     app = create_app(cfg, store,
-                     on_start=thread.start if thread else None,
-                     on_stop=agent.stop_and_wait if agent else None,
+                     on_start=chain(thread.start if thread else None, ha_events.start if ha_events else None),
+                     on_stop=chain(ha_events.stop if ha_events else None, agent.stop_and_wait if agent else None),
                      ha_publisher=ha_publisher)
     serve_hub(app, cfg)
     return 0

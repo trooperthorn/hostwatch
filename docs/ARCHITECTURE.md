@@ -370,7 +370,26 @@ Discovery is republished when the connection epoch changes (first connect, recon
 restart), when a `online` birth message arrives (the listener only sets a flag; the next tick
 publishes), when an entity definition changes, and after any failed publish. A new hub process
 starts with nothing marked as published, so a restart on the same database republishes
-everything. Pool health has no collector yet and the events topic is a later slice.
+everything. Pool health has no collector yet.
+
+### Events topic
+
+`hostwatch/integrations/ha_events.py` sends boot classifications and hardware events (store
+sources `boot`, `pstore`, `rasdaemon`, `thresholds` and `journal`) to `<base>/events`, one JSON
+message per event with the store event id, host, timestamp, kind, severity, source, title,
+detail and boot id. Messages are not retained, so a new subscriber is not told about old
+events as if they were new. The publisher runs on its own thread, started and stopped from
+`__main__` through the hub `on_start` and `on_stop` hooks, and only in the hub and all roles
+and only when MQTT is configured. It shares the MQTT client with the discovery publisher; the
+client serialises connect, publish and close with a lock.
+
+Progress is the last event id sent, kept in the `publish_cursors` table (schema version 5, an
+additive migration guarded by `IF NOT EXISTS`). The cursor moves only after a publish was
+accepted, so a restart neither replays nor skips events, and a failed publish retries from the
+same event on the next tick. A crash between a publish and the cursor write sends that one
+event again, so consumers should deduplicate by `id`. The first run starts at the newest stored
+event instead of replaying history. `HOSTWATCH_MQTT_EVENTS_INTERVAL` (seconds, default 10) sets
+the poll period.
 
 ## Storage
 
