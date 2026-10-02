@@ -6,3 +6,5 @@ deploy/.env
 *.db
 *.sqlite
 .venv/
+build/
+*.egg-info/
