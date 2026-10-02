@@ -105,6 +105,17 @@ class SchemaTooNewError(RuntimeError):
     """Raised when the database was written by a newer version of hostwatch."""
 
 
+AUDIT_PATH_MAX = 256
+
+
+def sanitize_audit_path(path: str) -> str:
+    """Make a request path safe to store: control characters (including those decoded from
+    percent-encoded input such as newline or NUL) become "?", and the result is capped at
+    AUDIT_PATH_MAX characters, so a hostile path cannot forge log lines or bloat a row."""
+    cleaned = "".join("?" if (ord(c) < 32 or 0x7F <= ord(c) <= 0x9F) else c for c in str(path))
+    return cleaned[:AUDIT_PATH_MAX]
+
+
 class Store:
     def __init__(self, path: Path) -> None:
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -333,7 +344,9 @@ class Store:
     def append_audit(self, actor: str, kind: str, method: str, path: str, status: int, remote: str,
                      detail: dict | None = None, now: float | None = None) -> int:
         """Append one audit row. There is deliberately no update or delete method, and triggers
-        abort UPDATE and DELETE. This is application-layer protection, not tamper-proofing."""
+        abort UPDATE and DELETE. This is application-layer protection, not tamper-proofing.
+        The path is sanitised here so every writer gets the same protection."""
+        path = sanitize_audit_path(path)
         with self._lock, self._db:
             cur = self._db.execute(
                 "INSERT INTO audit_log (ts, actor, kind, method, path, status, remote, detail) "

@@ -56,6 +56,13 @@ row per request). Controls and their labels:
 | Legacy shared ingest token | Enforced as ingest only; deprecated until disabled |
 | Operator CLI | Boundary is shell access to the data directory, not the network |
 
+Open items for Phase 3:
+
+- The audit log has no retention. It is append-only by trigger, so pruning needs a
+  deliberate design (for example archiving then rotating the file). Source denials are
+  aggregated per peer per minute, which bounds that one source of growth but not the
+  log as a whole.
+
 ## Phase 0 detail
 
 Run on each host:

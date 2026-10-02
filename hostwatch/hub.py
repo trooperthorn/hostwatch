@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import hmac
 import logging
+import time
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Callable
@@ -45,6 +46,41 @@ class LoginBody(BaseModel):
     password: str = Field(min_length=1, max_length=1024)
 
 
+class DenialAggregator:
+    """Bounds source_denied audit growth. The first denial from a peer is written. Further denials
+    inside the window are only counted; the first one after the window closes is written with the
+    count of denials since the previous row. At most one row per peer per window, and at most
+    MAX_PEERS peers are tracked (extra peers share one bucket), so memory and database growth stay
+    bounded however many requests a scanner sends."""
+
+    WINDOW_S = 60.0
+    MAX_PEERS = 4096
+    OVERFLOW = "overflow"
+
+    def __init__(self, clock=time.monotonic):
+        self._clock = clock
+        self._state: dict[str, list] = {}  # peer -> [last row time, denials not yet written]
+
+    def note(self, peer: str):
+        """Record one denial. Returns None when no row should be written, 0 for a first row, or
+        the number of denials the summary row covers (including this one)."""
+        now = self._clock()
+        if peer not in self._state and len(self._state) >= self.MAX_PEERS:
+            self._state = {k: v for k, v in self._state.items() if now - v[0] < self.WINDOW_S}
+            if len(self._state) >= self.MAX_PEERS:
+                peer = self.OVERFLOW
+        entry = self._state.get(peer)
+        if entry is None:
+            self._state[peer] = [now, 0]
+            return 0
+        if now - entry[0] < self.WINDOW_S:
+            entry[1] += 1
+            return None
+        covered = entry[1] + 1
+        self._state[peer] = [now, 0]
+        return covered
+
+
 def csrf_token_for(session_token: str) -> str:
     """The CSRF token is derived from the session token, so the server can verify it
     without storing it and a token from another session never matches."""
@@ -62,7 +98,7 @@ class Principal:
         return scope in self.scopes or ("admin" in self.scopes and scope != "ingest")
 
 
-def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
+def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_clock=time.monotonic,
                mtls_identity: Callable[[Request], Principal | None] | None = None) -> FastAPI:
     if mtls_identity is None:
         from .mtls import make_identity
@@ -164,6 +200,7 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
         return check
 
     allowed_clients = parse_allowed_clients(cfg.allowed_clients)
+    denials = DenialAggregator(clock=denial_clock)
 
     @app.middleware("http")
     async def audit(request: Request, call_next):
@@ -228,12 +265,16 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
                 permitted = False
             if permitted:
                 return await call_next(request)
-            try:
-                await asyncio.to_thread(store.append_audit, "anonymous", "source_denied", request.method,
-                                        request.url.path, 403, peer or "unknown",
-                                        {"reason": "client address is not in HOSTWATCH_ALLOWED_CLIENTS"})
-            except Exception as exc:
-                log.error("audit write failed: %s", exc)
+            summary = denials.note(peer or "unknown")
+            if summary is not None:
+                detail = {"reason": "client address is not in HOSTWATCH_ALLOWED_CLIENTS"}
+                if summary > 0:
+                    detail["denied_since_last_row"] = summary
+                try:
+                    await asyncio.to_thread(store.append_audit, "anonymous", "source_denied", request.method,
+                                            request.url.path, 403, peer or "unknown", detail)
+                except Exception as exc:
+                    log.error("audit write failed: %s", exc)
             return JSONResponse(status_code=403, content={"detail": "forbidden"})
 
     def _uniform_401() -> JSONResponse:

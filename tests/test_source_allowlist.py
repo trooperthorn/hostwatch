@@ -78,3 +78,34 @@ def test_no_allowlist_means_no_filter(tmp_path):
     client, store = build(tmp_path, OTHER, allowed="")
     assert client.get("/internal/v1/health").status_code == 200
     assert denials(store) == []
+
+
+def test_denial_flood_is_aggregated_per_peer(tmp_path):
+    now = [0.0]
+    cfg = Config(ingest_token="t" * 64, data_dir=tmp_path, argon2_time_cost=1, argon2_memory_kib=8,
+                 argon2_parallelism=1, allowed_clients="10.0.0.5")
+    store = Store(tmp_path / "db.sqlite")
+    client = TestClient(create_app(cfg, store, denial_clock=lambda: now[0]), client=OTHER)
+    for _ in range(1000):
+        assert client.get("/internal/v1/latest").status_code == 403
+    assert len(denials(store)) == 1
+    now[0] = 61.0
+    assert client.get("/internal/v1/latest").status_code == 403
+    rows = denials(store)
+    assert len(rows) == 2
+    assert [r["detail"].get("denied_since_last_row") for r in rows if "denied_since_last_row" in r["detail"]] == [1000]
+
+
+def test_audited_path_has_no_control_characters_and_is_capped(tmp_path):
+    client, store = build(tmp_path, OTHER)
+    assert client.get("/a%0Ab%00c" + "x" * 1000).status_code == 403
+    path = denials(store)[0]["path"]
+    assert not any(ord(c) < 32 or ord(c) == 127 for c in path)
+    assert len(path) == 256 and path.startswith("/ab?c") or path.startswith("/a?b?c")
+
+
+def test_every_audit_writer_sanitises_the_path(tmp_path):
+    store = Store(tmp_path / "db.sqlite")
+    store.append_audit("a", "access", "GET", "/x\ny\x00z\x1b" + "p" * 500, 200, "127.0.0.1")
+    path = store.audit_rows()[0]["path"]
+    assert path.startswith("/x?y?z?") and len(path) == 256

@@ -482,8 +482,15 @@ empty entries are refused naming the entry); startup logs a warning that traffic
 unencrypted. With TLS the list is optional. When set, a middleware that runs before
 authentication compares the socket peer (`request.client.host`, never a forwarded
 header, IPv4-mapped IPv6 normalised) with the list and always admits loopback so the
-local agent can ingest. Other peers get 403 and an audit row (actor `anonymous`,
-kind `source_denied`). The allowlist is exposure control, not authentication: allowed
+local agent can ingest. Other peers get 403. The first denial per peer is written as an audit row (actor `anonymous`,
+kind `source_denied`); later denials from that peer are only counted, and the first one after
+60 seconds writes a single summary row whose detail carries `denied_since_last_row`. At most 4096
+peers are tracked, with extras sharing one bucket, so a scanner cannot grow the database without
+bound. Every audit writer stores the request path with control characters replaced by `?` and
+capped at 256 characters (`sanitize_audit_path` in `store.py`). Scoped IPv6 entries (a `%zone`)
+are refused in the list and in `HOSTWATCH_HUB_BIND`, the list must contain at least one unicast
+address that is not loopback, unspecified, multicast or broadcast, and multicast or broadcast bind
+addresses are refused. The audit log itself has no retention yet (PLAN.md lists this as open). The allowlist is exposure control, not authentication: allowed
 clients still need a session or key. It depends on `network_mode: host` so the hub
 sees real client addresses; behind NAT or a proxy, list the proxy's address, which then
 admits everything that proxy forwards. `HOSTWATCH_TLS=1` does not start

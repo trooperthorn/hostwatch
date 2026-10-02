@@ -149,6 +149,13 @@ class Config:
             if path and not Path(path).is_file():
                 raise ValueError(f"{name} does not point to a readable file: {path}")
         allowed = parse_allowed_clients(self.allowed_clients)
+        if allowed and not any(_is_useful_client(a) for a in allowed):
+            raise ValueError(
+                "HOSTWATCH_ALLOWED_CLIENTS has no entry that can ever match a remote client: every entry is "
+                "a loopback, unspecified, multicast or broadcast address. Loopback is always allowed without "
+                "being listed, so add at least one unicast address of a real remote client.")
+        if self.role != "agent":
+            _check_bind_address(self.hub_bind)
         if self.role == "agent" or _is_loopback(self.hub_bind) or self.tls_configured:
             return
         if self.allow_insecure_bind:
@@ -189,6 +196,11 @@ def parse_allowed_clients(raw: str) -> frozenset:
         entry = item.strip()
         if not entry:
             raise ValueError("HOSTWATCH_ALLOWED_CLIENTS contains an empty entry")
+        if "%" in entry:
+            raise ValueError(
+                f"HOSTWATCH_ALLOWED_CLIENTS entry {entry!r} has a scope zone (%). Scoped IPv6 addresses are "
+                "not accepted because the peer address the hub sees never carries a zone, so the entry "
+                "could never match. Use the address without the zone.")
         try:
             out.add(normalize_ip(entry))
         except ValueError:
@@ -213,3 +225,29 @@ def _is_loopback(host: str) -> bool:
         return ipaddress.ip_address(host).is_loopback
     except ValueError:
         return False
+
+
+_BROADCAST = ipaddress.IPv4Address("255.255.255.255")
+
+
+def _is_useful_client(addr) -> bool:
+    """True for an address a remote client can actually connect from: unicast, not loopback,
+    unspecified, multicast or broadcast."""
+    return not (addr.is_loopback or addr.is_unspecified or addr.is_multicast or addr == _BROADCAST)
+
+
+def _check_bind_address(host: str) -> None:
+    """Reject bind values that are never valid listener addresses: a scoped IPv6 address, a
+    multicast address or the IPv4 broadcast address. Hostnames are left to the socket layer."""
+    if "%" in host:
+        raise ValueError(
+            f"HOSTWATCH_HUB_BIND={host} has a scope zone (%). Scoped IPv6 addresses are not accepted; "
+            "bind to a global or unique local address instead.")
+    try:
+        addr = ipaddress.ip_address(host)
+    except ValueError:
+        return
+    if addr.is_multicast or addr == _BROADCAST:
+        raise ValueError(
+            f"HOSTWATCH_HUB_BIND={host} is a multicast or broadcast address, which cannot accept "
+            "connections. Bind to one unicast host address.")

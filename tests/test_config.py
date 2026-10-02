@@ -362,3 +362,30 @@ def test_local_agent_url_is_loopback_and_admitted(tmp_path):
     client = TestClient(create_app(cfg, Store(tmp_path / "db.sqlite")), client=("127.0.0.1", 40000))
     assert client.get("/internal/v1/health").status_code == 200
     assert [r for r in Store(tmp_path / "db.sqlite").audit_rows() if r["kind"] == "source_denied"] == []
+
+
+@pytest.mark.parametrize("raw", ["fe80::1%eth0", "10.0.0.5,fe80::1%eth0"])
+def test_scoped_ipv6_allowlist_entry_is_refused(raw):
+    with pytest.raises(ValueError, match="scope zone"):
+        _cfg(hub_bind="10.0.0.2", allowed_clients=raw).validate()
+
+
+def test_scoped_ipv6_bind_is_refused():
+    with pytest.raises(ValueError, match="scope zone"):
+        _cfg(hub_bind="fe80::1%eth0", allowed_clients="10.0.0.5").validate()
+
+
+@pytest.mark.parametrize("raw", ["127.0.0.1", "224.0.0.1", "0.0.0.0", "127.0.0.1,224.0.0.1,255.255.255.255"])
+def test_allowlist_without_a_usable_remote_entry_is_refused(raw):
+    with pytest.raises(ValueError, match="can ever match"):
+        _cfg(hub_bind="10.0.0.2", allowed_clients=raw).validate()
+
+
+def test_allowlist_with_one_usable_entry_among_useless_ones_passes():
+    _cfg(hub_bind="10.0.0.2", allowed_clients="127.0.0.1,10.0.0.5").validate()
+
+
+@pytest.mark.parametrize("bind", ["255.255.255.255", "224.0.0.1", "ff02::1"])
+def test_broadcast_or_multicast_bind_is_refused(bind):
+    with pytest.raises(ValueError, match="multicast or broadcast"):
+        _cfg(hub_bind=bind, allowed_clients="10.0.0.5").validate()

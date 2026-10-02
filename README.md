@@ -54,7 +54,13 @@ Enforced:
   `0.0.0.0` or `::`) when `HOSTWATCH_ALLOWED_CLIENTS` lists individual client
   IPv4 or IPv6 addresses (no CIDR ranges or hostnames). Requests from any other
   socket peer get 403 and an audit row before authentication runs; loopback is
-  always allowed. This allowlist is exposure control, not authentication:
+  always allowed. Scoped IPv6 entries (with a %zone) are refused, at least one
+  entry must be a unicast, non-loopback address a remote client can use, and
+  multicast or broadcast bind addresses are refused. Denials are aggregated:
+  the first denial per peer is audited, then at most one summary row per peer
+  per minute carries the count, and stored request paths are stripped of
+  control characters and capped at 256 characters. The audit log has no
+  retention yet. This allowlist is exposure control, not authentication:
   allowed clients still need a session or API key, and traffic is unencrypted.
   It relies on `network_mode: host` so the hub sees real client addresses;
   behind NAT or a proxy, list the proxy's address. TLS deployments may use the
