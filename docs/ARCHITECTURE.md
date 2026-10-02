@@ -41,7 +41,7 @@ detail, dedup_key). The field defaults to empty and is additive, so the wire
 `SCHEMA_VERSION` stays at 1: v1 agents without the field are accepted
 unchanged. The hub stores events through `Store.add_events`, which keeps one row
 per host and `dedup_key`, so a resent batch does not duplicate events. Events
-are read with `GET /internal/v1/events` (host, since, kind, limit), behind the
+are read with `GET /internal/v1/events` (host, since, kind, source, before, before_id, limit), behind the
 same bearer token as the other internal endpoints. Event sources are reported in
 the batch `sources` list like any collector, with `available` false and a reason
 when the source is absent, and appear in `/internal/v1/sources`.
@@ -138,6 +138,21 @@ pstore, rasdaemon, the journal watcher and the threshold events all ride in
 each one's status is reported in `Batch.sources`. A source that raises is
 reported unavailable with the error as the reason.
 
+A batch may also carry an optional `batch_id` (a uuid string). The agent sets
+it once when it builds the batch and the queued batch keeps it on every resend.
+`Store.ingest_batch` writes the samples, source status, agent row, events and
+the id in one transaction, so a failure in any step leaves nothing behind. If the
+id is already recorded for that host, the hub answers 200 with
+`"duplicate": true` and stores nothing. Batches without an id behave as before.
+
+`GET /internal/v1/events` pages backwards. When a page is full, the response
+carries `X-Next-Before` and `X-Next-Before-Id` headers; passing them back as
+`before` and `before_id` returns the next older page (the id keeps rows that
+share a timestamp from being skipped). The body stays a plain list. The
+`source` filter and the cursor are bound SQL parameters. The agent seeds
+threshold state with `source=thresholds` and reads every page, and it logs an
+HTTP 401 as a rejected token, distinct from an unreachable hub.
+
 ## Storage
 
 SQLite in `/data`. Raw samples are kept for `HOSTWATCH_RAW_RETENTION_DAYS`,
@@ -150,7 +165,8 @@ set it, so a database with version 0 is adopted as version 1. `Store._migrate()`
 applies numbered steps in a transaction, each created with `IF NOT EXISTS` so a
 repeat run changes nothing. Version 2 adds the `events` table (unique per host
 on `dedup_key`) and the `boot_state` heartbeat table; existing tables are never
-altered. If the stored version is newer than the code supports, the store
+altered. Version 3 adds the `batch_ids` table (unique per host and batch id) the same way;
+maintenance prunes ids older than the raw retention. If the stored version is newer than the code supports, the store
 refuses to start with `SchemaTooNewError` rather than risk damaging data.
 
 ## Security model

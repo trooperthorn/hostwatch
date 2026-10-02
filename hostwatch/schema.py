@@ -60,6 +60,9 @@ class Batch(BaseModel):
     sources: list[SourceStatus]
     samples: list[Sample]
     events: list[Event] = Field(default_factory=list)
+    batch_id: str | None = Field(
+        default=None, min_length=1, max_length=64,
+        description="optional uuid string, set once per batch and reused on resend so the hub can acknowledge a repeat")
 
     def model_post_init(self, __context: Any) -> None:
         if self.schema_version != SCHEMA_VERSION:

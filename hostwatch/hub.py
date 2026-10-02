@@ -13,7 +13,7 @@ import hmac
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
 
 from . import __version__
 from .config import Config
@@ -56,9 +56,11 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None) -> FastAP
 
     @app.post("/internal/v1/ingest", dependencies=[Depends(require_token)])
     def ingest(batch: Batch):
-        n = store.ingest(batch)
-        e = store.add_events(batch.host, [ev.model_dump() for ev in batch.events]) if batch.events else 0
-        return {"stored": n, "events_stored": e}
+        n, e, duplicate = store.ingest_batch(batch)
+        out = {"stored": n, "events_stored": e}
+        if duplicate:
+            out["duplicate"] = True
+        return out
 
     @app.get("/internal/v1/latest", dependencies=[Depends(require_token)])
     def latest(host: str | None = None):
@@ -69,9 +71,17 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None) -> FastAP
         return {"agents": store.agents(), "sources": store.sources()}
 
     @app.get("/internal/v1/events", dependencies=[Depends(require_token)])
-    def events(host: str | None = None, since: float | None = None, kind: str | None = None,
-               limit: int = Query(default=100, ge=1, le=1000)):
-        return store.events(host=host, since=since, kind=kind, limit=limit)
+    def events(response: Response, host: str | None = None, since: float | None = None,
+               kind: str | None = None, source: str | None = None, before: float | None = None,
+               before_id: int | None = None, limit: int = Query(default=100, ge=1, le=1000)):
+        rows = store.events(host=host, since=since, kind=kind, limit=limit, source=source,
+                            before=before, before_id=before_id)
+        if len(rows) == limit:
+            # A full page means there may be more. The body stays a plain list so
+            # existing readers keep working; the cursor travels in headers.
+            response.headers["X-Next-Before"] = repr(rows[-1]["ts"])
+            response.headers["X-Next-Before-Id"] = str(rows[-1]["id"])
+        return rows
 
     @app.get("/internal/v1/gaps", dependencies=[Depends(require_token)])
     def gaps(host: str, source: str, metric: str, hours: float = 24, max_gap_s: float = 60):

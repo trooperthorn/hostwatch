@@ -15,6 +15,7 @@ import logging
 import platform as _platform
 import threading
 import time
+import uuid
 from pathlib import Path
 
 import httpx
@@ -70,15 +71,34 @@ class Agent:
 
     def seed_thresholds(self, client: httpx.Client) -> None:
         """Seed threshold state from events the hub already stores. Best effort:
-        if the hub is unreachable, state starts empty and one event may repeat."""
+        if the hub is unreachable, state starts empty and one event may repeat.
+        Only source=thresholds events are requested and every page is read, so
+        other event floods cannot push an open condition out of view."""
+        headers = {"Authorization": f"Bearer {self.cfg.ingest_token}"}
+        params: dict = {"host": self.cfg.host_name, "source": "thresholds", "limit": 1000}
+        stored: list[dict] = []
         try:
-            r = client.get(f"{self.cfg.hub_url}/internal/v1/events",
-                           params={"host": self.cfg.host_name, "limit": 1000},
-                           headers={"Authorization": f"Bearer {self.cfg.ingest_token}"}, timeout=10)
-            r.raise_for_status()
-            self.thresholds.seed(r.json())
+            while True:
+                r = client.get(f"{self.cfg.hub_url}/internal/v1/events", params=params, headers=headers, timeout=10)
+                r.raise_for_status()
+                stored.extend(r.json())
+                cursor = r.headers.get("X-Next-Before")
+                if cursor is None:
+                    break
+                params = {**params, "before": cursor}
+                if r.headers.get("X-Next-Before-Id") is not None:
+                    params["before_id"] = r.headers["X-Next-Before-Id"]
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code == 401:
+                log.error("hub rejected the ingest token (401) while seeding threshold state; "
+                          "check HOSTWATCH_INGEST_TOKEN on the agent and the hub")
+            else:
+                log.warning("hub answered %s while seeding threshold state", exc.response.status_code)
+            return
         except Exception as exc:
-            log.warning("could not seed threshold state from hub: %s", exc)
+            log.warning("hub unreachable, could not seed threshold state: %s", exc)
+            return
+        self.thresholds.seed(stored)
 
     def _collect_events(self) -> list[Event]:
         events: list[Event] = []
@@ -148,7 +168,7 @@ class Agent:
         events.extend(self.thresholds.evaluate(samples, self.status.values()))
         return Batch(agent_version=__version__, host=self.cfg.host_name, platform=self.platform,
                      sent_at=time.time(), sources=list(self.status.values()), samples=samples,
-                     events=events)
+                     events=events, batch_id=str(uuid.uuid4()))
 
     def flush(self, client: httpx.Client) -> None:
         while self.queue:

@@ -43,7 +43,7 @@ CREATE TABLE IF NOT EXISTS agents (
 # a database with user_version 0 is treated as version 1 once its Phase 1 tables
 # exist. Each migration step is additive: it only creates objects and is guarded
 # with IF NOT EXISTS so that running it twice changes nothing.
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 MIGRATIONS: dict[int, tuple[str, ...]] = {
     2: (
@@ -58,6 +58,12 @@ MIGRATIONS: dict[int, tuple[str, ...]] = {
         """CREATE TABLE IF NOT EXISTS boot_state (
   host TEXT PRIMARY KEY, boot_id TEXT, heartbeat_ts REAL NOT NULL, boot_ts REAL, clean_shutdown INTEGER
 )""",
+    ),
+    3: (
+        """CREATE TABLE IF NOT EXISTS batch_ids (
+  host TEXT NOT NULL, batch_id TEXT NOT NULL, received REAL NOT NULL, PRIMARY KEY (host, batch_id)
+)""",
+        "CREATE INDEX IF NOT EXISTS batch_ids_received ON batch_ids(received)",
     ),
 }
 
@@ -98,20 +104,29 @@ class Store:
                 raise
             version = target
 
-    def add_events(self, host: str, events: list[dict]) -> int:
-        """Insert events, ignoring any whose (host, dedup_key) already exists. Returns rows inserted."""
-        rows = [(host, e["ts"], e["kind"], e["severity"], e["source"], e["title"],
+    @staticmethod
+    def _event_rows(host: str, events: list[dict]) -> list[tuple]:
+        return [(host, e["ts"], e["kind"], e["severity"], e["source"], e["title"],
                  json.dumps(e.get("detail", {}), sort_keys=True), e["dedup_key"], e.get("boot_id"))
                 for e in events]
+
+    _INSERT_EVENT = ("INSERT OR IGNORE INTO events (host, ts, kind, severity, source, title, detail, dedup_key, boot_id) "
+                     "VALUES (?,?,?,?,?,?,?,?,?)")
+
+    def add_events(self, host: str, events: list[dict]) -> int:
+        """Insert events, ignoring any whose (host, dedup_key) already exists. Returns rows inserted."""
+        rows = self._event_rows(host, events)
         with self._lock, self._db:
             before = self._db.total_changes
-            self._db.executemany(
-                "INSERT OR IGNORE INTO events (host, ts, kind, severity, source, title, detail, dedup_key, boot_id) "
-                "VALUES (?,?,?,?,?,?,?,?,?)", rows)
+            self._db.executemany(self._INSERT_EVENT, rows)
             return self._db.total_changes - before
 
     def events(self, host: str | None = None, since: float | None = None,
-               kind: str | None = None, limit: int = 100) -> list[dict]:
+               kind: str | None = None, limit: int = 100, source: str | None = None,
+               before: float | None = None, before_id: int | None = None) -> list[dict]:
+        """Newest first. `before` pages backwards: only rows older than that ts. When
+        several rows share the cursor ts, `before_id` (the id of the last row seen)
+        keeps the rest of them from being skipped. All values are bound parameters."""
         where, params = [], []
         if host:
             where.append("host = ?")
@@ -122,6 +137,16 @@ class Store:
         if kind:
             where.append("kind = ?")
             params.append(kind)
+        if source:
+            where.append("source = ?")
+            params.append(source)
+        if before is not None:
+            if before_id is not None:
+                where.append("(ts < ? OR (ts = ? AND id < ?))")
+                params.extend([before, before, before_id])
+            else:
+                where.append("ts < ?")
+                params.append(before)
         sql = ("SELECT id, host, ts, kind, severity, source, title, detail, dedup_key, boot_id FROM events"
                + (" WHERE " + " AND ".join(where) if where else "") + " ORDER BY ts DESC, id DESC LIMIT ?")
         params.append(limit)
@@ -134,9 +159,21 @@ class Store:
         return rows
 
     def ingest(self, batch: Batch) -> int:
-        rows = [(s.ts, batch.host, s.source, s.metric, json.dumps(s.labels, sort_keys=True), s.value, s.unit)
-                for s in batch.samples]
+        """Store a batch and return the number of samples stored (0 for a repeated batch_id)."""
+        return self.ingest_batch(batch)[0]
+
+    def ingest_batch(self, batch: Batch) -> tuple[int, int, bool]:
+        """Store samples, source status, agent row, events and the batch id in one
+        transaction. Returns (samples stored, events stored, duplicate). A batch_id
+        already recorded for the host is acknowledged and nothing is stored again."""
         with self._lock, self._db:
+            if batch.batch_id is not None:
+                if self._db.execute("SELECT 1 FROM batch_ids WHERE host=? AND batch_id=?",
+                                    (batch.host, batch.batch_id)).fetchone():
+                    return 0, 0, True
+                self._db.execute("INSERT INTO batch_ids VALUES (?,?,?)", (batch.host, batch.batch_id, time.time()))
+            rows = [(s.ts, batch.host, s.source, s.metric, json.dumps(s.labels, sort_keys=True), s.value, s.unit)
+                    for s in batch.samples]
             self._db.executemany("INSERT INTO samples VALUES (?,?,?,?,?,?,?)", rows)
             self._db.executemany(
                 "INSERT INTO sources VALUES (?,?,?,?,?) ON CONFLICT(host, source) DO UPDATE SET "
@@ -146,7 +183,10 @@ class Store:
                 "INSERT INTO agents VALUES (?,?,?,?) ON CONFLICT(host) DO UPDATE SET "
                 "platform=excluded.platform, agent_version=excluded.agent_version, last_seen=excluded.last_seen",
                 (batch.host, batch.platform, batch.agent_version, batch.sent_at))
-        return len(rows)
+            before = self._db.total_changes
+            self._db.executemany(
+                self._INSERT_EVENT, self._event_rows(batch.host, [e.model_dump() for e in batch.events]))
+            return len(rows), self._db.total_changes - before, False
 
     def latest(self, host: str | None = None) -> list[dict]:
         sql = ("SELECT s.host, s.source, s.metric, s.labels, s.value, s.unit, s.ts FROM samples s "
@@ -196,4 +236,5 @@ class Store:
                 "WHERE ts < ? AND value IS NOT NULL GROUP BY hour, host, source, metric, labels",
                 (cutoff_hour,))
             self._db.execute("DELETE FROM samples WHERE ts < ?", (cutoff_hour,))
+            self._db.execute("DELETE FROM batch_ids WHERE received < ?", (cutoff,))
             self._db.execute("DELETE FROM rollup_hourly WHERE hour < ?", (time.time() - rollup_days * 86400,))
