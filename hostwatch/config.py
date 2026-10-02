@@ -65,6 +65,13 @@ class Config:
             raise ValueError(f"HOSTWATCH_ROLE must be all, hub, or agent (got {self.role!r})")
         if self.mtls_mode not in {"off", "uvicorn", "proxy"}:
             raise ValueError(f"HOSTWATCH_MTLS_MODE must be off, uvicorn, or proxy (got {self.mtls_mode!r})")
+        if self.mtls_mode == "uvicorn":
+            raise ValueError(
+                "HOSTWATCH_MTLS_MODE=uvicorn is not supported: the pinned uvicorn does not expose the verified "
+                "peer certificate to the application, so no client could ever authenticate. Use "
+                "HOSTWATCH_MTLS_MODE=proxy behind a reverse proxy that verifies client certificates. "
+                "See UNVERIFIED.md for how to re-check a newer uvicorn."
+            )
         if self.mtls_mode == "proxy":
             from .mtls import parse_proxies
             try:
@@ -77,6 +84,12 @@ class Config:
             raise ValueError(
                 "HOSTWATCH_INGEST_TOKEN must be at least 32 characters when it is set. "
                 "Generate one with: openssl rand -hex 32"
+            )
+        if self.ingest_token.startswith("hw_"):
+            raise ValueError(
+                "HOSTWATCH_INGEST_TOKEN starts with hw_, which is the scoped API key prefix. The hub would treat "
+                "it as an API key and never match it as the legacy token. Put the key in HOSTWATCH_INGEST_KEY "
+                "or generate a legacy token with: openssl rand -hex 32"
             )
         if self.role == "agent" and not (self.ingest_key or self.ingest_token):
             raise ValueError(

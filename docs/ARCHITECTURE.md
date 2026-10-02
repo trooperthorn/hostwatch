@@ -390,9 +390,12 @@ The token is optional for the hub and `all` roles; if set it must be at least
 ### Client certificate identity (optional, off by default)
 
 `hostwatch/mtls.py` implements `HOSTWATCH_MTLS_MODE`. In `off` mode no
-certificate or header is read. In `uvicorn` mode the name comes from the ASGI
-TLS extension (`client_cert_name`), which exists only if the server verified
-the client certificate; headers are ignored. In `proxy` mode the hub reads
+certificate or header is read. `uvicorn` mode is refused at startup:
+`Config.validate` raises because the pinned uvicorn does not expose the verified
+peer certificate to the application, so the mode could never authenticate
+anyone, and the message tells the operator to use proxy mode. The reader for the
+ASGI TLS extension (`client_cert_name`) stays in `mtls.py` only so a future
+uvicorn can be supported after the check in `UNVERIFIED.md` passes. In `proxy` mode the hub reads
 `X-SSL-Client-Verify` (must be `SUCCESS`), `X-SSL-Client-Subject` and
 `X-SSL-Client-SAN` (comma separated, e.g. `email:a@b.example`), but only when the
 TCP peer address is inside `HOSTWATCH_MTLS_TRUSTED_PROXIES`; otherwise the
@@ -405,10 +408,22 @@ Enforced: the peer allowlist, the verify header value, the binding lookup and
 the audit. Advisory (depends on deployment): that the proxy verifies the
 certificate against the intended CA, removes client supplied copies of these
 headers, and is the only network path to the hub. Header mode is only as strong
-as that configuration. Whether the uvicorn listener populates the TLS extension
-and how smart card certificates present their subject are unverified, see
-`UNVERIFIED.md`. The CLI does not yet create bindings;
-`Store.bind_cert` is the interface.
+as that configuration. How smart card certificates present their subject is
+unverified, see `UNVERIFIED.md`. Bindings are managed with
+`python -m hostwatch cert bind SUBJECT USER`, `cert list` and
+`cert revoke SUBJECT`. Each run appends a `cli` audit row, including refused
+runs. Revoking takes effect on the next request. These commands share the CLI
+trust boundary (shell access to the data directory), which is advisory.
+
+### Mixed credentials
+
+A request that carries both a session cookie and a bearer credential is rejected
+with 400 before either is checked, because silently preferring one would let a
+stale cookie mask a key or the reverse. The audit row has kind `auth_failure`
+and names both kinds (`session_cookie` and `bearer`). This is enforced in
+`hostwatch/hub.py`. A legacy `HOSTWATCH_INGEST_TOKEN` that starts with `hw_` is
+refused by `Config.validate`, because the hub routes any `hw_` bearer to the API
+key lookup and such a token could never match.
 
 ## Security model
 

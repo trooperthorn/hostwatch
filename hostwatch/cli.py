@@ -3,6 +3,7 @@
   python -m hostwatch bootstrap-admin [--username NAME]
   python -m hostwatch user create|disable|unlock|passwd USERNAME
   python -m hostwatch key create --scopes a,b [--owner NAME] | list | revoke ID
+  python -m hostwatch cert bind SUBJECT USER | list | revoke SUBJECT
 
 These commands open the database directly, so they are for someone who already
 has shell access to the data directory. That is the trust boundary: they are not
@@ -27,7 +28,7 @@ from . import auth
 from .config import Config
 from .store import Store
 
-COMMANDS = {"user", "key", "bootstrap-admin"}
+COMMANDS = {"user", "key", "cert", "bootstrap-admin"}
 MIN_PASSWORD_LEN = 12
 
 
@@ -46,6 +47,12 @@ def _parser() -> argparse.ArgumentParser:
     create.add_argument("--owner", default="cli")
     key.add_parser("list")
     key.add_parser("revoke").add_argument("key_id", type=int)
+    cert = sub.add_parser("cert", help="manage client certificate bindings").add_subparsers(dest="action", required=True)
+    bind = cert.add_parser("bind", help="map a certificate subject (or san:<entry>) to a user")
+    bind.add_argument("subject")
+    bind.add_argument("username")
+    cert.add_parser("list")
+    cert.add_parser("revoke").add_argument("subject")
     return p
 
 
@@ -137,6 +144,34 @@ def run(argv: list[str], cfg: Config) -> int:
             store.reset_failures(name)
             audit(0, detail)
             print(f"Cleared lockout and failure count for {name!r}.", file=sys.stderr)
+        return 0
+
+    if args.command == "cert":
+        if args.action == "bind":
+            from .mtls import normalize
+            subject = normalize(args.subject)
+            detail = {"subject": subject[:256], "username": args.username[:64]}
+            user = store.get_user(args.username)
+            if not subject:
+                return fail("subject must not be empty", detail)
+            if user is None:
+                return fail("unknown user", detail)
+            store.bind_cert(subject, user["id"])
+            audit(0, detail)
+            print(f"Bound {subject!r} to {args.username!r}.", file=sys.stderr)
+            return 0
+        if args.action == "list":
+            for b in store.list_cert_bindings():
+                state = "revoked " + _fmt(b["revoked_at"]) if b["revoked_at"] else "active"
+                print(f"{b['subject']}	{b['username']}	created {_fmt(b['created'])}	{state}")
+            audit(0, {})
+            return 0
+        from .mtls import normalize
+        subject = normalize(args.subject)
+        if not store.revoke_cert(subject):
+            return fail("no active binding for that subject", {"subject": subject[:256]})
+        audit(0, {"subject": subject[:256]})
+        print(f"Revoked the binding for {subject!r}. It is rejected on its next request.", file=sys.stderr)
         return 0
 
     if args.action == "create":

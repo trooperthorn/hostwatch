@@ -212,3 +212,13 @@ def test_uvicorn_kwargs_tls_and_client_ca(tmp_path):
     assert kw["ssl_ca_certs"] == ca and kw["ssl_cert_reqs"] == ssl.CERT_OPTIONAL
     # The generated files really load as a server certificate.
     ssl.create_default_context(ssl.Purpose.CLIENT_AUTH).load_cert_chain(cert, key)
+
+
+def test_legacy_token_with_api_key_prefix_fails_validation():
+    with pytest.raises(ValueError, match="hw_"):
+        Config(ingest_token="hw_" + "a" * 40).validate()
+
+
+def test_mtls_uvicorn_mode_raises_at_validation():
+    with pytest.raises(ValueError, match="does not expose the verified peer certificate.*proxy"):
+        Config(mtls_mode="uvicorn").validate()

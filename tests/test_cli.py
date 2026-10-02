@@ -172,3 +172,39 @@ def test_every_action_writes_an_audit_row(env, monkeypatch, capsys):
     assert sorted(paths) == sorted(["user create", "user unlock", "user disable",
                                     "key create", "key list", "key revoke"])
     assert PASSWORD not in db_text(env)
+
+
+def test_cert_bind_authenticates_proxy_request_and_revoke_gives_401(env, monkeypatch, capsys):
+    from hostwatch.mtls import SUBJECT_HEADER, VERIFY_HEADER
+    stdin(monkeypatch, PASSWORD + "\n")
+    assert main(["user", "create", "alice"]) == 0
+    assert main(["cert", "bind", "CN=alice-yubikey,O=Lab", "alice"]) == 0
+    capsys.readouterr()
+    cfg = Config(data_dir=env, mtls_mode="proxy", mtls_trusted_proxies="10.0.0.0/24")
+    store = store_of(env)
+    client = TestClient(create_app(cfg, store), client=("10.0.0.5", 40000))
+    headers = {VERIFY_HEADER: "SUCCESS", SUBJECT_HEADER: "CN=alice-yubikey,O=Lab"}
+    assert client.get("/internal/v1/latest", headers=headers).status_code == 200
+    assert main(["cert", "list"]) == 0
+    assert "CN=alice-yubikey,O=Lab\talice" in capsys.readouterr().out
+    assert main(["cert", "revoke", "CN=alice-yubikey,O=Lab"]) == 0
+    assert client.get("/internal/v1/latest", headers=headers).status_code == 401
+    assert main(["cert", "revoke", "CN=alice-yubikey,O=Lab"]) == 1
+    assert main(["cert", "bind", "CN=x", "nobody"]) == 1
+    paths = [r["path"] for r in store.audit_rows(kind="cli")]
+    assert paths.count("cert bind") == 2 and paths.count("cert revoke") == 2 and "cert list" in paths
+
+
+def test_cookie_plus_bearer_is_400_and_audited(env, monkeypatch):
+    stdin(monkeypatch, PASSWORD + "\n")
+    main(["user", "create", "alice"])
+    store = store_of(env)
+    cfg = Config(data_dir=env, argon2_time_cost=1, argon2_memory_kib=8, argon2_parallelism=1)
+    client = TestClient(create_app(cfg, store))
+    assert client.post("/api/v1/login", json={"username": "alice", "password": PASSWORD}).status_code == 200
+    assert client.get("/internal/v1/latest").status_code == 200
+    r = client.get("/internal/v1/latest", headers={"Authorization": "Bearer something"})
+    assert r.status_code == 400
+    row = store.audit_rows()[0]
+    assert row["status"] == 400 and row["kind"] == "auth_failure"
+    assert row["detail"]["credentials"] == ["session_cookie", "bearer"]

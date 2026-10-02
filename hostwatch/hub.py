@@ -102,12 +102,18 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None,
 
     def _resolve(request: Request) -> Principal | None:
         cookie = request.cookies.get(SESSION_COOKIE)
+        scheme, _, token = request.headers.get("authorization", "").partition(" ")
+        if cookie and scheme.lower() == "bearer" and token:
+            # Two credential kinds on one request is ambiguous, so neither is tried.
+            request.state.audit = {"actor": "anonymous", "kind": "auth_failure",
+                                   "detail": {"credentials": ["session_cookie", "bearer"],
+                                              "reason": "request carried both a session cookie and a bearer credential"}}
+            raise HTTPException(status_code=400, detail="send either a session cookie or a bearer credential, not both")
         if cookie:
             sess = store.get_session(cookie)
             if sess:
                 request.state.session_token = cookie
                 return Principal(sess["username"], "session", SESSION_SCOPES)
-        scheme, _, token = request.headers.get("authorization", "").partition(" ")
         if scheme.lower() == "bearer" and token:
             if token.startswith("hw_"):
                 key = store.find_api_key(token)

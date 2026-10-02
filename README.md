@@ -36,7 +36,8 @@ Enforced:
   ingest. `latest`, `sources` and `gaps` need `read:metrics`, `events` needs
   `read:events`, `ingest` needs `ingest`. A revoked key is rejected on its next
   request. Optional client certificate login
-  (`HOSTWATCH_MTLS_MODE=off|uvicorn|proxy`, default off) maps a certificate
+  (`HOSTWATCH_MTLS_MODE=off|proxy`, default off; `uvicorn` is refused at startup
+  because the pinned uvicorn does not expose the verified certificate) maps a certificate
   subject or SAN through the `cert_bindings` table to a user with read scopes
   only. In `proxy` mode the identity headers are honoured only from peers listed
   in `HOSTWATCH_MTLS_TRUSTED_PROXIES`; that peer check is enforced here, but
@@ -81,6 +82,9 @@ python -m hostwatch user create|disable|unlock|passwd NAME   # password from a p
 python -m hostwatch key create --scopes read:metrics,read:events [--owner NAME]   # prints the key once
 python -m hostwatch key list
 python -m hostwatch key revoke ID                 # rejected on the key's next request
+python -m hostwatch cert bind SUBJECT USER        # map a certificate subject or san:<entry> to a user
+python -m hostwatch cert list
+python -m hostwatch cert revoke SUBJECT           # rejected on the next request
 ```
 
 Passwords are never taken from arguments. Key secrets and the bootstrap

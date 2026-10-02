@@ -173,6 +173,10 @@ class Store:
                                    (time.time() if now is None else now, subject))
             return cur.rowcount > 0
 
+    def list_cert_bindings(self) -> list[dict]:
+        return self._rows("SELECT b.subject, u.username, b.created, b.revoked_at FROM cert_bindings b "
+                          "JOIN users u ON u.id = b.user_id ORDER BY b.subject")
+
     def find_cert_user(self, subject: str) -> dict | None:
         """The enabled user bound to a subject by an unrevoked binding, or None."""
         rows = self._rows("SELECT u.id, u.username FROM cert_bindings b JOIN users u ON u.id = b.user_id "
