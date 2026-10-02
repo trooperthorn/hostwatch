@@ -238,7 +238,11 @@ birth message on `<discovery prefix>/status`, and after a hub restart. A value t
 known is shown by Home Assistant as unavailable, never as zero. Boot classifications and
 hardware events (pstore, rasdaemon, threshold and journal) go to `<base topic>/events` as
 non-retained JSON, once each, with a cursor kept in the database so a restart neither replays
-nor drops them; the first run starts at the newest existing event. Pool health arrives in a
+nor drops them, including events stored while the broker was unreachable at first start; the
+first tick starts at the newest existing event. Entities that are no longer produced have their
+retained discovery config cleared after being marked unavailable, using a list of published
+entities kept in the data directory. Host names that differ only in case or punctuation get a
+short hash suffix on their device identifier and topics, with a warning in the log. Pool health arrives in a
 later release.
 
 ## Tests

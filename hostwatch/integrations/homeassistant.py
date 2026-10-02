@@ -21,8 +21,10 @@ nothing yet, so a hub restart on the same database republishes everything too.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import logging
+import os
 import re
 import threading
 import time
@@ -54,6 +56,11 @@ def slug(text: str) -> str:
     """Lowercase ASCII identifier safe for topics and unique ids."""
     out = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
     return out or "x"
+
+
+def slug_hash(host: str) -> str:
+    """Short stable suffix derived from the exact host name, used only when slugs collide."""
+    return hashlib.sha256(host.encode("utf-8")).hexdigest()[:6]
 
 
 @dataclass
@@ -139,8 +146,51 @@ class HomeAssistantPublisher:
         self._epoch = -1
         self._birth = threading.Event()
         self._published: dict[str, str] = {}  # discovery topic -> last payload sent
-        self._known: dict[str, set[str]] = {}  # host -> entity keys published by this process
+        # node id -> "component/key" entries published for it, persisted so a restart can retire
+        # entities that are no longer built.
+        self._keys_path = config.data_dir / "ha_discovery_keys.json"
+        self._known: dict[str, set[str]] = self._load_known()
+        self._slugs: dict[str, str] = {}  # host -> topic-safe identifier, disambiguated on collision
+        self._warned: set[tuple[str, ...]] = set()
         client.add_listener(self._on_message)
+
+    def _load_known(self) -> dict[str, set[str]]:
+        try:
+            raw = json.loads(self._keys_path.read_text(encoding="utf-8"))
+            return {str(k): {str(x) for x in v} for k, v in raw.items()}
+        except FileNotFoundError:
+            return {}
+        except (OSError, ValueError, AttributeError, TypeError):
+            log.warning("Ignoring unreadable Home Assistant discovery key list %s", self._keys_path)
+            return {}
+
+    def _save_known(self) -> None:
+        tmp = self._keys_path.with_name(self._keys_path.name + ".tmp")
+        try:
+            tmp.write_text(json.dumps({k: sorted(v) for k, v in sorted(self._known.items())}), encoding="utf-8")
+            os.replace(tmp, self._keys_path)
+        except OSError as exc:
+            log.warning("Could not save the Home Assistant discovery key list (%s)", type(exc).__name__)
+
+    def _assign_slugs(self, hosts: list[str]) -> None:
+        """Hosts whose slugs collide (case or punctuation only) each get a hash suffix of the exact
+        name, so they stay separate devices instead of overwriting each other's entities."""
+        groups: dict[str, list[str]] = {}
+        for h in hosts:
+            groups.setdefault(slug(h), []).append(h)
+        slugs: dict[str, str] = {}
+        for base, members in groups.items():
+            if len(members) == 1:
+                slugs[members[0]] = base
+                continue
+            for h in members:
+                slugs[h] = f"{base}_{slug_hash(h)}"
+            names = tuple(sorted(members))
+            if names not in self._warned:
+                self._warned.add(names)
+                log.warning("Host names %s map to the same Home Assistant identifier %r; adding a hash suffix "
+                            "to each so they stay separate devices", " and ".join(repr(n) for n in names), base)
+        self._slugs = slugs
 
     def _store_hosts(self) -> list[str]:
         names = {r["host"] for r in self.store.sources()}
@@ -154,12 +204,14 @@ class HomeAssistantPublisher:
         if topic == self.client.birth_topic and payload.strip().lower() == "online":
             self._birth.set()
 
-    @staticmethod
-    def _node(host: str) -> str:
-        return "hostwatch_" + slug(host)
+    def _slug(self, host: str) -> str:
+        return self._slugs.get(host) or slug(host)
+
+    def _node(self, host: str) -> str:
+        return "hostwatch_" + self._slug(host)
 
     def _state_base(self, host: str) -> str:
-        return f"{self.config.mqtt_base_topic}/{slug(host)}"
+        return f"{self.config.mqtt_base_topic}/{self._slug(host)}"
 
     def discovery_topic(self, host: str, entity: Entity) -> str:
         return f"{self.config.mqtt_discovery_prefix}/{entity.component}/{self._node(host)}/{entity.key}/config"
@@ -204,21 +256,31 @@ class HomeAssistantPublisher:
             self._published.clear()
             self._epoch = self.client.epoch
         now = self._clock()
-        for host in self._hosts():
+        hosts = self._hosts()
+        self._assign_slugs(hosts)
+        for host in hosts:
             summary = build_host_summary(self.store, host, now)
             entities = build_entities(summary)
             for entity in entities:
                 if not self._publish_entity(host, entity):
                     self._epoch = -1  # force a full republish once the connection is back
                     return False
-            # An entity whose inputs vanished must not keep its last retained "online" state.
-            current = {e.key for e in entities}
-            for key in sorted(self._known.get(host, set()) - current):
-                if not self.client.publish(f"{self._state_base(host)}/{key}/availability", NOT_AVAILABLE,
-                                           retain=True):
+            # An entity that is no longer built must not keep its retained discovery config or its
+            # last "online" state: mark it unavailable, then clear the config.
+            node = self._node(host)
+            current = {f"{e.component}/{e.key}" for e in entities}
+            for entry in sorted(self._known.get(node, set()) - current):
+                component, key = entry.split("/", 1)
+                topic = f"{self.config.mqtt_discovery_prefix}/{component}/{node}/{key}/config"
+                if (not self.client.publish(f"{self._state_base(host)}/{key}/availability", NOT_AVAILABLE,
+                                            retain=True)
+                        or not self.client.publish(topic, "", retain=True)):
                     self._epoch = -1
                     return False
-            self._known[host] = current
+                self._published.pop(topic, None)
+            if self._known.get(node) != current:
+                self._known[node] = current
+                self._save_known()
         return True
 
     def _publish_entity(self, host: str, entity: Entity) -> bool:

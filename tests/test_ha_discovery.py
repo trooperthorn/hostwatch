@@ -319,3 +319,48 @@ def test_entity_that_disappears_is_marked_unavailable(env):
     finally:
         ha.build_entities = real
     assert broker.retained["hostwatch/media_svr/md_md0/availability"] == "offline"
+
+
+def test_retired_entity_gets_empty_retained_config_after_restart(tmp_path):
+    cfg = make_config(tmp_path)
+    db = tmp_path / "db.sqlite"
+    store = Store(db)
+    seed(store)
+    broker = FakeBroker()
+    pub, _ = make_publisher(cfg, store, broker)
+    pub.tick()
+    md_config = f"homeassistant/sensor/{NODE}/md_md0/config"
+    assert broker.retained[md_config] != ""
+    # A new process in which the array is no longer built.
+    import hostwatch.integrations.homeassistant as ha
+    real = ha.build_entities
+    ha.build_entities = lambda summary: [e for e in real(summary) if e.key != "md_md0"]
+    try:
+        pub2, _ = make_publisher(cfg, Store(db), broker)
+        pub2.tick()
+    finally:
+        ha.build_entities = real
+    assert broker.retained[md_config] == ""
+    assert broker.retained["hostwatch/media_svr/md_md0/availability"] == "offline"
+    assert CPU_CONFIG in broker.retained and broker.retained[CPU_CONFIG] != ""
+
+
+def test_colliding_host_slugs_get_distinct_identifiers_and_warning(tmp_path, caplog):
+    cfg = make_config(tmp_path)
+    store = Store(tmp_path / "db.sqlite")
+    broker = FakeBroker()
+    client = MqttClient(cfg, FakeTransport(broker), clock=lambda: 0.0)
+    pub = HomeAssistantPublisher(cfg, client, store, hosts=lambda: ["Media-SVR", "media_svr"])
+    with caplog.at_level("WARNING"):
+        assert pub.tick() is True
+    configs = {t: json.loads(p) for t, p in broker.retained.items()
+               if t.startswith("homeassistant/") and t.endswith("cpu_utilization/config")}
+    assert len(configs) == 2
+    idents = {c["device"]["identifiers"][0] for c in configs.values()}
+    uids = {c["unique_id"] for c in configs.values()}
+    states = {c["state_topic"] for c in configs.values()}
+    assert len(idents) == len(uids) == len(states) == 2
+    warnings = [r.getMessage() for r in caplog.records if r.levelname == "WARNING"]
+    assert any("Media-SVR" in m and "media_svr" in m for m in warnings)
+    pub.tick()
+    assert len([r for r in caplog.records if "same Home Assistant identifier" in r.getMessage()]) == 1

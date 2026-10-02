@@ -379,8 +379,15 @@ Each entity lists the hub availability topic (the last will) and its own availab
 with `availability_mode: all`. A value the summary cannot know gets entity availability
 `offline` and no state message, so it is never reported as zero. The source connectivity
 sensors list only the hub topic, because a source being down is a real answer. If an entity
-that this process published earlier is no longer produced, its availability is set to
-`offline`.
+that was published earlier, by this process or before a restart, is no longer produced, its
+availability is set to `offline` and its retained discovery config is cleared with an empty
+retained payload. The published entries per device are kept in `ha_discovery_keys.json` in the
+data directory (written atomically), so the cleanup survives restarts.
+
+Host names whose slugs collide (for example `Media-SVR` and `media_svr`) each get a six
+character SHA-256 suffix of the exact host name on the device identifier, unique ids and
+topics, and a warning names both hosts. Colliding hosts therefore get new identifiers when the
+collision first appears.
 
 Discovery is republished when the connection epoch changes (first connect, reconnect, broker
 restart), when a `online` birth message arrives (the listener only sets a flag; the next tick
@@ -403,8 +410,9 @@ Progress is the last event id sent, kept in the `publish_cursors` table (schema 
 additive migration guarded by `IF NOT EXISTS`). The cursor moves only after a publish was
 accepted, so a restart neither replays nor skips events, and a failed publish retries from the
 same event on the next tick. A crash between a publish and the cursor write sends that one
-event again, so consumers should deduplicate by `id`. The first run starts at the newest stored
-event instead of replaying history. `HOSTWATCH_MQTT_EVENTS_INTERVAL` (seconds, default 10) sets
+event again, so consumers should deduplicate by `id`. The first tick starts at the newest stored
+event instead of replaying history. The cursor is set before the connectivity check, so events
+stored while the broker is down at first start are sent once it is reachable. `HOSTWATCH_MQTT_EVENTS_INTERVAL` (seconds, default 10) sets
 the poll period.
 
 The Phase 4 exit test, `tests/test_phase4_exit.py`, runs the publisher and the Orion

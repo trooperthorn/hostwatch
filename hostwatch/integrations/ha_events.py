@@ -10,7 +10,7 @@ neither replays old events nor skips unsent ones. A failed publish stops the bat
 next tick retries from the same event. If the process dies between a publish and the cursor
 write, that one event is sent again (at-least-once), and consumers can drop it by id.
 
-The first run, when no cursor exists yet, starts at the newest event already stored, so
+The first tick, when no cursor exists yet and whether or not the broker is reachable, starts at the newest event already stored, so
 enabling MQTT does not flood Home Assistant with history.
 """
 
@@ -50,12 +50,14 @@ class HomeAssistantEventPublisher:
 
     def tick(self) -> int:
         """Publish events newer than the cursor. Returns how many were sent this tick."""
-        if not self.client.ensure_connected():
-            return 0
+        # The cursor is fixed before the connectivity check. Otherwise events stored while the
+        # broker is down at first start would be skipped when the first connected tick set it.
         cursor = self.store.get_cursor(CURSOR_NAME)
         if cursor is None:
             cursor = self.store.max_event_id()
             self.store.set_cursor(CURSOR_NAME, cursor)
+        if not self.client.ensure_connected():
+            return 0
         sent = 0
         while True:
             batch = self.store.events_after(cursor, EVENT_SOURCES, BATCH)

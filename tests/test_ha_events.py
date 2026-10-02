@@ -133,3 +133,18 @@ def test_start_and_stop_thread(tmp_path):
     pub.stop()
     assert pub._thread is None
     assert store.get_cursor(CURSOR_NAME) is not None  # at least one tick ran before stop
+
+
+def test_events_stored_while_broker_down_at_first_start_are_sent_once(tmp_path):
+    cfg, store, broker = cfg_for(tmp_path), Store(tmp_path / "db.sqlite"), FakeBroker()
+    store.add_events("h1", [ev("history")])
+    pub = make(cfg, store, broker)
+    real = pub.client.ensure_connected
+    pub.client.ensure_connected = lambda: False  # broker unreachable
+    assert pub.tick() == 0
+    store.add_events("h1", [ev("a"), ev("b")])
+    assert pub.tick() == 0
+    pub.client.ensure_connected = real  # broker comes up
+    assert pub.tick() == 2
+    assert pub.tick() == 0
+    assert [e["detail"]["k"] for e in events_sent(broker)] == ["a", "b"]
