@@ -1,0 +1,2 @@
+# Force LF so scripts and configs run unchanged on the Linux hosts.
+* text=auto eol=lf
