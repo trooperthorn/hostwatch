@@ -12,7 +12,8 @@ Current phase: **2 (event engine)**, code complete and not yet deployed. Phase 0
 |---|---|
 | `hostwatch/schema.py` | Agent-to-hub wire schema, version 1, with an optional events list |
 | `hostwatch/collectors/` | One module per source: `cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `scrutiny` |
-| `hostwatch/agent.py` | Detect, collect, push to hub; bounded queue while the hub is down; writes the boot heartbeat |
+| `hostwatch/agent.py` | Detect, collect, push to hub; durable outbox while the hub is down; writes the boot heartbeat |
+| `hostwatch/outbox.py` | Durable agent outbox (`outbox.db` in the data directory): batches stay until the hub answers 2xx, a 4xx other than 401, 408 and 429 dead-letters the batch, overflow drops the oldest samples first and keeps events, and source progress markers commit in the same transaction as the batch |
 | `hostwatch/events/boot.py` | Heartbeat writer and boot classifier (clean shutdown, watchdog reset, kernel panic, power loss, unknown) |
 | `hostwatch/events/pstore.py` | Read-only pstore ingestion (`HOSTWATCH_PSTORE`, default `/host/pstore`): crash records become deduplicated events and are never deleted |
 | `hostwatch/events/rasdaemon.py` | Read-only rasdaemon database ingestion (`HOSTWATCH_RASDAEMON_DB`, default `/host/rasdaemon/ras-mc_event.db`): `mc_event`, `aer_event` and `mce_record` rows become `hardware_error` events, each table only if present |

@@ -9,7 +9,7 @@ restart during a hub outage loses at most HOSTWATCH_INTERVAL * MAX_QUEUE.
 
 from __future__ import annotations
 
-import collections
+import json
 from collections.abc import Callable
 import logging
 import platform as _platform
@@ -27,10 +27,14 @@ from .events import boot, pstore
 from .events.journal import JournalWatcher
 from .events.rasdaemon import RasdaemonReader
 from .events.thresholds import ThresholdEngine
+from .outbox import OUTBOX_FILE, Outbox
 from .schema import Batch, Event, SourceStatus
 
 log = logging.getLogger("hostwatch.agent")
 MAX_QUEUE = 240  # one hour at the default 15s interval
+PENDING_BOOT_MARKER = "boot.pending_events"
+PSTORE_SENT_MARKER = "pstore.sent_keys"
+RETRYABLE_4XX = {401, 408, 429}
 MAX_SEEN_KEYS = 10000
 
 EventSource = Callable[[], tuple[SourceStatus, list[Event]]]
@@ -52,22 +56,52 @@ class Agent:
         self.collectors = build_collectors(cfg)
         self.platform = detect_platform(cfg.sysfs)
         self.status: dict[str, SourceStatus] = {}
-        self.queue: collections.deque[Batch] = collections.deque(maxlen=MAX_QUEUE)
+        self.outbox = Outbox(cfg.data_dir / OUTBOX_FILE, MAX_QUEUE)
         self._last_detect = 0.0
         self._stop = threading.Event()
         self.heartbeat: boot.Heartbeat | None = None
-        self.pending_events: list[Event] = []
         self.thresholds = ThresholdEngine()
-        journal = JournalWatcher(cfg.journal, cfg.data_dir)
-        rasdaemon = RasdaemonReader(cfg.rasdaemon_db)
+        journal = JournalWatcher(cfg.journal, cfg.data_dir, markers=self.outbox)
+        rasdaemon = RasdaemonReader(cfg.rasdaemon_db, markers=self.outbox)
         self.event_sources: dict[str, EventSource] = {
-            "pstore": lambda: pstore.read_pstore(cfg.pstore),
+            "pstore": self._read_pstore,
             "rasdaemon": rasdaemon.read,
             "journal": journal.read,
         }
         # Pstore and rasdaemon re-read whole records, so keys already handed to a
         # batch are remembered and not sent again by this process.
         self._seen_keys: dict[str, None] = {}
+
+    @property
+    def pending_events(self) -> list[Event]:
+        """Events waiting for the next batch, held in the outbox so a restart
+        before delivery does not lose them."""
+        raw = self.outbox.get(PENDING_BOOT_MARKER)
+        if not raw:
+            return []
+        try:
+            return [Event.model_validate(e) for e in json.loads(raw)]
+        except ValueError:
+            log.error("pending event marker is unreadable and was ignored")
+            return []
+
+    def _stage_pending(self, events: list[Event]) -> None:
+        self.outbox.stage(PENDING_BOOT_MARKER,
+                          json.dumps([e.model_dump() for e in events]) if events else None)
+
+    def _read_pstore(self) -> tuple[SourceStatus, list[Event]]:
+        """Pstore records are re-read whole, so the keys already queued are
+        kept as a marker and committed with the batch that carries the rest."""
+        status, found = pstore.read_pstore(self.cfg.pstore)
+        try:
+            sent = json.loads(self.outbox.get(PSTORE_SENT_MARKER) or "[]")
+        except ValueError:
+            sent = []
+        new = [e for e in found if e.dedup_key not in sent]
+        if new:
+            self.outbox.stage(PSTORE_SENT_MARKER,
+                              json.dumps((sent + [e.dedup_key for e in new])[-MAX_SEEN_KEYS:]))
+        return status, new
 
     def seed_thresholds(self, client: httpx.Client) -> None:
         """Seed threshold state from events the hub already stores. Best effort:
@@ -122,8 +156,9 @@ class Agent:
     def start_boot_check(self) -> None:
         """Classify how the previous boot ended, once, then start the heartbeat.
         The event is queued for the next batch; the hub deduplicates by boot_id.
-        The pending event is held in memory, so an agent restart before it is
-        delivered loses it (the heartbeat already names the new boot)."""
+        The pending event is committed to the outbox at once, so an agent restart
+        before it is delivered does not lose it (the heartbeat already names the
+        new boot, so it could not be classified again)."""
         boot_id = boot.read_boot_id(self.cfg.procfs)
         if boot_id is None:
             self.status["boot"] = SourceStatus(source="boot", available=False,
@@ -133,7 +168,8 @@ class Agent:
         pstore = boot.pstore_has_records(self.cfg.sysfs / "fs/pstore")
         result = boot.classify(previous, boot_id, pstore, {})
         if result is not None:
-            self.pending_events.append(boot.boot_event(result))
+            self._stage_pending([*self.pending_events, boot.boot_event(result)])
+            self.outbox.commit_staged()
             log.info("boot classified as %s", result.kind)
         self.heartbeat = boot.Heartbeat(self.cfg.data_dir, boot_id)
         self.status["boot"] = SourceStatus(source="boot", available=True, reason="")
@@ -163,21 +199,46 @@ class Agent:
                 log.warning("collector %s failed: %s", c.id, exc)
                 self.status[c.id] = SourceStatus(source=c.id, available=False,
                                                  reason=f"collect error: {type(exc).__name__}: {exc}")
-        events, self.pending_events = self.pending_events, []
+        events = self.pending_events
+        self._stage_pending([])
         events.extend(self._collect_events())
+        self._outbox_status()
         events.extend(self.thresholds.evaluate(samples, self.status.values()))
         return Batch(agent_version=__version__, host=self.cfg.host_name, platform=self.platform,
                      sent_at=time.time(), sources=list(self.status.values()), samples=samples,
                      events=events, batch_id=str(uuid.uuid4()))
 
+    def _outbox_status(self) -> None:
+        dropped = self.outbox.dropped_since_drain()
+        dead = self.outbox.dead_letter_count()
+        notes = []
+        if dropped:
+            notes.append(f"outbox full: {dropped} sample(s) dropped since the queue last drained "
+                         f"({self.outbox.dropped_total()} in total); events were kept")
+        if dead:
+            notes.append(f"{dead} batch(es) refused by the hub are in the dead-letter table")
+        self.status["outbox"] = SourceStatus(source="outbox", available=not dropped, reason="; ".join(notes))
+
+    def cycle(self) -> None:
+        """Collect one batch and write it, with the source markers it covers,
+        to the outbox in a single transaction."""
+        self.outbox.enqueue(self.collect_once())
+
     def flush(self, client: httpx.Client) -> None:
-        while self.queue:
-            batch = self.queue[0]
+        """Send queued batches oldest first. A batch leaves the outbox only after
+        a 2xx answer. A 4xx other than 401, 408 and 429 can never succeed and is
+        dead-lettered so the head is not blocked; anything else raises and the
+        batch stays queued."""
+        while (head := self.outbox.peek()) is not None:
+            seq, batch = head
             r = client.post(f"{self.cfg.hub_url}/internal/v1/ingest", content=batch.model_dump_json(),
                             headers={"Authorization": f"Bearer {self.cfg.ingest_token}",
                                      "Content-Type": "application/json"}, timeout=10)
+            if 400 <= r.status_code < 500 and r.status_code not in RETRYABLE_4XX:
+                self.outbox.dead_letter(seq, r.status_code)
+                continue
             r.raise_for_status()
-            self.queue.popleft()
+            self.outbox.ack(seq)
 
     def run(self) -> None:
         self.detect()
@@ -187,11 +248,11 @@ class Agent:
             while not self._stop.is_set():
                 started = time.monotonic()
                 self._beat()
-                self.queue.append(self.collect_once())
+                self.cycle()
                 try:
                     self.flush(client)
                 except Exception as exc:
-                    log.warning("hub unreachable (%s); %d batch(es) queued", exc, len(self.queue))
+                    log.warning("hub unreachable (%s); %d batch(es) queued", exc, self.outbox.depth())
                 self._stop.wait(max(0.0, self.cfg.interval_s - (time.monotonic() - started)))
 
     def _beat(self) -> None:

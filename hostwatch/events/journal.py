@@ -23,10 +23,12 @@ import time
 from collections.abc import Callable, Iterable
 from pathlib import Path
 
+from ..outbox import Markers
 from ..schema import Event, SourceStatus
 
 SOURCE = "journal"
 CURSOR_FILE = "journal.cursor"
+CURSOR_MARKER = "journal.cursor"
 JOURNALCTL_TIMEOUT_S = 30
 
 Reader = Callable[[Path, str | None], Iterable[str]]
@@ -95,12 +97,24 @@ def classify(message: str) -> tuple[str, str, str] | None:
 
 
 class JournalWatcher:
-    def __init__(self, directory: Path, data_dir: Path, reader: Reader | None = None) -> None:
+    def __init__(self, directory: Path, data_dir: Path, reader: Reader | None = None,
+                 markers: Markers | None = None) -> None:
+        """With markers (the agent outbox), the cursor is staged and becomes
+        durable together with the batch that carries the events read. Without
+        markers the cursor is saved to a file at once, for standalone use."""
         self.directory = directory
         self.cursor_path = data_dir / CURSOR_FILE
         self.reader = reader or default_reader
+        self.markers = markers
 
     def load_cursor(self) -> str | None:
+        if self.markers is not None:
+            saved = self.markers.get(CURSOR_MARKER)
+            return saved if saved else self._load_cursor_file()
+        return self._load_cursor_file()
+
+    def _load_cursor_file(self) -> str | None:
+        """Also the one-time import of the cursor file an older agent wrote."""
         try:
             text = self.cursor_path.read_text(encoding="utf-8").strip()
         except OSError:
@@ -108,6 +122,9 @@ class JournalWatcher:
         return text or None
 
     def _save_cursor(self, cursor: str) -> None:
+        if self.markers is not None:
+            self.markers.stage(CURSOR_MARKER, cursor)
+            return
         self.cursor_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.cursor_path.with_suffix(".tmp")
         tmp.write_text(cursor, encoding="utf-8")

@@ -64,8 +64,10 @@ set and pstore under `<sysfs>/fs/pstore` is non-empty), `watchdog_reset`,
 malformed heartbeat gives `unknown`. The watchdog and power loss hints come from
 journal watchers that a later slice adds, so until then those boots are
 `unknown`. The event kind is `boot.<class>` with dedup key `boot:<boot_id>`,
-queued for the next batch. The source `boot` is reported unavailable when the
-boot_id cannot be read.
+held in the outbox as a pending event and committed at once, so an agent restart
+before delivery does not lose it. The next batch carries it and clears the
+pending marker in the same transaction. The source `boot` is reported unavailable
+when the boot_id cannot be read.
 
 ## pstore ingestion
 
@@ -87,13 +89,14 @@ The agent reads it every cycle and sends each record once per process.
 `aer_event` and `mce_record` are each read only when they exist. Rows become
 `hardware_error` events with the dedup key `rasdaemon:<table>:<row id>`. Severity
 is `warning` for corrected errors, `critical` for uncorrected or fatal errors and
-for every machine check record. The reader keeps a high-water row id per table in
-memory and reads at most 500 rows per table per call. A missing database, or a
+for every machine check record. The reader keeps a high-water row id per table as
+a progress marker and reads at most 500 rows per table per call. A missing database, or a
 database with none of the three tables, yields source `rasdaemon` unavailable
 with a reason; a single missing table is skipped and named in the reason of an
 otherwise available source. A row whose timestamp cannot be parsed keeps the raw
 text in the detail and is stamped with the read time, flagged by
-`ts_is_read_time`. The agent reads it every cycle and sends each row once per process.
+`ts_is_read_time`. The agent reads it every cycle. The high-water ids are progress markers that
+commit with the batch carrying the rows (see the outbox section).
 
 ## Journal watching
 
@@ -108,7 +111,37 @@ not repeat entries. A table of patterns maps message text to the kinds
 wins and unmatched lines give no events. The dedup key is `journal:<cursor>`.
 A missing directory, a missing `journalctl` binary or a failing run yields
 source `journal` unavailable with a reason. The first read with no saved cursor
-reads the whole journal. The agent reads it every cycle.
+reads the whole journal. The agent reads it every cycle. The cursor is a progress marker that commits
+with the batch carrying the entries read, so a crash after a read re-reads the
+entries instead of skipping them. An older `journal.cursor` file is imported once
+when no marker exists.
+
+## Durable outbox
+
+`hostwatch/outbox.py` keeps `outbox.db` (SQLite, synchronous FULL) in the data
+directory, which is the `hostwatch-data` volume. Each cycle the agent writes the
+batch to the outbox and then tries to send from the oldest. A batch is removed
+only after the hub answers 2xx. The hub also deduplicates by `batch_id`, so a
+resend after a lost answer is harmless.
+
+- A 5xx answer or a network failure leaves the batch queued and is logged.
+- A 401 leaves the batch queued, because a corrected token makes it deliverable.
+  408 and 429 are treated the same way because they are transient.
+- Any other 4xx can never succeed. The batch moves to the `dead_letters` table
+  with the status (the last 1000 are kept), an error is logged, and the next
+  batch is sent. The outbox source status names the count.
+- The cap is 240 batches. Past it, the oldest batch loses its samples, which are
+  counted, and its events move into the next batch, which gets a new `batch_id`
+  because the hub may have acknowledged the old one. Events are never dropped
+  by the cap. A warning is logged and the source `outbox` is reported
+  unavailable, with the dropped count in the reason, until the queue drains.
+
+Progress markers (`journal.cursor`, `rasdaemon.high_water.<table>`,
+`pstore.sent_keys` and `boot.pending_events`) are rows in the `markers` table.
+Event sources read them with `get` and stage new values with `stage`. Staged
+values are visible at once but become durable only when `enqueue` writes the
+batch, in the same transaction. A crash before that point repeats the read and
+the hub deduplicates by key; a crash after it resumes after the queued events.
 
 ## Threshold events
 

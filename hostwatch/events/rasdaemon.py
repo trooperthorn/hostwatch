@@ -11,9 +11,12 @@ hardware. A missing table is skipped with a reason. A missing or unreadable
 database makes the whole source unavailable. The table and column names are
 assumptions that are not yet confirmed on hardware; see UNVERIFIED.md.
 
-The reader keeps one high-water row id per table in memory, so a row is turned
-into an event once per process. The hub also keeps one row per dedup key, so a
-restart that re-reads old rows does not create duplicates there.
+The reader keeps one high-water row id per table as a marker. With the agent
+outbox as the marker store, the new high-water id is committed in the same
+transaction as the batch that carries the events, so a restart resumes from
+what was durably queued. Without a store the ids live in memory. The hub also
+keeps one row per dedup key, so a re-read of old rows does not create
+duplicates there.
 """
 
 from __future__ import annotations
@@ -23,6 +26,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
+from ..outbox import MemoryMarkers, Markers
 from ..schema import Event, SourceStatus
 
 SOURCE = "rasdaemon"
@@ -73,9 +77,15 @@ def open_readonly(path: Path) -> sqlite3.Connection:
 
 
 class RasdaemonReader:
-    def __init__(self, db_path: Path) -> None:
+    def __init__(self, db_path: Path, markers: Markers | None = None) -> None:
         self.db_path = db_path
-        self.high_water: dict[str, int] = {}
+        self.markers: Markers = markers if markers is not None else MemoryMarkers()
+
+    def _high_water(self, table: str) -> int:
+        try:
+            return int(self.markers.get(f"rasdaemon.high_water.{table}") or 0)
+        except ValueError:
+            return 0
 
     def read(self) -> tuple[SourceStatus, list[Event]]:
         if not self.db_path.is_file():
@@ -116,7 +126,7 @@ class RasdaemonReader:
         if "timestamp" in cols:
             wanted.append("timestamp")
         select = ", ".join(["id", *wanted])
-        last = self.high_water.get(table, 0)
+        last = self._high_water(table)
         rows = conn.execute(
             f"SELECT {select} FROM {table} WHERE id > ? ORDER BY id LIMIT ?",
             (last, MAX_ROWS_PER_READ)).fetchall()
@@ -138,5 +148,5 @@ class RasdaemonReader:
                 kind=KIND, severity=classify_severity(table, data), source=SOURCE, ts=ts,
                 title=f"rasdaemon {table} {rid}: {msg}",
                 detail=detail, dedup_key=f"rasdaemon:{table}:{rid}"))
-            self.high_water[table] = rid
+            self.markers.stage(f"rasdaemon.high_water.{table}", str(rid))
         return events

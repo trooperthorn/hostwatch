@@ -106,7 +106,9 @@ def test_event_is_emitted_once_and_deduplicated_across_restarts(tmp_path):
     write_hb(cfg, clean=True)
     agent = start(cfg)
     agent.heartbeat.beat()
-    assert len(agent.collect_once().events) == 1
+    batch = agent.collect_once()
+    assert len(batch.events) == 1
+    agent.outbox.enqueue(batch)  # the marker is cleared only with the queued batch
     assert agent.collect_once().events == []
     again = start(cfg)  # agent restart inside the same boot
     assert again.pending_events == []
