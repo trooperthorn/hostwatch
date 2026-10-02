@@ -13,6 +13,7 @@ import dataclasses
 import json
 import logging
 import signal
+import socket
 import ssl
 import sys
 import threading
@@ -20,7 +21,7 @@ import time
 
 from . import cli
 from .agent import Agent
-from .config import Config
+from .config import Config, _is_loopback, normalize_ip
 
 
 def collect_once(cfg: Config) -> int:
@@ -54,6 +55,81 @@ def uvicorn_kwargs(cfg: Config) -> dict:
     return kwargs
 
 
+LOOPBACK_V4 = "127.0.0.1"
+
+
+def listen_addresses(cfg: Config) -> list[tuple[str, int]]:
+    """The (host, port) pairs the hub serves on.
+
+    The all role runs the agent in the same process and the agent posts over
+    loopback. When the hub is bound to one specific non-loopback address, that
+    address does not accept loopback connections, so 127.0.0.1 is added as a
+    second listener. The hub role and every loopback or wildcard bind get the
+    single configured address.
+    """
+    addrs = [(cfg.hub_bind, cfg.hub_port)]
+    if cfg.role == "all" and not _is_loopback(cfg.hub_bind):
+        try:
+            unspecified = normalize_ip(cfg.hub_bind).is_unspecified
+        except ValueError:
+            unspecified = False
+        if not unspecified:
+            addrs.append((LOOPBACK_V4, cfg.hub_port))
+    return addrs
+
+
+def local_agent_hub_url(cfg: Config) -> str:
+    """The hub URL the in-process agent uses in the all role: always loopback, same scheme and port."""
+    scheme = "https" if cfg.tls_configured else "http"
+    return f"{scheme}://{LOOPBACK_V4}:{cfg.hub_port}"
+
+
+def _bind_one(host: str, port: int) -> socket.socket:
+    family = socket.AF_INET6 if ":" in host else socket.AF_INET
+    sock = socket.socket(family, socket.SOCK_STREAM)
+    try:
+        if sys.platform != "win32":
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind((host, port))
+        sock.listen(2048)
+        sock.set_inheritable(True)
+    except OSError:
+        sock.close()
+        raise
+    return sock
+
+
+def bind_sockets(cfg: Config, bind_one=_bind_one) -> list[socket.socket]:
+    """Bind every listener before serving. If any bind fails, close the ones already bound and raise
+    RuntimeError naming the address, so startup fails loudly instead of the agent queueing silently."""
+    socks: list[socket.socket] = []
+    for host, port in listen_addresses(cfg):
+        try:
+            socks.append(bind_one(host, port))
+        except OSError as exc:
+            for s in socks:
+                s.close()
+            raise RuntimeError(
+                f"Cannot listen on {host}:{port} ({exc}). In the all role the hub must listen on both the "
+                f"configured address and {LOOPBACK_V4} so the local agent can deliver; free the port or "
+                "change HOSTWATCH_HUB_BIND or HOSTWATCH_HUB_PORT.") from exc
+    return socks
+
+
+def serve_hub(app, cfg: Config) -> None:
+    import uvicorn
+    kwargs = uvicorn_kwargs(cfg)
+    if len(listen_addresses(cfg)) == 1:
+        uvicorn.run(app, **kwargs)
+        return
+    socks = bind_sockets(cfg)
+    try:
+        uvicorn.Server(uvicorn.Config(app, **kwargs)).run(sockets=socks)
+    finally:
+        for s in socks:
+            s.close()
+
+
 def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
@@ -71,8 +147,6 @@ def main(argv: list[str] | None = None) -> int:
         agent.run()
         return 0
 
-    import uvicorn
-
     from .hub import create_app
     from .store import Store
 
@@ -80,13 +154,14 @@ def main(argv: list[str] | None = None) -> int:
     if cfg.role == "all":
         # The local agent talks to its own hub with a hashed, scoped key minted in memory.
         from .auth import mint_internal_ingest_key
-        cfg = dataclasses.replace(cfg, ingest_key=mint_internal_ingest_key(cfg, store))
+        cfg = dataclasses.replace(cfg, ingest_key=mint_internal_ingest_key(cfg, store),
+                                  hub_url=local_agent_hub_url(cfg))
     agent = Agent(cfg) if cfg.role == "all" else None
     thread = threading.Thread(target=agent.run, name="agent", daemon=True) if agent else None
     app = create_app(cfg, store,
                      on_start=thread.start if thread else None,
                      on_stop=agent.stop_and_wait if agent else None)
-    uvicorn.run(app, **uvicorn_kwargs(cfg))
+    serve_hub(app, cfg)
     return 0
 
 

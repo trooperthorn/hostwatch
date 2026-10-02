@@ -59,6 +59,12 @@ Enforced:
   It relies on `network_mode: host` so the hub sees real client addresses;
   behind NAT or a proxy, list the proxy's address. TLS deployments may use the
   allowlist too.
+  In the all role the local agent posts over loopback, so with a specific-address
+  bind the hub listens on that address and on 127.0.0.1; if either cannot be
+  bound, startup fails with a message naming the address. The hub role binds
+  only the configured address. In summary, a non-loopback bind is accepted for
+  TLS, for a specific address with a source allowlist, or with the explicit
+  insecure override; otherwise it is refused.
   The container runs as UID 10001, read-only root
   filesystem, all capabilities dropped, `no-new-privileges`.
 - `/sys` is mounted read-only. The host `/proc` is not mounted.

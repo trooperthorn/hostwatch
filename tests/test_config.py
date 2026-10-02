@@ -299,3 +299,66 @@ def test_tls_with_or_without_allowlist_passes(tmp_path):
 def test_allowlist_read_from_environment(monkeypatch):
     monkeypatch.setenv("HOSTWATCH_ALLOWED_CLIENTS", "10.0.0.5")
     assert Config().allowed_clients == "10.0.0.5"
+
+
+# Listener layout for the all role with a specific-IP bind: the local agent posts over loopback.
+
+import socket
+
+from fastapi.testclient import TestClient
+
+from hostwatch.__main__ import bind_sockets, listen_addresses, local_agent_hub_url
+from hostwatch.hub import create_app
+from hostwatch.store import Store
+
+
+def _listen_cfg(role, bind, **kw):
+    return Config(role=role, hub_bind=bind, hub_port=8090, ingest_token=TOKEN, allowed_clients="10.0.0.9", **kw)
+
+
+def test_all_role_specific_bind_listens_on_both():
+    assert listen_addresses(_listen_cfg("all", "10.0.0.5")) == [("10.0.0.5", 8090), ("127.0.0.1", 8090)]
+
+
+def test_hub_role_specific_bind_listens_only_on_it():
+    assert listen_addresses(_listen_cfg("hub", "10.0.0.5")) == [("10.0.0.5", 8090)]
+
+
+def test_loopback_and_wildcard_binds_listen_once():
+    assert listen_addresses(_listen_cfg("all", "127.0.0.1")) == [("127.0.0.1", 8090)]
+    assert listen_addresses(_listen_cfg("all", "0.0.0.0")) == [("0.0.0.0", 8090)]
+
+
+def test_second_bind_failure_raises_and_closes_first():
+    opened = []
+
+    def fake(host, port):
+        if host == "127.0.0.1":
+            raise OSError("address in use")
+        s = socket.socket()
+        opened.append(s)
+        return s
+
+    with pytest.raises(RuntimeError, match=r"127\.0\.0\.1:8090.*address in use"):
+        bind_sockets(_listen_cfg("all", "10.0.0.5"), bind_one=fake)
+    assert len(opened) == 1 and opened[0].fileno() == -1
+
+
+def test_loopback_listener_really_binds():
+    socks = bind_sockets(Config(role="hub", hub_bind="127.0.0.1", hub_port=0, ingest_token=TOKEN))
+    try:
+        assert len(socks) == 1 and socks[0].getsockname()[0] == "127.0.0.1"
+    finally:
+        for s in socks:
+            s.close()
+
+
+def test_local_agent_url_is_loopback_and_admitted(tmp_path):
+    cfg = _listen_cfg("all", "10.0.0.5", data_dir=tmp_path, argon2_time_cost=1, argon2_memory_kib=8,
+                      argon2_parallelism=1)
+    url = local_agent_hub_url(cfg)
+    assert url == "http://127.0.0.1:8090"
+    # The agent's request arrives from a loopback peer, which the source filter always admits.
+    client = TestClient(create_app(cfg, Store(tmp_path / "db.sqlite")), client=("127.0.0.1", 40000))
+    assert client.get("/internal/v1/health").status_code == 200
+    assert [r for r in Store(tmp_path / "db.sqlite").audit_rows() if r["kind"] == "source_denied"] == []

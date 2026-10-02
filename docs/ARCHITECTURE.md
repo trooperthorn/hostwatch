@@ -439,6 +439,7 @@ operator deploys it.
 | Password lockout, uniform login failure, CSRF token on cookie writes | Enforced | `tests/test_login.py` |
 | Non-loopback bind refused without TLS | Enforced, override `HOSTWATCH_ALLOW_INSECURE_BIND=1` | `tests/test_config.py` |
 | Specific-IP plain HTTP bind with `HOSTWATCH_ALLOWED_CLIENTS`; other socket peers get 403 and a `source_denied` audit row before authentication | Enforced as exposure control only, not authentication; relies on `network_mode: host` for real client addresses | `tests/test_source_allowlist.py`, `tests/test_config.py` |
+| All role with a specific-IP bind also listens on 127.0.0.1 so the local agent delivers; failure to bind either address stops startup | Enforced | `tests/test_config.py` |
 | Loopback as the default bind | Advisory: it limits exposure and is not authentication | none |
 | Proxy mode client certificates | Peer allowlist and binding lookup enforced; proxy verification and header stripping advisory | `tests/test_mtls.py` |
 | Operator CLI | Advisory: protected only by access to the data directory | `tests/test_cli.py` |
@@ -488,6 +489,16 @@ sees real client addresses; behind NAT or a proxy, list the proxy's address, whi
 admits everything that proxy forwards. `HOSTWATCH_TLS=1` does not start
 a listener; it only marks cookies `Secure` (advisory), and a configured certificate
 and key mark them `Secure` too.
+
+Local agent delivery (enforced): in the all role the agent posts to the hub over
+loopback (`local_agent_hub_url` in `__main__.py`). A specific-address bind does not
+accept loopback connections, so `listen_addresses` returns the configured address
+plus `127.0.0.1` for the all role, and `bind_sockets` binds both before serving them
+from one uvicorn server. If either bind fails, startup raises with the address named
+rather than letting batches queue silently. The hub role and loopback or wildcard
+binds use the single configured address. The three accepted non-loopback cases are
+TLS, a specific address with a source allowlist, and the explicit insecure override.
+Covered by `tests/test_config.py`.
 
 Operator CLI (enforced by file access, not by the network): `cli.py` provides
 `bootstrap-admin`, `user create|disable|unlock|passwd` and `key create|list|revoke`.

@@ -23,7 +23,8 @@ SolarWinds Orion (API Poller). One image, three roles (`HOSTWATCH_ROLE=all|hub|a
   except health, argon2id logins with lockout, server-side sessions with CSRF
   tokens, hashed scoped API keys revoked on the next request, an append-only
   audit log (application layer only), and refusal of a non-loopback bind
-  without TLS. Advisory: the reverse proxy behind proxy-mode client
+  without TLS, TLS or a specific-address bind with a source allowlist being
+  the accepted alternatives. Advisory: the reverse proxy behind proxy-mode client
   certificates, the loopback default bind as a deployment choice, and the CLI
   trust boundary (shell access to the data directory). **Not yet deployed or
   verified on real hardware**; see `UNVERIFIED.md`.
@@ -52,8 +53,11 @@ SolarWinds Orion (API Poller). One image, three roles (`HOSTWATCH_ROLE=all|hub|a
    model names, no real credentials. Hostnames of the owner's own lab hosts are
    acceptable in `UNVERIFIED.md` and `docs/`.
 7. **Do not widen exposure ahead of the plan.** The hub binds to 127.0.0.1 by
-   default. Phase 3 added login, scoped API keys and TLS, but a non-loopback
-   bind still needs TLS or an explicit insecure override, and the Phase 3 checks
+   default. Phase 3 added login, scoped API keys and TLS. A non-loopback bind
+   is accepted in three cases only: TLS, one specific address (never a wildcard)
+   with a non-empty `HOSTWATCH_ALLOWED_CLIENTS` source allowlist, or the explicit
+   insecure override. In the all role a specific-address bind also listens on
+   127.0.0.1 so the local agent keeps delivering. The Phase 3 checks
    in `UNVERIFIED.md` should pass on hardware before the port is published.
 8. **Do not mount the host `/proc`** into the container. The files read are
    system-wide from the container's own `/proc`.
