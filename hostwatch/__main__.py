@@ -10,6 +10,7 @@ from __future__ import annotations
 import json
 import logging
 import signal
+import ssl
 import sys
 import threading
 import time
@@ -30,6 +31,23 @@ def collect_once(cfg: Config) -> int:
         lbl = " ".join(f"{k}={v}" for k, v in s.labels.items())
         print(f"{s.source:9} {s.metric:22} {str(s.value):>14} {s.unit:4} {lbl}")
     return 0
+
+
+def uvicorn_kwargs(cfg: Config) -> dict:
+    """Keyword arguments for uvicorn.run, including TLS when the operator supplied a certificate.
+
+    A client CA asks for a client certificate but does not require one, so
+    password and key callers still work; certificate login is decided by the
+    hub from the verified identity, not by the handshake alone.
+    """
+    kwargs: dict = {"host": cfg.hub_bind, "port": cfg.hub_port, "log_level": "info"}
+    if cfg.tls_configured:
+        kwargs["ssl_certfile"] = cfg.tls_cert
+        kwargs["ssl_keyfile"] = cfg.tls_key
+        if cfg.tls_client_ca:
+            kwargs["ssl_ca_certs"] = cfg.tls_client_ca
+            kwargs["ssl_cert_reqs"] = ssl.CERT_OPTIONAL
+    return kwargs
 
 
 def main() -> int:
@@ -57,7 +75,7 @@ def main() -> int:
     app = create_app(cfg, store,
                      on_start=thread.start if thread else None,
                      on_stop=agent.stop_and_wait if agent else None)
-    uvicorn.run(app, host=cfg.hub_bind, port=cfg.hub_port, log_level="info")
+    uvicorn.run(app, **uvicorn_kwargs(cfg))
     return 0
 
 

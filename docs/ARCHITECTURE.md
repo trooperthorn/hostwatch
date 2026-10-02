@@ -407,8 +407,16 @@ else was widened (no privileged mode, no added capability, no writable host moun
 The image installs `journalctl` from the `systemd` package. Reading the journal
 may need the `systemd-journal` group, which is recorded in `UNVERIFIED.md`.
 
-Planned (rest of Phase 3): key management CLI and TLS serving. The bind
-address must not widen before that work lands.
+TLS serving (enforced): `HOSTWATCH_TLS_CERT` and `HOSTWATCH_TLS_KEY` are passed
+to uvicorn as `ssl_certfile` and `ssl_keyfile` by `uvicorn_kwargs` in
+`__main__.py`; `HOSTWATCH_TLS_CLIENT_CA` adds `ssl_ca_certs` with client
+certificates requested but not required. `Config.validate` refuses a
+non-loopback `HOSTWATCH_HUB_BIND` without a certificate and key, unless
+`HOSTWATCH_ALLOW_INSECURE_BIND=1`, which logs a warning. The bind check is
+exposure control only and is not authentication. `HOSTWATCH_TLS=1` still only
+marks cookies `Secure`.
+
+Planned (rest of Phase 3): key management CLI.
 
 ## Isolation for tests and agents
 

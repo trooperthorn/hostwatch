@@ -43,7 +43,13 @@ Enforced:
   whether the proxy really verifies certificates and strips client supplied
   headers is the proxy configuration's job and is not checked by hostwatch.
   Smart card (YubiKey/PIV) behaviour is unverified, see `UNVERIFIED.md`.
-- The hub binds to 127.0.0.1. The container runs as UID 10001, read-only root
+- The hub binds to 127.0.0.1 by default. The bind address is exposure control,
+  not authentication. A non-loopback `HOSTWATCH_HUB_BIND` is refused at start
+  unless `HOSTWATCH_TLS_CERT` and `HOSTWATCH_TLS_KEY` are set (the hub then
+  serves TLS itself; `HOSTWATCH_TLS_CLIENT_CA` optionally asks clients for a
+  certificate without requiring one) or `HOSTWATCH_ALLOW_INSECURE_BIND=1`
+  is set, which logs a warning and sends credentials in clear text.
+  The container runs as UID 10001, read-only root
   filesystem, all capabilities dropped, `no-new-privileges`.
 - `/sys` is mounted read-only. The host `/proc` is not mounted.
 - Phase 2 adds only read-only mounts: the journal, `/sys/fs/pstore`, and
@@ -58,10 +64,11 @@ Enforced:
   cookie-authenticated POST, PUT, PATCH or DELETE must send the `X-CSRF-Token`
   header, whose value the login response returns, or it is refused with 403.
   `HOSTWATCH_TLS` only marks the cookie `Secure`; it does not start a TLS
-  listener (that arrives in a later slice).
+  listener. Set `HOSTWATCH_TLS_CERT` and `HOSTWATCH_TLS_KEY` for that, and set
+  `HOSTWATCH_TLS=1` as well so the cookie is marked `Secure`.
 
 Not yet present (later slices and phases): the CLI that
-creates users and keys, TLS serving, Home Assistant and Orion endpoints. Until
+creates users and keys, Home Assistant and Orion endpoints. Until
 the CLI lands there is no supported way to mint a key, so the read examples
 below that use the shared token now answer 403; they need a key with the
 matching scope. Do not expose port

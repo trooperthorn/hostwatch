@@ -118,3 +118,97 @@ def test_dockerfile_creates_owned_data_dir():
 def test_compose_tests_do_not_depend_on_cwd(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     assert COMPOSE.is_file() and ENV_EXAMPLE.is_file()
+
+
+# TLS serving and the bind guard. The bind check is exposure control, not authentication.
+
+import datetime
+import logging
+import ssl
+
+import pytest
+from cryptography import x509
+from cryptography.hazmat.primitives import hashes, serialization
+from cryptography.hazmat.primitives.asymmetric import ec
+from cryptography.x509.oid import NameOID
+
+from hostwatch.__main__ import uvicorn_kwargs
+
+TOKEN = "t" * 32
+
+
+def _make_cert(tmp_path: Path, stem: str) -> tuple[str, str]:
+    key = ec.generate_private_key(ec.SECP256R1())
+    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, stem)])
+    now = datetime.datetime.now(datetime.timezone.utc)
+    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
+            .public_key(key.public_key()).serial_number(x509.random_serial_number())
+            .not_valid_before(now - datetime.timedelta(days=1))
+            .not_valid_after(now + datetime.timedelta(days=1))
+            .sign(key, hashes.SHA256()))
+    cert_path, key_path = tmp_path / f"{stem}.pem", tmp_path / f"{stem}.key"
+    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
+    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
+                                           serialization.PrivateFormat.PKCS8,
+                                           serialization.NoEncryption()))
+    return str(cert_path), str(key_path)
+
+
+def _cfg(**kw) -> Config:
+    return Config(role="hub", ingest_token=TOKEN, **kw)
+
+
+def test_loopback_without_tls_passes():
+    for host in ("127.0.0.1", "::1", "localhost"):
+        _cfg(hub_bind=host).validate()
+
+
+def test_non_loopback_without_tls_is_refused():
+    with pytest.raises(ValueError, match="not a loopback"):
+        _cfg(hub_bind="0.0.0.0").validate()
+
+
+def test_non_loopback_with_tls_passes(tmp_path):
+    cert, key = _make_cert(tmp_path, "hub")
+    _cfg(hub_bind="0.0.0.0", tls_cert=cert, tls_key=key).validate()
+
+
+def test_insecure_override_passes_and_warns(caplog):
+    with caplog.at_level(logging.WARNING, logger="hostwatch.config"):
+        _cfg(hub_bind="0.0.0.0", allow_insecure_bind=True).validate()
+    assert any("clear text" in r.getMessage() for r in caplog.records)
+
+
+def test_override_read_from_environment(monkeypatch):
+    monkeypatch.setenv("HOSTWATCH_ALLOW_INSECURE_BIND", "1")
+    assert Config().allow_insecure_bind is True
+    monkeypatch.setenv("HOSTWATCH_ALLOW_INSECURE_BIND", "yes")
+    assert Config().allow_insecure_bind is False
+
+
+def test_cert_without_key_and_missing_files_are_refused(tmp_path):
+    cert, key = _make_cert(tmp_path, "hub")
+    with pytest.raises(ValueError, match="together"):
+        _cfg(tls_cert=cert).validate()
+    with pytest.raises(ValueError, match="requires"):
+        _cfg(tls_client_ca=cert).validate()
+    with pytest.raises(ValueError, match="readable file"):
+        _cfg(tls_cert=str(tmp_path / "nope.pem"), tls_key=key).validate()
+
+
+def test_uvicorn_kwargs_plain():
+    kw = uvicorn_kwargs(_cfg(hub_port=9000))
+    assert kw["host"] == "127.0.0.1" and kw["port"] == 9000
+    assert not any(k.startswith("ssl_") for k in kw)
+
+
+def test_uvicorn_kwargs_tls_and_client_ca(tmp_path):
+    cert, key = _make_cert(tmp_path, "hub")
+    ca, _ = _make_cert(tmp_path, "ca")
+    kw = uvicorn_kwargs(_cfg(tls_cert=cert, tls_key=key))
+    assert kw["ssl_certfile"] == cert and kw["ssl_keyfile"] == key
+    assert "ssl_ca_certs" not in kw
+    kw = uvicorn_kwargs(_cfg(tls_cert=cert, tls_key=key, tls_client_ca=ca))
+    assert kw["ssl_ca_certs"] == ca and kw["ssl_cert_reqs"] == ssl.CERT_OPTIONAL
+    # The generated files really load as a server certificate.
+    ssl.create_default_context(ssl.Purpose.CLIENT_AUTH).load_cert_chain(cert, key)

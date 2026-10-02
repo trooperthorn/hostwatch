@@ -1,8 +1,10 @@
 # hostwatch, single-container "all" role (hub + Linux agent).
 #
 # network_mode host: the agent reaches Scrutiny on localhost, and the hub binds
-# to 127.0.0.1 only (HOSTWATCH_HUB_BIND). Nothing is reachable off-host in
-# Phase 1. Do not change the bind address before Phase 3 adds authentication.
+# to 127.0.0.1 by default (HOSTWATCH_HUB_BIND). The bind address is exposure
+# control, not authentication. The hub refuses a non-loopback bind unless
+# HOSTWATCH_TLS_CERT and HOSTWATCH_TLS_KEY are set (mount the files read-only
+# and use container paths) or HOSTWATCH_ALLOW_INSECURE_BIND=1 is set.
 services:
   hostwatch:
     build: ..

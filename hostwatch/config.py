@@ -9,10 +9,14 @@ sources (journal, pstore, rasdaemon database) are read-only mounts under /host.
 
 from __future__ import annotations
 
+import ipaddress
+import logging
 import os
 import socket
 from dataclasses import dataclass, field
 from pathlib import Path
+
+log = logging.getLogger(__name__)
 
 
 def _env(name: str, default: str) -> str:
@@ -43,6 +47,10 @@ class Config:
     login_lock_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_LOGIN_LOCK_S", "900")))
     session_ttl_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_SESSION_TTL_S", "28800")))
     tls_enabled: bool = field(default_factory=lambda: _env("HOSTWATCH_TLS", "0").lower() in {"1", "true", "yes"})
+    tls_cert: str = field(default_factory=lambda: _env("HOSTWATCH_TLS_CERT", ""))
+    tls_key: str = field(default_factory=lambda: _env("HOSTWATCH_TLS_KEY", ""))
+    tls_client_ca: str = field(default_factory=lambda: _env("HOSTWATCH_TLS_CLIENT_CA", ""))
+    allow_insecure_bind: bool = field(default_factory=lambda: _env("HOSTWATCH_ALLOW_INSECURE_BIND", "0") == "1")
     mtls_mode: str = field(default_factory=lambda: _env("HOSTWATCH_MTLS_MODE", "off").lower())
     mtls_trusted_proxies: str = field(default_factory=lambda: _env("HOSTWATCH_MTLS_TRUSTED_PROXIES", ""))
     scrutiny_url: str = field(default_factory=lambda: _env("HOSTWATCH_SCRUTINY_URL", ""))
@@ -67,3 +75,46 @@ class Config:
                 "HOSTWATCH_INGEST_TOKEN must be set to at least 32 characters. "
                 "Generate one with: openssl rand -hex 32"
             )
+
+        self._validate_bind()
+
+    @property
+    def tls_configured(self) -> bool:
+        """True when the hub itself will terminate TLS with an operator supplied certificate."""
+        return bool(self.tls_cert and self.tls_key)
+
+    def _validate_bind(self) -> None:
+        """Exposure control: refuse a non-loopback bind unless TLS is on or the override is set.
+
+        This limits who can reach the listener. It is not authentication; the
+        login, session and key checks in hub.py are what authenticate callers.
+        """
+        if bool(self.tls_cert) != bool(self.tls_key):
+            raise ValueError("HOSTWATCH_TLS_CERT and HOSTWATCH_TLS_KEY must be set together")
+        if self.tls_client_ca and not self.tls_configured:
+            raise ValueError("HOSTWATCH_TLS_CLIENT_CA requires HOSTWATCH_TLS_CERT and HOSTWATCH_TLS_KEY")
+        for name, path in (("HOSTWATCH_TLS_CERT", self.tls_cert), ("HOSTWATCH_TLS_KEY", self.tls_key),
+                           ("HOSTWATCH_TLS_CLIENT_CA", self.tls_client_ca)):
+            if path and not Path(path).is_file():
+                raise ValueError(f"{name} does not point to a readable file: {path}")
+        if self.role == "agent" or _is_loopback(self.hub_bind) or self.tls_configured:
+            return
+        if not self.allow_insecure_bind:
+            raise ValueError(
+                f"HOSTWATCH_HUB_BIND={self.hub_bind} is not a loopback address and TLS is not configured. "
+                "Set HOSTWATCH_TLS_CERT and HOSTWATCH_TLS_KEY, bind to 127.0.0.1, "
+                "or set HOSTWATCH_ALLOW_INSECURE_BIND=1 to accept plain HTTP off-host."
+            )
+        log.warning(
+            "HOSTWATCH_ALLOW_INSECURE_BIND=1: the hub listens on %s without TLS. Passwords, session "
+            "cookies and API keys cross the network in clear text. Use this only behind a TLS proxy "
+            "you control.", self.hub_bind)
+
+
+def _is_loopback(host: str) -> bool:
+    if host.lower() == "localhost":
+        return True
+    try:
+        return ipaddress.ip_address(host).is_loopback
+    except ValueError:
+        return False
