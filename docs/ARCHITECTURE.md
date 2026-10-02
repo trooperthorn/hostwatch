@@ -181,17 +181,23 @@ resend after a lost answer is harmless.
   `HOSTWATCH_QUARANTINE_AFTER` times in a row (default 5), it is quarantined to
   `dead_letters` with that status and delivery continues. 401 is never counted,
   because a corrected token makes the batch deliverable. Network errors never
-  count. The outbox source status reports the quarantined count.
-- If `outbox.db` cannot be opened as a database, it is renamed to
-  `outbox.db.corrupt-<timestamp>`, an error is logged, and a fresh outbox is
+  count. 408, 429, 502, 503 and 504 are never counted either, because they
+  describe an overloaded or unreachable hub or proxy, so an outage cannot move
+  the queue into `dead_letters`. The failure count is stored in the outbox and
+  survives a restart, and quarantined rows are exempt from the 1000-row trim.
+  The outbox source status reports the quarantined count.
+- If SQLite reports `outbox.db` as not a database or malformed, it is renamed,
+  with any `-wal`, `-shm` or `-journal` file, to `outbox.db.corrupt-<timestamp>`, an error is logged, and a fresh outbox is
   started. The outbox source status names the renamed file, because the queued
-  batches and markers in it are lost.
+  batches and markers in it are lost. Locked or I/O errors are not treated as
+  corruption: the file is left alone and the error is raised.
 - Each agent cycle runs inside a guard. An exception is logged, markers staged
   by that cycle are discarded so nothing is skipped, the source `agent` is
   reported unavailable with the reason, and the next cycle runs normally.
 - Threshold state is seeded from the hub with retry and backoff. Threshold
   events are not emitted until the seed has succeeded, so an open condition is
-  not announced again after a restart during a hub outage.
+  not announced again after a restart during a hub outage. While the seed is
+  failing, the source `thresholds` is reported unavailable with that reason.
 - The cap is 240 batches. Past it, the oldest batch loses its samples, which are
   counted, and its events move into the next batch, which gets a new `batch_id`
   because the hub may have acknowledged the old one. Events are never dropped

@@ -35,6 +35,10 @@ MAX_QUEUE = 240  # one hour at the default 15s interval
 PENDING_BOOT_MARKER = "boot.pending_events"
 PSTORE_SENT_MARKER = "pstore.sent_keys"
 DEAD_LETTER_STATUSES = {400, 422}
+# Statuses that describe an overloaded or unreachable hub or proxy, or a token
+# problem, rather than a batch the hub cannot process. They never count toward
+# quarantine, so an outage cannot move queued batches out of the delivery path.
+NEVER_QUARANTINE_STATUSES = {401, 408, 429, 502, 503, 504}
 MAX_BACKOFF_S = 300.0
 MAX_SEEN_KEYS = 10000
 
@@ -81,8 +85,6 @@ class Agent:
         self._next_seed = 0.0
         self._flush_failures = 0
         self._next_flush = 0.0
-        self._head_seq: int | None = None
-        self._head_failures = 0
 
     @property
     def pending_events(self) -> list[Event]:
@@ -155,8 +157,12 @@ class Agent:
             return
         if self.seed_thresholds(client):
             log.info("threshold state seeded; threshold events are enabled")
+            self.status.pop("thresholds", None)
             return
         self._seed_failures += 1
+        self.status["thresholds"] = SourceStatus(
+            source="thresholds", available=False,
+            reason=f"threshold events are held back until the hub seed succeeds ({self._seed_failures} failed attempt(s))")
         self._next_seed = time.monotonic() + self._backoff(self._seed_failures)
 
     def _backoff(self, failures: int) -> float:
@@ -302,8 +308,10 @@ class Agent:
         a 2xx answer. A 400 or 422 can never succeed and is dead-lettered so the
         head is not blocked. Any other failure raises and the batch stays queued.
         If the hub keeps answering the same head batch with a non-network error
-        (other than 401, which a corrected token fixes) for `quarantine_after`
-        consecutive attempts, the batch is quarantined to the dead-letter table
+        (other than the statuses in NEVER_QUARANTINE_STATUSES, which describe a
+        token or an overloaded or unreachable hub or proxy and not a bad batch)
+        for `quarantine_after` consecutive attempts, counted in the outbox so a
+        restart does not reset it, the batch is quarantined to the dead-letter table
         with that status and delivery continues with the next one."""
         while (head := self.outbox.peek()) is not None:
             seq, batch = head
@@ -314,16 +322,15 @@ class Agent:
                 self.outbox.dead_letter(seq, r.status_code)
                 continue
             if r.is_success:
-                self._head_seq, self._head_failures = None, 0
+                self.outbox.clear_head_failures()
                 self.outbox.ack(seq)
                 continue
-            if self._head_seq != seq:
-                self._head_seq, self._head_failures = seq, 0
-            self._head_failures += 1
-            if r.status_code != 401 and self._head_failures >= self.cfg.quarantine_after:
-                self.outbox.dead_letter(seq, r.status_code, quarantine=True)
-                self._head_seq, self._head_failures = None, 0
-                continue
+            if r.status_code not in NEVER_QUARANTINE_STATUSES:
+                failures = self.outbox.record_head_failure(seq)
+                if failures >= self.cfg.quarantine_after:
+                    self.outbox.dead_letter(seq, r.status_code, quarantine=True)
+                    self.outbox.clear_head_failures()
+                    continue
             raise httpx.HTTPStatusError(f"hub answered {r.status_code}", request=r.request, response=r)
 
     def _try_flush(self, client: httpx.Client) -> None:

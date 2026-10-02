@@ -19,9 +19,16 @@ that keeps failing with another non-network error is quarantined to the same
 table by the agent after a configurable number of consecutive failures, and
 counted separately.
 
-A file that SQLite cannot open as a database is renamed to
-outbox.db.corrupt-<timestamp>, an error is logged, and a fresh outbox starts.
-`recovered_from` names the renamed file so the agent can report the loss.
+Quarantined rows are never trimmed by the dead-letter cap, so a long outage
+cannot silently erase them. The consecutive-failure count of the head batch is
+stored in the counters table, so a restart does not reset it.
+
+A file that SQLite reports as not a database or as malformed is renamed to
+outbox.db.corrupt-<timestamp> together with any -wal, -shm or -journal sidecar,
+an error is logged, and a fresh outbox starts. Other errors, such as a locked
+database or an I/O error, say nothing about the file contents, so they are
+raised and the file is left alone. `recovered_from` names the renamed file so
+the agent can report the loss.
 """
 
 from __future__ import annotations
@@ -47,9 +54,19 @@ CREATE TABLE IF NOT EXISTS batches (
 CREATE TABLE IF NOT EXISTS markers (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS dead_letters (
   id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, status INTEGER NOT NULL,
-  ts REAL NOT NULL, payload TEXT NOT NULL);
+  ts REAL NOT NULL, payload TEXT NOT NULL, quarantined INTEGER NOT NULL DEFAULT 0);
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 """
+
+
+CORRUPT_MARKERS = ("file is not a database", "malformed", "file is encrypted")
+SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
+
+
+def _is_corruption(exc: sqlite3.DatabaseError) -> bool:
+    """True only for errors that mean the file content is unusable. Locked or
+    I/O errors are transient and must not cause the file to be replaced."""
+    return any(m in str(exc).lower() for m in CORRUPT_MARKERS)
 
 
 class Markers(Protocol):
@@ -88,6 +105,10 @@ class Outbox:
         try:
             self._db = self._open(path)
         except sqlite3.DatabaseError as exc:
+            if not _is_corruption(exc):
+                log.error("outbox %s could not be opened (%s); this is not corruption, so the file "
+                          "was left in place", path, exc)
+                raise
             stamp = time.strftime("%Y%m%dT%H%M%S")
             moved = path.with_name(f"{path.name}.corrupt-{stamp}")
             n = 0
@@ -95,6 +116,10 @@ class Outbox:
                 n += 1
                 moved = path.with_name(f"{path.name}.corrupt-{stamp}-{n}")
             path.rename(moved)
+            for suffix in SIDECAR_SUFFIXES:
+                side = path.with_name(path.name + suffix)
+                if side.exists():
+                    side.rename(moved.with_name(moved.name + suffix))
             log.error("outbox %s could not be opened (%s); moved to %s and a fresh outbox was started. "
                       "Queued batches and source progress markers in it are lost", path, exc, moved)
             self.recovered_from = moved
@@ -109,6 +134,10 @@ class Outbox:
             db.execute("PRAGMA synchronous=FULL")
             with db:
                 db.executescript(_SCHEMA)
+            cols = [r[1] for r in db.execute("PRAGMA table_info(dead_letters)")]
+            if "quarantined" not in cols:
+                with db:
+                    db.execute("ALTER TABLE dead_letters ADD COLUMN quarantined INTEGER NOT NULL DEFAULT 0")
             db.execute("SELECT COUNT(*) FROM batches").fetchone()
         except sqlite3.DatabaseError:
             db.close()
@@ -217,10 +246,10 @@ class Outbox:
             row = self._db.execute("SELECT batch_id, payload FROM batches WHERE seq=?", (seq,)).fetchone()
             if row is None:
                 return
-            self._db.execute("INSERT INTO dead_letters (batch_id, status, ts, payload) VALUES (?, ?, ?, ?)",
-                             (row[0], status, time.time(), row[1]))
+            self._db.execute("INSERT INTO dead_letters (batch_id, status, ts, payload, quarantined) "
+                             "VALUES (?, ?, ?, ?, ?)", (row[0], status, time.time(), row[1], int(quarantine)))
             self._db.execute("DELETE FROM batches WHERE seq=?", (seq,))
-            self._db.execute("DELETE FROM dead_letters WHERE id <= "
+            self._db.execute("DELETE FROM dead_letters WHERE quarantined=0 AND id <= "
                              "(SELECT MAX(id) FROM dead_letters) - ?", (MAX_DEAD_LETTERS,))
             if quarantine:
                 self._bump("quarantined", 1)
@@ -229,6 +258,23 @@ class Outbox:
                       row[0], status)
         else:
             log.error("hub refused batch %s with status %d; moved to the dead-letter table", row[0], status)
+
+    def head_failures(self, seq: int) -> int:
+        """Consecutive failures recorded for the head batch `seq`, 0 if the
+        recorded batch is a different one."""
+        with self._lock:
+            return self._counter("head_failures") if self._counter("head_seq") == seq else 0
+
+    def record_head_failure(self, seq: int) -> int:
+        with self._lock, self._db:
+            n = self.head_failures(seq) + 1
+            for name, value in (("head_seq", seq), ("head_failures", n)):
+                self._db.execute("INSERT OR REPLACE INTO counters (name, value) VALUES (?, ?)", (name, value))
+            return n
+
+    def clear_head_failures(self) -> None:
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM counters WHERE name IN ('head_seq', 'head_failures')")
 
     def quarantined_total(self) -> int:
         with self._lock:

@@ -386,3 +386,113 @@ def test_threshold_events_wait_for_a_delayed_seed_and_do_not_duplicate(tmp_path)
     assert agent.seed_thresholds(seed_client(stored)) is True
     after = agent.collect_once()
     assert not [e for e in after.events if e.kind == "md.degraded"]
+
+
+def test_threshold_event_would_be_emitted_without_a_seed_of_the_open_condition(tmp_path):
+    """Control for the test above: seeded from an empty hub, the same sample
+    does produce md.degraded, so the held-back result is meaningful."""
+    agent = md_agent(tmp_path)
+    assert agent.seed_thresholds(seed_client([])) is True
+    assert [e for e in agent.collect_once().events if e.kind == "md.degraded"]
+
+
+def test_failed_seed_is_reported_in_a_source_status_and_cleared_when_it_succeeds(tmp_path):
+    agent = md_agent(tmp_path)
+    agent._try_seed(down_client())
+    assert not agent.status["thresholds"].available
+    assert "held back" in agent.status["thresholds"].reason
+    agent._next_seed = 0.0
+    agent._try_seed(seed_client([]))
+    assert agent.seeded and "thresholds" not in agent.status
+
+
+def test_seed_and_flush_retries_back_off_and_recover(tmp_path):
+    agent = Agent(make_cfg(tmp_path, interval_s=15.0))
+    agent._try_seed(down_client())
+    assert agent._seed_failures == 1 and agent._next_seed > 0
+    first = agent._next_seed
+    agent._try_seed(seed_client([]))  # still inside the backoff window, so no attempt is made
+    assert not agent.seeded and agent._seed_failures == 1 and agent._next_seed == first
+    agent._next_seed = 0.0
+    agent._try_seed(seed_client([]))
+    assert agent.seeded
+
+    agent.outbox.enqueue(batch(1))
+    agent._try_flush(down_client())
+    assert agent._flush_failures == 1 and agent._next_flush > 0
+    agent._try_flush(hub_client())  # backoff not elapsed, nothing is sent
+    assert agent.outbox.depth() == 1
+    agent._next_flush = 0.0
+    agent._try_flush(hub_client())
+    assert agent.outbox.depth() == 0 and agent._flush_failures == 0
+
+
+@pytest.mark.parametrize("code", [502, 503, 504, 408, 429, 401])
+def test_gateway_and_overload_statuses_never_quarantine(tmp_path, code):
+    agent = Agent(make_cfg(tmp_path))
+    agent.outbox.enqueue(batch(1))
+    for _ in range(8):
+        with pytest.raises(httpx.HTTPStatusError):
+            agent.flush(hub_client(status=code))
+    assert agent.outbox.depth() == 1 and agent.outbox.dead_letter_count() == 0
+
+
+def test_quarantine_count_survives_an_agent_restart(tmp_path):
+    cfg = make_cfg(tmp_path)
+    agent = Agent(cfg)
+    agent.outbox.enqueue(batch(1))
+    for _ in range(3):
+        with pytest.raises(httpx.HTTPStatusError):
+            agent.flush(hub_client(status=500))
+    agent.outbox.close()
+    again = Agent(cfg)
+    for _ in range(1):
+        with pytest.raises(httpx.HTTPStatusError):
+            again.flush(hub_client(status=500))
+    again.flush(hub_client(status=500))  # fifth failure overall
+    assert again.outbox.depth() == 0 and again.outbox.quarantined_total() == 1
+
+
+def test_quarantined_batches_are_not_trimmed_by_the_dead_letter_cap(tmp_path, monkeypatch):
+    import hostwatch.outbox as ob
+
+    monkeypatch.setattr(ob, "MAX_DEAD_LETTERS", 2)
+    agent = Agent(make_cfg(tmp_path))
+    agent.outbox.enqueue(batch(1))
+    seq, _ = agent.outbox.peek()
+    agent.outbox.dead_letter(seq, 500, quarantine=True)
+    for n in range(2, 7):
+        agent.outbox.enqueue(batch(n))
+        agent.outbox.dead_letter(agent.outbox.peek()[0], 400)
+    rows = sqlite3.connect(tmp_path / "data/outbox.db").execute(
+        "SELECT batch_id FROM dead_letters ORDER BY id").fetchall()
+    assert ("b1",) in rows and len(rows) == 3
+
+
+def test_locked_outbox_is_not_replaced(tmp_path, monkeypatch):
+    path = tmp_path / "data/outbox.db"
+    Outbox(path).close()
+    before = path.read_bytes()
+
+    def locked(p):
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(Outbox, "_open", staticmethod(locked))
+    with pytest.raises(sqlite3.OperationalError):
+        Outbox(path)
+    assert path.read_bytes() == before and not list(path.parent.glob("outbox.db.corrupt-*"))
+
+
+def test_no_stale_sidecar_files_remain_beside_a_fresh_outbox(tmp_path):
+    path = tmp_path / "data/outbox.db"
+    path.parent.mkdir()
+    path.write_bytes(b"garbage " * 100)
+    (tmp_path / "data/outbox.db-journal").write_bytes(b"j")
+    (tmp_path / "data/outbox.db-wal").write_bytes(b"w")
+    box = Outbox(path)
+    assert box.recovered_from is not None
+    assert not (tmp_path / "data/outbox.db-journal").exists() and not (tmp_path / "data/outbox.db-wal").exists()
+    # SQLite may itself discard an invalid sidecar while probing the file; either
+    # way none may be left next to the fresh database.
+    box.enqueue(batch(1))
+    assert box.depth() == 1
