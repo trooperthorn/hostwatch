@@ -1,0 +1,57 @@
+"""Collector interface.
+
+A collector has two jobs:
+
+detect()  decides once (and again every HOSTWATCH_REDETECT seconds) whether its
+          data source exists on this host, and returns a human-readable reason
+          when it does not. Missing hardware is a normal outcome, not an error.
+
+collect() returns samples for one cycle. Collectors that compute rates (watts,
+          utilization, residency) keep the previous reading internally and
+          return nothing on their first call rather than a misleading value.
+"""
+
+from __future__ import annotations
+
+import time
+from pathlib import Path
+
+from ..schema import Sample
+
+
+class Collector:
+    id: str = "base"
+
+    def __init__(self, sysfs: Path, procfs: Path) -> None:
+        self.sysfs = sysfs
+        self.procfs = procfs
+
+    def detect(self) -> tuple[bool, str]:
+        raise NotImplementedError
+
+    def collect(self) -> list[Sample]:
+        raise NotImplementedError
+
+    def sample(self, metric: str, value: float | None, unit: str = "", ts: float | None = None,
+               **labels: str) -> Sample:
+        return Sample(source=self.id, metric=metric, value=value, unit=unit,
+                      labels={k: str(v) for k, v in labels.items()},
+                      ts=time.time() if ts is None else ts)
+
+
+def read_text(path: Path) -> str | None:
+    """Read a small sysfs/procfs file, returning None on any OS error."""
+    try:
+        return path.read_text().strip()
+    except OSError:
+        return None
+
+
+def read_int(path: Path) -> int | None:
+    text = read_text(path)
+    if text is None:
+        return None
+    try:
+        return int(text)
+    except ValueError:
+        return None

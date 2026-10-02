@@ -1,0 +1,76 @@
+"""Hub: receives agent batches and serves read endpoints.
+
+Phase 1 scope: an internal API protected by a single shared bearer token
+(HOSTWATCH_INGEST_TOKEN), bound to loopback by default. User login, scoped API
+keys, TLS, and the Home Assistant and Orion endpoints arrive in Phases 3 and 4.
+Do not expose this port beyond the host until then.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import hmac
+import logging
+from contextlib import asynccontextmanager
+
+from fastapi import Depends, FastAPI, Header, HTTPException
+
+from . import __version__
+from .config import Config
+from .schema import Batch
+from .store import Store
+
+log = logging.getLogger("hostwatch.hub")
+
+
+def create_app(cfg: Config, store: Store, on_start=None, on_stop=None) -> FastAPI:
+    async def maintenance_loop():
+        while True:
+            await asyncio.sleep(3600)
+            try:
+                await asyncio.to_thread(store.maintain, cfg.raw_retention_days, cfg.rollup_retention_days)
+            except Exception as exc:
+                log.warning("maintenance failed: %s", exc)
+
+    @asynccontextmanager
+    async def lifespan(app: FastAPI):
+        task = asyncio.create_task(maintenance_loop())
+        if on_start:
+            on_start()
+        yield
+        if on_stop:
+            on_stop()
+        task.cancel()
+
+    app = FastAPI(title="hostwatch hub", version=__version__, lifespan=lifespan,
+                  docs_url=None, redoc_url=None, openapi_url=None)
+
+    def require_token(authorization: str = Header(default="")) -> None:
+        scheme, _, token = authorization.partition(" ")
+        if scheme.lower() != "bearer" or not hmac.compare_digest(token, cfg.ingest_token):
+            raise HTTPException(status_code=401, detail="invalid token")
+
+    @app.get("/internal/v1/health")
+    def health():
+        return {"status": "ok", "version": __version__}
+
+    @app.post("/internal/v1/ingest", dependencies=[Depends(require_token)])
+    def ingest(batch: Batch):
+        n = store.ingest(batch)
+        return {"stored": n}
+
+    @app.get("/internal/v1/latest", dependencies=[Depends(require_token)])
+    def latest(host: str | None = None):
+        return store.latest(host)
+
+    @app.get("/internal/v1/sources", dependencies=[Depends(require_token)])
+    def sources():
+        return {"agents": store.agents(), "sources": store.sources()}
+
+    @app.get("/internal/v1/gaps", dependencies=[Depends(require_token)])
+    def gaps(host: str, source: str, metric: str, hours: float = 24, max_gap_s: float = 60):
+        import time
+        found = store.gaps(host, source, metric, time.time() - hours * 3600, max_gap_s)
+        return {"gap_count": len(found), "gaps": found}
+
+    return app
