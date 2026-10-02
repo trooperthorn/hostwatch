@@ -10,6 +10,7 @@ restart during a hub outage loses at most HOSTWATCH_INTERVAL * MAX_QUEUE.
 from __future__ import annotations
 
 import collections
+from collections.abc import Callable
 import logging
 import platform as _platform
 import threading
@@ -21,11 +22,17 @@ import httpx
 from . import __version__
 from .collectors import build_collectors
 from .config import Config
-from .events import boot
+from .events import boot, pstore
+from .events.journal import JournalWatcher
+from .events.rasdaemon import RasdaemonReader
+from .events.thresholds import ThresholdEngine
 from .schema import Batch, Event, SourceStatus
 
 log = logging.getLogger("hostwatch.agent")
 MAX_QUEUE = 240  # one hour at the default 15s interval
+MAX_SEEN_KEYS = 10000
+
+EventSource = Callable[[], tuple[SourceStatus, list[Event]]]
 
 
 def detect_platform(sysfs: Path) -> str:
@@ -49,6 +56,48 @@ class Agent:
         self._stop = threading.Event()
         self.heartbeat: boot.Heartbeat | None = None
         self.pending_events: list[Event] = []
+        self.thresholds = ThresholdEngine()
+        journal = JournalWatcher(cfg.journal, cfg.data_dir)
+        rasdaemon = RasdaemonReader(cfg.rasdaemon_db)
+        self.event_sources: dict[str, EventSource] = {
+            "pstore": lambda: pstore.read_pstore(cfg.pstore),
+            "rasdaemon": rasdaemon.read,
+            "journal": journal.read,
+        }
+        # Pstore and rasdaemon re-read whole records, so keys already handed to a
+        # batch are remembered and not sent again by this process.
+        self._seen_keys: dict[str, None] = {}
+
+    def seed_thresholds(self, client: httpx.Client) -> None:
+        """Seed threshold state from events the hub already stores. Best effort:
+        if the hub is unreachable, state starts empty and one event may repeat."""
+        try:
+            r = client.get(f"{self.cfg.hub_url}/internal/v1/events",
+                           params={"host": self.cfg.host_name, "limit": 1000},
+                           headers={"Authorization": f"Bearer {self.cfg.ingest_token}"}, timeout=10)
+            r.raise_for_status()
+            self.thresholds.seed(r.json())
+        except Exception as exc:
+            log.warning("could not seed threshold state from hub: %s", exc)
+
+    def _collect_events(self) -> list[Event]:
+        events: list[Event] = []
+        for name, read in self.event_sources.items():
+            try:
+                status, found = read()
+            except Exception as exc:
+                status = SourceStatus(source=name, available=False,
+                                      reason=f"read error: {type(exc).__name__}: {exc}")
+                found = []
+            self.status[name] = status
+            for ev in found:
+                if ev.dedup_key in self._seen_keys:
+                    continue
+                self._seen_keys[ev.dedup_key] = None
+                events.append(ev)
+        while len(self._seen_keys) > MAX_SEEN_KEYS:
+            del self._seen_keys[next(iter(self._seen_keys))]
+        return events
 
     def start_boot_check(self) -> None:
         """Classify how the previous boot ended, once, then start the heartbeat.
@@ -95,6 +144,8 @@ class Agent:
                 self.status[c.id] = SourceStatus(source=c.id, available=False,
                                                  reason=f"collect error: {type(exc).__name__}: {exc}")
         events, self.pending_events = self.pending_events, []
+        events.extend(self._collect_events())
+        events.extend(self.thresholds.evaluate(samples, self.status.values()))
         return Batch(agent_version=__version__, host=self.cfg.host_name, platform=self.platform,
                      sent_at=time.time(), sources=list(self.status.values()), samples=samples,
                      events=events)
@@ -112,6 +163,7 @@ class Agent:
         self.detect()
         self.start_boot_check()
         with httpx.Client() as client:
+            self.seed_thresholds(client)
             while not self._stop.is_set():
                 started = time.monotonic()
                 self._beat()

@@ -77,8 +77,8 @@ carries a panic or oops marker, otherwise `pstore.record`. The dedup key is
 the same key and a rewritten record gives a new one. Files are never deleted or
 modified. A missing or unreadable directory yields source `pstore` unavailable
 with a reason and no events; an empty directory is available with no events.
-The reader is not yet called from the agent cycle; wiring and the compose mount
-come in later slices.
+The agent reads it every cycle and sends each record once per process. The
+compose mount comes in a later slice.
 
 ## rasdaemon ingestion
 
@@ -94,7 +94,7 @@ database with none of the three tables, yields source `rasdaemon` unavailable
 with a reason; a single missing table is skipped and named in the reason of an
 otherwise available source. A row whose timestamp cannot be parsed keeps the raw
 text in the detail and is stamped with the read time, flagged by
-`ts_is_read_time`. The reader is not yet called from the agent cycle, and the
+`ts_is_read_time`. The agent reads it every cycle and sends each row once per process. The
 compose mount comes in a later slice.
 
 ## Journal watching
@@ -110,8 +110,35 @@ not repeat entries. A table of patterns maps message text to the kinds
 wins and unmatched lines give no events. The dedup key is `journal:<cursor>`.
 A missing directory, a missing `journalctl` binary or a failing run yields
 source `journal` unavailable with a reason. The first read with no saved cursor
-reads the whole journal. The watcher is not yet called from the agent cycle, and
-the compose mount comes in a later slice.
+reads the whole journal. The agent reads it every cycle. The compose mount comes in a later slice.
+
+## Threshold events
+
+`hostwatch/events/thresholds.py` evaluates rules on every collected cycle, after
+the sources have been read. Rules are edge-triggered, with one event on entry and
+one on recovery: `md.degraded` and `md.degraded_cleared` (mdraid `degraded` above
+0 and back to 0), `md.sync_changed` (the `sync_action` label changed),
+`source.unavailable` and `source.available` (a source that was seen available
+went away or came back), and `scrutiny.status_raised` and
+`scrutiny.status_cleared` (Scrutiny `device_status` grew, or returned to 0). A
+steady state gives no repeat events. A sample value of None is unknown: it never
+triggers a rule and never counts as a recovery, so an unreadable source cannot
+look like a recovered array. A source that is unavailable from the start is not a
+flip and gives no event. The first value seen for an array's sync state is a
+baseline, not a change.
+
+State is held in memory. When the agent starts it asks the hub for the host's
+stored events (`GET /internal/v1/events`) and seeds the state from the rule key
+and state in each `thresholds` event's detail, so a restart does not repeat an
+open condition. If the hub cannot be reached, the state starts empty and one
+event may repeat. Threshold events use source `thresholds` and a dedup key made
+of the kind, rule key and event time.
+
+The agent wires every source into the same batch: the boot classification,
+pstore, rasdaemon, the journal watcher and the threshold events all ride in
+`Batch.events`. Event sources are plain callables in `Agent.event_sources`, and
+each one's status is reported in `Batch.sources`. A source that raises is
+reported unavailable with the error as the reason.
 
 ## Storage
 
