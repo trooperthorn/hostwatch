@@ -276,6 +276,34 @@ share a timestamp from being skipped). The body stays a plain list. The
 threshold state with `source=thresholds` and reads every page, and it logs an
 HTTP 401 as a rejected token, distinct from an unreachable hub.
 
+## Host health summary
+
+`hostwatch/integrations/summary.py` holds the one model that the Home Assistant,
+Orion and Prometheus outputs read, so they cannot disagree about a host.
+`build_host_summary(store, host, now)` reads `Store.latest`, `Store.sources` and
+the last day of `thresholds` events, and returns a `HostSummary` with CPU
+utilization, memory used percent, package power, temperatures (hwmon and
+Scrutiny drive temperatures), md array health, Scrutiny disk health, per-source
+availability, five problem flags (`md_degraded`, `disk_failing`,
+`source_unavailable`, `temperature_high`, `memory_low`) and the open threshold
+conditions. `now` is passed in, so tests never depend on a clock.
+
+Every value is a `Component` with a value, unit, state and reason. A value that
+cannot be known is `None` with a reason, never zero. That covers a source the
+agent reports unavailable, a source with no report for 180 seconds, a sample
+older than 180 seconds, a null sample, and a metric that was never reported. A
+problem flag whose inputs are all unknown is `None`, neither true nor false.
+
+`status_for(component)` is the only mapping from state to a number: ok is 0,
+warning is 1, critical is 2, and an unknown state returns `None`. The integration
+outputs publish `None` as unavailable (Home Assistant) or omit the value and
+status (Orion). Rules: temperature at 80 C warns and 90 C is critical (drives 50
+and 60 C), memory used at 90 percent warns and 97 is critical, an md array with
+`degraded` above 0 is critical and one that is syncing warns, a Scrutiny
+`device_status` other than 0 is critical, and an unavailable or stale source
+warns. These limits are defaults, listed in `UNVERIFIED.md`. `HostSummary.status`
+is the worst known component status, or `None` when nothing is known.
+
 ## Storage
 
 SQLite in `/data`. Raw samples are kept for `HOSTWATCH_RAW_RETENTION_DAYS`,
