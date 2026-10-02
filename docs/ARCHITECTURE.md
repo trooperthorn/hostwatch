@@ -97,6 +97,22 @@ text in the detail and is stamped with the read time, flagged by
 `ts_is_read_time`. The reader is not yet called from the agent cycle, and the
 compose mount comes in a later slice.
 
+## Journal watching
+
+`hostwatch/events/journal.py` runs `journalctl --directory=<HOSTWATCH_JOURNAL>
+-o json --no-pager --after-cursor <cursor>` (default directory `/host/journal`)
+through a pluggable reader, which tests replace with a fake that yields JSON
+lines. Journal access is read-only. The last `__CURSOR` seen is saved in
+`journal.cursor` in the data directory, so a restart resumes after it and does
+not repeat entries. A table of patterns maps message text to the kinds
+`watchdog.event`, `md.degraded`, `net.e1000e_hardware_error`, `hardware.mce`,
+`disk.io_error`, `disk.ata_link_reset` and `thermal.throttle`; the first match
+wins and unmatched lines give no events. The dedup key is `journal:<cursor>`.
+A missing directory, a missing `journalctl` binary or a failing run yields
+source `journal` unavailable with a reason. The first read with no saved cursor
+reads the whole journal. The watcher is not yet called from the agent cycle, and
+the compose mount comes in a later slice.
+
 ## Storage
 
 SQLite in `/data`. Raw samples are kept for `HOSTWATCH_RAW_RETENTION_DAYS`,
