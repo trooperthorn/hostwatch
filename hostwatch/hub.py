@@ -382,10 +382,10 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
     def orion_hosts():
         names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
         out: dict = {"host_count": len(names)}
-        for i, name in enumerate(names):
+        for name, key in orion_doc.host_keys(names).items():
             s = build_host_summary(store, name, time.time())
-            out[f"host_{i}_name"] = name
-            out[f"host_{i}_status"] = orion_doc.summary_document(s)["overall_status"]
+            out[f"host_{key}_name"] = name
+            out[f"host_{key}_status"] = s.overall_status
         return out
 
     @app.get("/api/v1/orion/hosts/{host}/summary", dependencies=[Depends(require_scope("read:metrics"))])

@@ -84,7 +84,7 @@ def test_field_name_snapshot_and_flatness(env):
         "disk_w1_device_status", "disk_w1_status", "disks_available", "disks_status",
         "host", "last_seen", "md_md0_degraded_devices", "md_md0_status",
         "memory_available", "memory_status", "memory_used_pct", "open_conditions",
-        "overall_available", "overall_status", "package_power_w", "pools_available",
+        "overall_available", "overall_status", "overall_unmeasured", "package_power_w", "pools_available",
         "pools_reason", "pools_status", "power_available", "power_status",
         "problem_disk_failing", "problem_md_degraded", "problem_memory_low",
         "problem_source_unavailable", "problem_temperature_high",
@@ -100,7 +100,7 @@ def test_field_name_snapshot_and_flatness(env):
     assert doc["overall_status"] == 0 and doc["cpu_utilization_pct"] == 12.5
     assert doc["memory_used_pct"] == 25.0
     hosts = client.get("/api/v1/orion/hosts", headers=good).json()
-    assert hosts == {"host_count": 1, "host_0_name": H, "host_0_status": 0}
+    assert hosts == {"host_count": 1, "host_h1_name": H, "host_h1_status": 0}
 
 
 @pytest.mark.parametrize("temp,status", [(85.0, 1), (95.0, 2)])

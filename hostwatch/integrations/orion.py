@@ -16,6 +16,8 @@ from __future__ import annotations
 import re
 from typing import Any
 
+from .homeassistant import slug as host_slug
+from .homeassistant import slug_hash
 from .summary import STATUS_WARNING, Component, HostSummary
 
 GROUPS = ("cpu", "memory", "power", "temperatures", "raid", "pools", "disks", "sources")
@@ -25,6 +27,22 @@ def slug(text: str) -> str:
     """Make a stable lowercase key fragment from a label value."""
     out = re.sub(r"[^a-z0-9]+", "_", text.lower()).strip("_")
     return out or "unnamed"
+
+
+def host_keys(hosts: list[str]) -> dict[str, str]:
+    """Map each host name to a stable key fragment, using the same rule as Home Assistant.
+
+    The key is the slug of the host name, so it does not move when another host joins. Hosts whose
+    slugs collide (case or punctuation only) each get a hash suffix of the exact name.
+    """
+    groups: dict[str, list[str]] = {}
+    for h in hosts:
+        groups.setdefault(host_slug(h), []).append(h)
+    keys: dict[str, str] = {}
+    for base, members in groups.items():
+        for h in members:
+            keys[h] = base if len(members) == 1 else f"{base}_{slug_hash(h)}"
+    return keys
 
 
 def _group(doc: dict[str, Any], name: str, comps: list[Component]) -> None:
@@ -128,9 +146,11 @@ def group_document(s: HostSummary, group: str) -> dict[str, Any]:
 def summary_document(s: HostSummary) -> dict[str, Any]:
     """One flat document: the host, the overall status and every group merged."""
     doc: dict[str, Any] = {"host": s.host}
-    overall = s.status
-    doc["overall_available"] = 0 if overall is None else 1
-    doc["overall_status"] = STATUS_WARNING if overall is None else overall
+    doc["overall_available"] = 0 if s.status is None else 1
+    doc["overall_status"] = s.overall_status
+    doc["overall_unmeasured"] = len(s.unmeasured)
+    if s.overall_reason:
+        doc["overall_reason"] = s.overall_reason
     if s.last_seen is not None:
         doc["last_seen"] = s.last_seen
     for flag, value in sorted(s.problems.items()):

@@ -121,6 +121,17 @@ Each answers flat JSON with numeric values and a numeric status per group (0 ok,
 1 warning, 2 critical). An unavailable value is left out and the group reports
 `<group>_available` 0 with a `<group>_reason`. An unknown host answers 404.
 
+`overall_status` is at least 1 while any expected group is unmeasured (its source
+never reported, is unavailable or is stale); `overall_unmeasured` counts those
+groups. A host with no data at all reports `overall_status` 2 with the reason
+"no data". The `hosts` list keys each entry by a slug of the host name
+(`host_<slug>_name`, `host_<slug>_status`), so a new host never renames existing
+keys; names whose slugs collide get a short hash suffix. To monitor a host in
+the Orion API Poller, create one poller per host with the URL
+`https://HUB:8090/api/v1/orion/hosts/HOSTNAME/summary` and a `read:metrics` key,
+and read `$.overall_status` and the per-group `*_status` fields. Use the `hosts`
+list only to discover host names and slugs.
+
 An optional Prometheus endpoint, `GET /metrics`, is off unless `HOSTWATCH_PROMETHEUS=1` is set
 (it answers 404 otherwise). When on, it needs a key with the `read:metrics` scope and returns the
 text exposition format. A value that is unavailable has no sample; the `hostwatch_source_up` gauge

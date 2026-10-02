@@ -23,6 +23,11 @@ EVENT_WINDOW_S = 86400.0
 
 STATUS_OK, STATUS_WARNING, STATUS_CRITICAL = 0, 1, 2
 
+# Expected component group -> the source that feeds it. A group whose source is unavailable,
+# stale or has never reported is unmeasured. Pools are left out: no pool source is collected.
+EXPECTED_GROUPS = {"cpu": "cpu", "memory": "memory", "power": "rapl", "temperatures": "hwmon",
+                   "raid": "mdraid", "disks": "scrutiny"}
+
 # (warning, critical) thresholds, in the unit of the value. These are defaults
 # chosen for desktop and server parts, not measured limits; see UNVERIFIED.md.
 CPU_TEMP_C = (80.0, 90.0)
@@ -82,6 +87,7 @@ class HostSummary:
     problems: dict[str, bool | None]
     open_conditions: list[str]
     last_seen: float | None
+    unmeasured: list[str] = field(default_factory=list)
 
     def components(self) -> list[Component]:
         return [self.cpu, self.memory, self.package_power, *self.temperatures, *self.md_arrays,
@@ -92,6 +98,27 @@ class HostSummary:
         """Worst known status over all components, None if nothing is known."""
         known = [c.status for c in self.components() if c.status is not None]
         return max(known) if known else None
+
+    @property
+    def overall_status(self) -> int:
+        """Status published as the host's overall state, never better than what was measured.
+
+        2 with the reason "no data" when nothing is known. Otherwise the worst known status,
+        raised to at least 1 (warning) while any expected group is unmeasured, because a group
+        nobody measured must not read as healthy.
+        """
+        worst = self.status
+        if worst is None:
+            return STATUS_CRITICAL
+        return max(worst, STATUS_WARNING) if self.unmeasured else worst
+
+    @property
+    def overall_reason(self) -> str:
+        if self.status is None:
+            return "no data"
+        if self.unmeasured:
+            return "unmeasured groups: " + ", ".join(self.unmeasured)
+        return ""
 
 
 class StoreLike(Protocol):
@@ -220,5 +247,13 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
         "memory_low": None if memory.state == "unknown" else memory.state != "ok",
     }
     last_seen = max((r["updated"] for r in src_rows.values()), default=None)
+    group_comps = {"cpu": [cpu], "memory": [memory], "power": [power], "temperatures": temps,
+                   "raid": md, "disks": disks}
+    unmeasured = []
+    for group, source in EXPECTED_GROUPS.items():
+        src_ok = source in sources and source not in blocked
+        comps = group_comps[group]
+        if not src_ok or (comps and all(c.status is None for c in comps)):
+            unmeasured.append(group)
     return HostSummary(host, now, cpu, memory, power, temps, md, disks, sources, problems,
-                       sorted(open_conditions), last_seen)
+                       sorted(open_conditions), last_seen, unmeasured)

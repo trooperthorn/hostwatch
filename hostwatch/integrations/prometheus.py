@@ -79,6 +79,9 @@ def render(summaries: list[HostSummary]) -> str:
         for name, c in s.sources.items():
             fam.add("hostwatch_source_up", "1 when the source reports, 0 when it is unavailable or stale.",
                     {"host": h, "source": name}, 1 if c.value is not None else 0)
-        if s.status is not None:
-            fam.add("hostwatch_host_status", "Worst known status: 0 ok, 1 warning, 2 critical.", {"host": h}, s.status)
+        fam.add("hostwatch_host_status",
+                "Overall status: 0 ok, 1 warning (also while a group is unmeasured), 2 critical (also no data).",
+                {"host": h}, s.overall_status)
+        fam.add("hostwatch_host_unmeasured_groups", "Expected component groups that are not being measured.",
+                {"host": h}, len(s.unmeasured))
     return fam.render()

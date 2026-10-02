@@ -325,6 +325,23 @@ status is 1 (the same warning the summary gives an unavailable source) and
 collector exists. Nothing is stored by this layer, so a restart or a recreated
 app on the same database gives the same answers.
 
+The overall status is not the worst known component alone. The expected groups
+are `cpu`, `memory`, `power`, `temperatures`, `raid` and `disks`, each fed by one
+source (`cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `scrutiny`). A group is
+unmeasured when its source is unavailable, stale or has never reported, or when
+none of its components has a known value. While any group is unmeasured,
+`overall_status` is at least 1, `overall_unmeasured` counts the groups and
+`overall_reason` names them, so a host that never reported its RAID state does
+not read as healthy. A host with no data at all has `overall_status` 2 and
+`overall_reason` "no data". Prometheus follows the same rule through
+`hostwatch_host_status` and `hostwatch_host_unmeasured_groups`.
+
+The `hosts` document keys each entry by a slug of the host name, for example
+`host_media_svr_name` and `host_media_svr_status`, not by position, so adding a
+host never renames another host's keys. The slug is the Home Assistant rule:
+lowercase ASCII with other runs replaced by an underscore, and names whose slugs
+collide each get a short hash suffix of the exact name.
+
 ## Prometheus endpoint
 
 `hostwatch/integrations/prometheus.py` renders the shared `HostSummary` in the
@@ -335,8 +352,8 @@ sits behind `require_scope("read:metrics")`, so the source allowlist, key checks
 and audit log apply unchanged. Metrics: `hostwatch_cpu_utilization_percent`,
 `hostwatch_memory_used_percent`, `hostwatch_package_power_watts`,
 `hostwatch_temperature_celsius`, `hostwatch_md_degraded_devices`,
-`hostwatch_disk_device_status`, `hostwatch_host_status` and
-`hostwatch_source_up`. A value that is unavailable produces no sample, never a
+`hostwatch_disk_device_status`, `hostwatch_host_status`,
+`hostwatch_host_unmeasured_groups` and `hostwatch_source_up`. A value that is unavailable produces no sample, never a
 zero; `hostwatch_source_up` is 0 for a source that is unavailable or stale and
 carries that fact instead. Label values are escaped (backslash, double quote and
 newline). Nothing is stored by this layer.
