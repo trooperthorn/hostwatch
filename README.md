@@ -15,6 +15,7 @@ Current phase: **1 (collector core)**. Phase 0 is complete on MediaIn-SVR.
 | `hostwatch/agent.py` | Detect, collect, push to hub; bounded queue while the hub is down; writes the boot heartbeat |
 | `hostwatch/events/boot.py` | Heartbeat writer and boot classifier (clean shutdown, watchdog reset, kernel panic, power loss, unknown) |
 | `hostwatch/events/pstore.py` | Read-only pstore ingestion (`HOSTWATCH_PSTORE`, default `/host/pstore`): crash records become deduplicated events and are never deleted |
+| `hostwatch/events/rasdaemon.py` | Read-only rasdaemon database ingestion (`HOSTWATCH_RASDAEMON_DB`, default `/host/rasdaemon/ras-mc_event.db`): `mc_event`, `aer_event` and `mce_record` rows become `hardware_error` events, each table only if present |
 | `hostwatch/hub.py` | Internal ingest and read API (token-protected, loopback only in Phase 1) |
 | `hostwatch/store.py` | SQLite: raw samples, hourly rollups, source availability, versioned schema with an additive events table |
 | `scripts/host-prep.sh` | Phase 0 host check and fixes |

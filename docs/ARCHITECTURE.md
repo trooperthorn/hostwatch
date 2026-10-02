@@ -80,6 +80,23 @@ with a reason and no events; an empty directory is available with no events.
 The reader is not yet called from the agent cycle; wiring and the compose mount
 come in later slices.
 
+## rasdaemon ingestion
+
+`hostwatch/events/rasdaemon.py` opens the database named by
+`HOSTWATCH_RASDAEMON_DB` (default `/host/rasdaemon/ras-mc_event.db`) with a
+`file:` URI and `mode=ro`, so SQLite refuses writes. The tables `mc_event`,
+`aer_event` and `mce_record` are each read only when they exist. Rows become
+`hardware_error` events with the dedup key `rasdaemon:<table>:<row id>`. Severity
+is `warning` for corrected errors, `critical` for uncorrected or fatal errors and
+for every machine check record. The reader keeps a high-water row id per table in
+memory and reads at most 500 rows per table per call. A missing database, or a
+database with none of the three tables, yields source `rasdaemon` unavailable
+with a reason; a single missing table is skipped and named in the reason of an
+otherwise available source. A row whose timestamp cannot be parsed keeps the raw
+text in the detail and is stamped with the read time, flagged by
+`ts_is_read_time`. The reader is not yet called from the agent cycle, and the
+compose mount comes in a later slice.
+
 ## Storage
 
 SQLite in `/data`. Raw samples are kept for `HOSTWATCH_RAW_RETENTION_DAYS`,
