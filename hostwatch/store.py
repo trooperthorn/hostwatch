@@ -110,8 +110,8 @@ class Store:
                  json.dumps(e.get("detail", {}), sort_keys=True), e["dedup_key"], e.get("boot_id"))
                 for e in events]
 
-    _INSERT_EVENT = ("INSERT OR IGNORE INTO events (host, ts, kind, severity, source, title, detail, dedup_key, boot_id) "
-                     "VALUES (?,?,?,?,?,?,?,?,?)")
+    _INSERT_EVENT = ("INSERT INTO events (host, ts, kind, severity, source, title, detail, dedup_key, boot_id) "
+                     "VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(host, dedup_key) DO NOTHING")
 
     def add_events(self, host: str, events: list[dict]) -> int:
         """Insert events, ignoring any whose (host, dedup_key) already exists. Returns rows inserted."""

@@ -122,12 +122,12 @@ The agent reads it every cycle and sends each record once per process.
 `hardware_error` events with the dedup key `rasdaemon:<table>:<row id>:<timestamp text>`, so a recreated database that reuses ids does not collide with old rows. Severity
 is `warning` for corrected errors, `critical` for uncorrected or fatal errors and
 for every machine check record. The reader keeps a high-water row id per table as
-a progress marker and reads at most 500 rows per table per call, so a larger backlog drains over successive cycles and a restart resumes from the committed marker. If a table's maximum id is lower than its marker, the database was recreated: the marker resets to zero and the new events carry `database_recreated` in the detail. A missing database, or a
+a progress marker and reads at most 500 rows per table per call, so a larger backlog drains over successive cycles and a restart resumes from the committed marker. The reader also stores the timestamp text of the last row read (`rasdaemon.last_ts.<table>`). If the row at the marked id is missing or has a different timestamp, the database was recreated, even when it has since grown past the old id: the marker resets to zero and the new events carry `database_recreated` in the detail. A missing database, or a
 database with none of the three tables, yields source `rasdaemon` unavailable
 with a reason; a single missing table is skipped and named in the reason of an
 otherwise available source. A timestamp with an explicit offset is parsed exactly; one without a zone is read as UTC, independent of the process time zone, and flagged `ts_uncertain` in the detail. A row whose timestamp cannot be parsed keeps the raw
 text in the detail and is stamped with the read time, flagged by
-`ts_is_read_time`. The agent reads it every cycle. The high-water ids are progress markers that
+`ts_is_read_time`. A byte value that is not valid UTF-8 is stored as hex text. A row that cannot be converted is skipped, its id is still passed, and the number skipped is stated in the source reason, so one odd row cannot stop the others. The agent reads it every cycle. The high-water ids are progress markers that
 commit with the batch carrying the rows (see the outbox section).
 
 ## Journal watching
@@ -306,3 +306,12 @@ happen when the owner deploys the container on MediaIn-SVR.
 Linux (Debian 13 amd64) first. The Raspberry Pi (arm64), TrueNAS SCALE, and a
 native Windows agent follow once the Linux path passes its exit tests. Windows
 agents will push the same `Batch` schema.
+
+## Hub validation
+
+`Sample.ts` and `Event.ts` accept only finite numbers. A batch carrying NaN or
+infinity is rejected with status 422 and nothing in it is stored or
+acknowledged, so the agent treats it as a permanent rejection. The 422 body
+omits the rejected input, because that input cannot be encoded as JSON. Events
+are inserted with `ON CONFLICT(host, dedup_key) DO NOTHING`, so only the
+uniqueness conflict is ignored and any other constraint failure raises.

@@ -21,6 +21,7 @@ duplicates there.
 
 from __future__ import annotations
 
+import json
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -82,13 +83,33 @@ def classify_severity(table: str, row: dict) -> str:
 def open_readonly(path: Path) -> sqlite3.Connection:
     """Open the database read-only through a file: URI."""
     uri = path.absolute().as_uri() + "?mode=ro"
-    return sqlite3.connect(uri, uri=True, timeout=5)
+    conn = sqlite3.connect(uri, uri=True, timeout=5)
+    conn.text_factory = _decode_text
+    return conn
+
+
+def _decode_text(raw: bytes) -> str | bytes:
+    """Return text when the bytes are valid UTF-8, otherwise the raw bytes, so one
+    undecodable value cannot make SQLite fail the whole query. The caller turns
+    leftover bytes into hex text."""
+    try:
+        return raw.decode("utf-8")
+    except UnicodeDecodeError:
+        return bytes(raw)
+
+
+def _plain(value: object) -> object:
+    """Make a column value safe for JSON: bytes become hex text."""
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return bytes(value).hex()
+    return value
 
 
 class RasdaemonReader:
     def __init__(self, db_path: Path, markers: Markers | None = None) -> None:
         self.db_path = db_path
         self.markers: Markers = markers if markers is not None else MemoryMarkers()
+        self._skipped = 0
 
     def _high_water(self, table: str) -> int:
         try:
@@ -107,6 +128,7 @@ class RasdaemonReader:
                                 reason=f"cannot open {self.db_path}: {exc}"), []
         events: list[Event] = []
         notes: list[str] = []
+        self._skipped = 0
         try:
             conn.row_factory = sqlite3.Row
             present = {r[0] for r in conn.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -125,6 +147,8 @@ class RasdaemonReader:
             conn.close()
         if len(notes) == len(TABLES):
             return SourceStatus(source=SOURCE, available=False, reason="; ".join(notes)), []
+        if self._skipped:
+            notes.append(f"{self._skipped} row(s) skipped because they could not be converted")
         return SourceStatus(source=SOURCE, available=True, reason="; ".join(notes)), events
 
     def _read_table(self, conn: sqlite3.Connection, table: str) -> list[Event]:
@@ -137,14 +161,19 @@ class RasdaemonReader:
         select = ", ".join(["id", *wanted])
         last = self._high_water(table)
         recreated = False
-        newest = conn.execute(f"SELECT MAX(id) FROM {table}").fetchone()[0]
-        if last > 0 and (newest or 0) < last:
-            # Ids only grow in a live database, so a lower maximum means it was
-            # recreated. Start over; the timestamp in the dedup key keeps the
-            # hub from merging new rows with old rows that reused an id.
-            recreated = True
-            last = 0
-            self.markers.stage(f"rasdaemon.high_water.{table}", "0")
+        if last > 0:
+            # The row last read must still exist with the same timestamp text.
+            # A lower maximum id is not enough: a recreated database can grow
+            # past the old mark before the next read. The timestamp in the dedup
+            # key keeps the hub from merging new rows with old rows that reused an id.
+            stored = self.markers.get(f"rasdaemon.last_ts.{table}")
+            at_mark = conn.execute(f"SELECT {'timestamp' if 'timestamp' in cols else 'NULL'} "
+                                   f"FROM {table} WHERE id = ?", (last,)).fetchone()
+            if at_mark is None or (stored is not None and json.loads(stored) != _plain(at_mark[0])):
+                recreated = True
+                last = 0
+                self.markers.stage(f"rasdaemon.high_water.{table}", "0")
+                self.markers.stage(f"rasdaemon.last_ts.{table}", None)
         rows = conn.execute(
             f"SELECT {select} FROM {table} WHERE id > ? ORDER BY id LIMIT ?",
             (last, MAX_ROWS_PER_READ)).fetchall()
@@ -152,24 +181,36 @@ class RasdaemonReader:
         for row in rows:
             data = dict(row)
             rid = data.pop("id")
-            raw_ts = data.pop("timestamp", None)
-            ts, uncertain = parse_timestamp(raw_ts)
-            detail = {k: v for k, v in data.items() if v is not None}
-            detail["table"] = table
-            if recreated:
-                detail["database_recreated"] = True
-            if uncertain:
-                detail["ts_uncertain"] = True
-                detail["timestamp_raw"] = raw_ts
-            if ts is None:
-                # Unavailable beats wrong: keep the raw text and mark the time as read time.
-                detail["timestamp_raw"] = raw_ts
-                detail["ts_is_read_time"] = True
-                ts = time.time()
-            msg = data.get("err_msg") or data.get("error_msg") or data.get("err_type") or "record"
-            events.append(Event(
-                kind=KIND, severity=classify_severity(table, data), source=SOURCE, ts=ts,
-                title=f"rasdaemon {table} {rid}: {msg}",
-                detail=detail, dedup_key=f"rasdaemon:{table}:{rid}:{raw_ts}"))
+            raw_ts = _plain(data.get("timestamp"))
+            try:
+                events.append(self._make_event(table, data, rid, recreated))
+            except Exception:
+                self._skipped += 1
             self.markers.stage(f"rasdaemon.high_water.{table}", str(rid))
+            self.markers.stage(f"rasdaemon.last_ts.{table}", json.dumps(raw_ts))
         return events
+
+    @staticmethod
+    def _make_event(table: str, data: dict, rid: int, recreated: bool) -> Event:
+        data = {k: _plain(v) for k, v in data.items()}
+        raw_ts = data.pop("timestamp", None)
+        ts, uncertain = parse_timestamp(raw_ts)
+        if ts is not None and ts != ts or ts in (float("inf"), float("-inf")):
+            ts = None
+        detail = {k: v for k, v in data.items() if v is not None}
+        detail["table"] = table
+        if recreated:
+            detail["database_recreated"] = True
+        if uncertain:
+            detail["ts_uncertain"] = True
+            detail["timestamp_raw"] = raw_ts
+        if ts is None:
+            # Unavailable beats wrong: keep the raw text and mark the time as read time.
+            detail["timestamp_raw"] = raw_ts
+            detail["ts_is_read_time"] = True
+            ts = time.time()
+        msg = data.get("err_msg") or data.get("error_msg") or data.get("err_type") or "record"
+        return Event(
+            kind=KIND, severity=classify_severity(table, data), source=SOURCE, ts=ts,
+            title=f"rasdaemon {table} {rid}: {msg}",
+            detail=detail, dedup_key=f"rasdaemon:{table}:{rid}:{raw_ts}")

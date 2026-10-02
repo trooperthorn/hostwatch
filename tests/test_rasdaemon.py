@@ -187,3 +187,65 @@ def test_naive_timestamp_is_utc_and_flagged(tmp_path):
     assert naive.ts == pytest.approx(1790942400.0) and naive.detail["ts_uncertain"] is True
     assert explicit.ts == pytest.approx(1790942400.0 + 5 * 3600)
     assert "ts_uncertain" not in explicit.detail
+
+
+def test_undecodable_blob_becomes_hex_and_other_rows_flow(tmp_path):
+    path = make_db(tmp_path)
+    add_mc(path)
+    insert(path, "INSERT INTO mc_event (timestamp, err_count, err_type, err_msg, label, mc) "
+                 "VALUES ('2026-10-02 12:00:00 +0000', 1, 'Corrected', ?, 'D', 0)", (b"\xff\xfe\x00",))
+    add_mc(path)
+    status, events = RasdaemonReader(path).read()
+    assert status.available and len(events) == 3
+    assert events[1].detail["err_msg"] == "fffe00"
+    assert [e.dedup_key.split(":")[2] for e in events] == ["1", "2", "3"]
+
+
+def test_unconvertible_row_is_skipped_and_counted(tmp_path):
+    path = make_db(tmp_path)
+    add_mc(path)
+    insert(path, "INSERT INTO mc_event (timestamp, err_count, err_type, err_msg, label, mc) "
+                 "VALUES (?, 1, 'Corrected', 'x', 'D', 0)", (float("inf"),))
+    add_mc(path)
+    reader = RasdaemonReader(path)
+    status, events = reader.read()
+    assert len(events) == 3 and events[1].detail["ts_is_read_time"] is True
+    # Force a failure inside event construction for one row to prove isolation.
+    path2 = tmp_path / "second"
+    path2.mkdir()
+    p2 = make_db(path2)
+    add_mc(p2)
+    insert(p2, "INSERT INTO mc_event (timestamp, err_count, err_type, err_msg, label, mc) "
+               "VALUES ('2026-10-02 12:00:00 +0000', 1, 'Corrected', 'x', 'D', 0)")
+    add_mc(p2)
+    import hostwatch.events.rasdaemon as mod
+    original = mod.RasdaemonReader._make_event
+
+    def flaky(table, data, rid, recreated):
+        if rid == 2:
+            raise ValueError("boom")
+        return original(table, data, rid, recreated)
+
+    mod.RasdaemonReader._make_event = staticmethod(flaky)
+    try:
+        status, events = RasdaemonReader(p2).read()
+    finally:
+        mod.RasdaemonReader._make_event = staticmethod(original)
+    assert [e.dedup_key.split(":")[2] for e in events] == ["1", "3"]
+    assert "1 row(s) skipped" in status.reason
+
+
+def test_recreated_database_that_grew_past_old_mark_delivers_low_ids(tmp_path):
+    path = make_db(tmp_path)
+    for _ in range(3):
+        add_mc(path, ts="2026-10-02 12:00:00 +0000")
+    ob = Outbox(tmp_path / "outbox.db")
+    assert len(drain(path, ob)) == 3
+    path.unlink()
+    make_db(tmp_path)
+    for _ in range(5):
+        add_mc(path, ts="2026-10-03 08:00:00 +0000")
+    _, events = RasdaemonReader(path, markers=ob).read()
+    assert [e.dedup_key.split(":")[2] for e in events] == ["1", "2", "3", "4", "5"]
+    assert all(e.detail["database_recreated"] for e in events)
+    ob.close()

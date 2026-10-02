@@ -134,3 +134,31 @@ def test_event_source_unavailable_reason_is_reported(tmp_path):
     client.post("/internal/v1/ingest", content=b.model_dump_json(), headers=H)
     src = {s["source"]: s for s in client.get("/internal/v1/sources", headers=H).json()["sources"]}
     assert src["events.pstore"]["available"] == 0 and "not mounted" in src["events.pstore"]["reason"]
+
+
+def test_nan_event_ts_is_rejected_and_nothing_acknowledged(tmp_path):
+    client, store = make(tmp_path)
+    now = time.time()
+    b = batch(now)
+    b.events = [event(now, key="a")]
+    # The event ts is the last "ts" in the body; make that one NaN.
+    body = b.model_dump_json()
+    idx = body.rindex('"ts":')
+    end = body.index(",", idx)
+    body = body[:idx] + '"ts":NaN' + body[end:]
+    r = client.post("/internal/v1/ingest", content=body, headers={**H, "Content-Type": "application/json"})
+    assert r.status_code == 422
+    assert client.get("/internal/v1/events", headers=H).json() == []
+
+
+def test_store_ignores_only_the_uniqueness_conflict(tmp_path):
+    import sqlite3
+
+    import pytest
+    store = Store(tmp_path / "db.sqlite")
+    ev = event(time.time(), key="k").model_dump()
+    assert store.add_events("h1", [ev]) == 1
+    assert store.add_events("h1", [ev]) == 0
+    bad = dict(ev, dedup_key="other", title=None)
+    with pytest.raises(sqlite3.IntegrityError):
+        store.add_events("h1", [bad])

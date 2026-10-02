@@ -13,7 +13,9 @@ import hmac
 import logging
 from contextlib import asynccontextmanager
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Response
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 
 from . import __version__
 from .config import Config
@@ -44,6 +46,14 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None) -> FastAP
 
     app = FastAPI(title="hostwatch hub", version=__version__, lifespan=lifespan,
                   docs_url=None, redoc_url=None, openapi_url=None)
+
+    @app.exception_handler(RequestValidationError)
+    async def validation_error(request: Request, exc: RequestValidationError):
+        # The default handler echoes the rejected input, which cannot be encoded
+        # to JSON when it is NaN or infinity and would turn a 422 into a 500.
+        errors = [{"loc": list(e.get("loc", ())), "msg": str(e.get("msg", "")), "type": e.get("type", "")}
+                  for e in exc.errors()]
+        return JSONResponse(status_code=422, content={"detail": errors})
 
     def require_token(authorization: str = Header(default="")) -> None:
         scheme, _, token = authorization.partition(" ")

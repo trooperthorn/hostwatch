@@ -32,7 +32,7 @@ class Sample(BaseModel):
     value: float | None
     unit: str = ""
     labels: dict[str, str] = Field(default_factory=dict)
-    ts: float = Field(description="unix epoch seconds when the value was read")
+    ts: float = Field(allow_inf_nan=False, description="unix epoch seconds when the value was read")
 
 
 class SourceStatus(BaseModel):
@@ -45,7 +45,7 @@ class Event(BaseModel):
     kind: str = Field(description="event kind, e.g. boot.clean_shutdown or md.degraded")
     severity: str = Field(description="info, warning, or critical")
     source: str = Field(description="event source id, e.g. journal, pstore, rasdaemon")
-    ts: float = Field(description="unix epoch seconds when the event happened")
+    ts: float = Field(allow_inf_nan=False, description="unix epoch seconds when the event happened")
     title: str
     detail: dict[str, Any] = Field(default_factory=dict)
     dedup_key: str = Field(min_length=1, description="stable key; the hub keeps one row per host and key")
