@@ -115,11 +115,13 @@ class Outbox:
             while moved.exists():
                 n += 1
                 moved = path.with_name(f"{path.name}.corrupt-{stamp}-{n}")
-            path.rename(moved)
+            # Sidecars first: if one cannot be moved the error is raised with the main
+            # file still in place, so the next start sees the same corruption and retries.
             for suffix in SIDECAR_SUFFIXES:
                 side = path.with_name(path.name + suffix)
                 if side.exists():
                     side.rename(moved.with_name(moved.name + suffix))
+            path.rename(moved)
             log.error("outbox %s could not be opened (%s); moved to %s and a fresh outbox was started. "
                       "Queued batches and source progress markers in it are lost", path, exc, moved)
             self.recovered_from = moved

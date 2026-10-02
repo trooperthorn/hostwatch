@@ -289,12 +289,16 @@ class Agent:
         discarded so nothing is skipped, the failure is logged, and the agent
         source is reported unavailable with the reason until a cycle succeeds."""
         self._cycle_keys = []
+        threshold_state = dict(self.thresholds.state)
         try:
             self._beat()
             self.cycle()
         except Exception as exc:
             log.exception("agent cycle failed; the loop continues")
             self.outbox.discard_staged()
+            # Threshold conditions opened by the failed cycle were never queued, so
+            # forget them and let the next cycle emit them again.
+            self.thresholds.state = threshold_state
             for key in self._cycle_keys:
                 self._seen_keys.pop(key, None)
             self.status["agent"] = SourceStatus(source="agent", available=False,

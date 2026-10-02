@@ -496,3 +496,95 @@ def test_no_stale_sidecar_files_remain_beside_a_fresh_outbox(tmp_path):
     # way none may be left next to the fresh database.
     box.enqueue(batch(1))
     assert box.depth() == 1
+
+
+def test_outbox_created_with_the_previous_schema_is_migrated_and_keeps_dead_letters(tmp_path):
+    path = tmp_path / "data/outbox.db"
+    path.parent.mkdir()
+    old = sqlite3.connect(path)
+    old.executescript(
+        "CREATE TABLE batches (seq INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, payload TEXT NOT NULL);"
+        "CREATE TABLE markers (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
+        "CREATE TABLE dead_letters (id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, "
+        "status INTEGER NOT NULL, ts REAL NOT NULL, payload TEXT NOT NULL);"
+        "CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);"
+        "INSERT INTO dead_letters (batch_id, status, ts, payload) VALUES ('old-1', 422, 1.0, '{}');"
+        "INSERT INTO markers VALUES ('journal', 'cursor-1');")
+    old.commit()
+    old.close()
+    box = Outbox(path)
+    assert box.recovered_from is None
+    assert box.dead_letter_count() == 1
+    assert box.quarantined_total() == 0
+    assert box.get("journal") == "cursor-1"
+    box.enqueue(batch(1))
+    (seq, _) = box.peek()
+    box.dead_letter(seq, 500, quarantine=True)
+    assert box.dead_letter_count() == 2
+    assert box.quarantined_total() == 1
+
+
+def _fail_first_open(monkeypatch):
+    """Report corruption on the first open without touching the files, so the
+    sidecars are still present when the move code runs."""
+    real = Outbox._open
+    calls = {"n": 0}
+
+    def fake(path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise sqlite3.DatabaseError("file is not a database")
+        return real(path)
+
+    monkeypatch.setattr(Outbox, "_open", staticmethod(fake))
+
+
+def test_sidecars_are_moved_with_a_corrupt_outbox(tmp_path, monkeypatch):
+    _fail_first_open(monkeypatch)
+    path = tmp_path / "data/outbox.db"
+    path.parent.mkdir()
+    path.write_bytes(b"garbage " * 100)
+    (tmp_path / "data/outbox.db-wal").write_bytes(b"w")
+    box = Outbox(path)
+    moved = box.recovered_from
+    assert moved is not None and moved.read_bytes() == b"garbage " * 100
+    assert (moved.parent / (moved.name + "-wal")).read_bytes() == b"w"
+    assert not (tmp_path / "data/outbox.db-wal").exists()
+
+
+def test_failed_sidecar_move_leaves_the_corrupt_file_in_place(tmp_path, monkeypatch):
+    _fail_first_open(monkeypatch)
+    from pathlib import Path
+    path = tmp_path / "data/outbox.db"
+    path.parent.mkdir()
+    path.write_bytes(b"garbage " * 100)
+    (tmp_path / "data/outbox.db-wal").write_bytes(b"w")
+    real = Path.rename
+
+    def failing(self, target):
+        if self.name.endswith("-wal"):
+            raise PermissionError("locked")
+        return real(self, target)
+
+    monkeypatch.setattr(Path, "rename", failing)
+    with pytest.raises(PermissionError):
+        Outbox(path)
+    assert path.read_bytes() == b"garbage " * 100
+
+
+def test_threshold_event_is_not_lost_when_the_cycle_fails_after_it_opened(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    agent.seeded = True
+    samples = [Sample(source="mdraid", metric="degraded", value=1, labels={"array": "md0"}, ts=1.0)]
+    real_collect = agent.collect_once
+    agent.collectors = []
+    real_eval = agent.thresholds.evaluate
+    agent.thresholds.evaluate = lambda s, st, now=None: real_eval(samples, st)
+    real = agent.outbox.enqueue
+    agent.outbox.enqueue = lambda b: (_ for _ in ()).throw(sqlite3.OperationalError("disk full"))
+    assert agent.safe_cycle() is False
+    agent.outbox.enqueue = real
+    assert agent.safe_cycle() is True
+    kinds = [e.kind for e in agent.outbox.peek()[1].events]
+    assert kinds.count("md.degraded") == 1
+    assert real_collect is not None
