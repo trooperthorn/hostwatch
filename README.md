@@ -67,12 +67,26 @@ Enforced:
   listener. Set `HOSTWATCH_TLS_CERT` and `HOSTWATCH_TLS_KEY` for that, and set
   `HOSTWATCH_TLS=1` as well so the cookie is marked `Secure`.
 
-Not yet present (later slices and phases): the CLI that
-creates users and keys, Home Assistant and Orion endpoints. Until
-the CLI lands there is no supported way to mint a key, so the read examples
-below that use the shared token now answer 403; they need a key with the
-matching scope. Do not expose port
-8090 off-host before Phase 3.
+Operator commands (run inside the container or with the data directory set;
+they open the database directly, so shell access to the data directory is the
+trust boundary, not a network control):
+
+```
+python -m hostwatch bootstrap-admin               # only when no users exist; prints a random password once
+python -m hostwatch user create|disable|unlock|passwd NAME   # password from a prompt, or one line on stdin
+python -m hostwatch key create --scopes read:metrics,read:events [--owner NAME]   # prints the key once
+python -m hostwatch key list
+python -m hostwatch key revoke ID                 # rejected on the key's next request
+```
+
+Passwords are never taken from arguments. Key secrets and the bootstrap
+password go to stdout once and cannot be shown again, because only hashes are
+stored. Every command, including a refused one, writes an audit row of kind
+`cli`.
+
+Not yet present (later slices and phases): Home Assistant and Orion endpoints.
+The read examples below that use the shared token answer 403; use a key with
+the matching scope, created with `key create`.
 
 ## Deploy on MediaIn-SVR
 

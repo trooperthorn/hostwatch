@@ -210,6 +210,30 @@ class Store:
             self._db.execute("UPDATE users SET failed_count = 0, locked_until = NULL WHERE username = ?",
                              (username,))
 
+    def count_users(self) -> int:
+        return int(self._rows("SELECT COUNT(*) AS n FROM users")[0]["n"])
+
+    def set_user_disabled(self, username: str, disabled: bool) -> bool:
+        """Disable or enable a user. Returns False for an unknown user. A disabled user's sessions stop working at once."""
+        with self._lock, self._db:
+            return self._db.execute("UPDATE users SET disabled = ? WHERE username = ?",
+                                    (1 if disabled else 0, username)).rowcount > 0
+
+    def revoke_user_sessions(self, username: str) -> int:
+        """Revoke every live session of a user. Returns how many were revoked."""
+        with self._lock, self._db:
+            return self._db.execute(
+                "UPDATE sessions SET revoked = 1 WHERE revoked = 0 AND user_id = "
+                "(SELECT id FROM users WHERE username = ?)", (username,)).rowcount
+
+    def list_api_keys(self) -> list[dict]:
+        """Every key without its secret or hash, newest first."""
+        rows = self._rows("SELECT id, prefix, scopes, owner, created, revoked_at, last_used "
+                          "FROM api_keys ORDER BY id DESC")
+        for r in rows:
+            r["scopes"] = json.loads(r["scopes"])
+        return rows
+
     def create_session(self, user_id: int, ttl_s: float, now: float | None = None) -> str:
         """Create a session and return the random token. Only its hash is stored."""
         now = time.time() if now is None else now

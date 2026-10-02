@@ -1,6 +1,8 @@
 """Entry point.
 
   python -m hostwatch                run the configured role (HOSTWATCH_ROLE)
+  python -m hostwatch bootstrap-admin | user ... | key ...
+                                     operator commands, see cli.py
   python -m hostwatch collect-once   print one cycle of detection and samples,
                                      without a hub; useful for verification
 """
@@ -16,6 +18,7 @@ import sys
 import threading
 import time
 
+from . import cli
 from .agent import Agent
 from .config import Config
 
@@ -51,11 +54,14 @@ def uvicorn_kwargs(cfg: Config) -> dict:
     return kwargs
 
 
-def main() -> int:
+def main(argv: list[str] | None = None) -> int:
+    argv = sys.argv[1:] if argv is None else argv
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = Config()
-    if len(sys.argv) > 1 and sys.argv[1] == "collect-once":
+    if argv and argv[0] == "collect-once":
         return collect_once(cfg)
+    if argv and argv[0] in cli.COMMANDS:
+        return cli.run(argv, cfg)
     cfg.validate()
 
     if cfg.role == "agent":

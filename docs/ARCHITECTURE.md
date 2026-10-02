@@ -396,7 +396,7 @@ certificate against the intended CA, removes client supplied copies of these
 headers, and is the only network path to the hub. Header mode is only as strong
 as that configuration. Whether the uvicorn listener populates the TLS extension
 and how smart card certificates present their subject are unverified, see
-`UNVERIFIED.md`. The CLI to create bindings arrives with the key CLI slice;
+`UNVERIFIED.md`. The CLI does not yet create bindings;
 `Store.bind_cert` is the interface.
 
 ## Security model
@@ -427,7 +427,18 @@ non-loopback `HOSTWATCH_HUB_BIND` without a certificate and key, unless
 exposure control only and is not authentication. `HOSTWATCH_TLS=1` still only
 marks cookies `Secure`.
 
-Planned (rest of Phase 3): key management CLI.
+Operator CLI (enforced by file access, not by the network): `cli.py` provides
+`bootstrap-admin`, `user create|disable|unlock|passwd` and `key create|list|revoke`.
+It opens the SQLite database directly, so whoever can write the data directory
+can run it; it is not reachable over HTTP. Bootstrap refuses to run when any
+user exists. Passwords come from getpass or one stdin line, never from
+arguments. Secrets are printed once to stdout and only hashes are stored.
+Disabling a user or changing a password revokes that user's sessions. Every
+action, including refusals, appends an audit row of kind `cli` with the
+operating system user as actor. The audit log is append-only at the
+application layer only, as described above; it is not tamper-proof against
+someone with write access to the file, which is the same person who can run
+the CLI.
 
 ## Isolation for tests and agents
 
