@@ -34,6 +34,8 @@
       <button type="button" id="tab-status" aria-pressed="true">Status</button>
       <button type="button" id="tab-events" aria-pressed="false">Events</button>
       <button type="button" id="tab-history" aria-pressed="false">History</button>
+      <button type="button" id="tab-keys" aria-pressed="false" hidden>API keys</button>
+      <button type="button" id="tab-audit" aria-pressed="false" hidden>Audit log</button>
     </nav>
     <div id="status-panel">
     <div id="banner" role="status" aria-live="polite" class="banner"><span id="banner-badge" class="badge"></span> <span id="banner-text"></span></div>
@@ -110,6 +112,78 @@
       </table>
       <h4 id="gaps-title">Gaps with no data</h4>
       <ul id="history-gaps"></ul>
+    </div>
+    <div id="keys-panel" hidden>
+      <h3 id="keys-title">API keys</h3>
+      <form id="keys-form" class="filters" aria-labelledby="keys-title">
+        <label for="k-owner">Owner</label>
+        <input id="k-owner" name="owner" type="text" maxlength="64" required>
+        <fieldset>
+          <legend>Scopes</legend>
+          <label><input type="checkbox" name="scope" value="read:metrics"> read:metrics</label>
+          <label><input type="checkbox" name="scope" value="read:events"> read:events</label>
+          <label><input type="checkbox" name="scope" value="ingest"> ingest</label>
+          <label><input type="checkbox" name="scope" value="admin"> admin</label>
+        </fieldset>
+        <button type="submit">Create key</button>
+      </form>
+      <p id="keys-note" role="status" aria-live="polite" class="muted"></p>
+      <div id="secret-box" role="alert" hidden>
+        <p>Copy this key now. It is shown once and cannot be retrieved later.</p>
+        <p><code id="secret-value"></code></p>
+        <button type="button" id="secret-dismiss">I have copied it</button>
+      </div>
+      <table id="keys-table" class="events">
+        <caption>API keys, newest first. Secrets are never listed.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Id</th>
+            <th scope="col">Prefix</th>
+            <th scope="col">Owner</th>
+            <th scope="col">Scopes</th>
+            <th scope="col">Created</th>
+            <th scope="col">Last used</th>
+            <th scope="col">State</th>
+            <th scope="col">Action</th>
+          </tr>
+        </thead>
+        <tbody id="keys-body"></tbody>
+      </table>
+    </div>
+    <div id="audit-panel" hidden>
+      <h3 id="audit-title">Audit log</h3>
+      <form id="audit-form" class="filters" aria-labelledby="audit-title">
+        <label for="a-kind">Kind</label>
+        <input id="a-kind" name="kind" type="text" maxlength="64">
+        <label for="a-actor">Actor</label>
+        <input id="a-actor" name="actor" type="text" maxlength="128">
+        <label for="a-since">Time range</label>
+        <select id="a-since" name="since">
+          <option value="3600">Last hour</option>
+          <option value="86400" selected>Last 24 hours</option>
+          <option value="604800">Last 7 days</option>
+          <option value="0">All time</option>
+        </select>
+        <button type="submit">Apply filters</button>
+      </form>
+      <p id="audit-note" role="status" aria-live="polite" class="muted"></p>
+      <table id="audit-table" class="events">
+        <caption>Audit log, newest first. This view is read only.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Time</th>
+            <th scope="col">Actor</th>
+            <th scope="col">Kind</th>
+            <th scope="col">Method</th>
+            <th scope="col">Path</th>
+            <th scope="col">Status</th>
+            <th scope="col">Remote</th>
+            <th scope="col">Detail</th>
+          </tr>
+        </thead>
+        <tbody id="audit-body"></tbody>
+      </table>
+      <button type="button" id="audit-more" hidden>Load older rows</button>
     </div>
   </section>
 </main>

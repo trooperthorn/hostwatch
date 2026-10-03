@@ -316,27 +316,184 @@
     }).catch(function () { note.textContent = "The history could not be loaded."; });
   }
 
+  // Admin screens. Everything is served by /api/v1/admin/*, which answers 403 to a non-admin, so
+  // the page only reveals the tabs when the keys listing succeeds. Hiding them is cosmetic; the
+  // hub enforces the role. Reads go through apiGet and every state change goes through apiPost,
+  // which sends the CSRF header.
+  function apiGet(path) { return fetch(path, { credentials: "same-origin" }); }
+
+  function clear(node) { while (node.firstChild) { node.removeChild(node.firstChild); } }
+
+  // The one-time secret lives in the DOM only while it is shown. Leaving the view, signing out,
+  // creating another key, dismissing it or leaving the page removes it.
+  function clearSecret() {
+    byId("secret-value").textContent = "";
+    byId("secret-box").hidden = true;
+  }
+
+  function setAdmin(isAdmin) {
+    byId("tab-keys").hidden = !isAdmin;
+    byId("tab-audit").hidden = !isAdmin;
+  }
+
+  function probeAdmin() {
+    apiGet("/api/v1/admin/keys").then(function (resp) { setAdmin(resp.ok); }).catch(function () { setAdmin(false); });
+  }
+
+  function keyRow(k) {
+    var tr = el("tr");
+    tr.appendChild(el("td", k.id));
+    tr.appendChild(el("td", k.prefix));
+    tr.appendChild(el("td", k.owner));
+    tr.appendChild(el("td", k.scopes.join(", ")));
+    tr.appendChild(el("td", new Date(k.created * 1000).toLocaleString()));
+    tr.appendChild(el("td", k.last_used ? new Date(k.last_used * 1000).toLocaleString() : "never"));
+    tr.appendChild(el("td", k.revoked_at ? "Revoked" : "Active"));
+    var cell = el("td");
+    if (!k.revoked_at) {
+      var ask = el("button", "Revoke");
+      ask.type = "button";
+      ask.setAttribute("aria-label", "Revoke key " + k.prefix + " owned by " + k.owner);
+      ask.addEventListener("click", function () { confirmRevoke(cell, ask, k); });
+      cell.appendChild(ask);
+    }
+    tr.appendChild(cell);
+    return tr;
+  }
+
+  // Revoking asks a second time, in place, before the request is sent.
+  function confirmRevoke(cell, ask, k) {
+    ask.hidden = true;
+    var yes = el("button", "Confirm revoke");
+    yes.type = "button";
+    yes.setAttribute("aria-label", "Confirm revoking key " + k.prefix + " owned by " + k.owner);
+    var no = el("button", "Cancel");
+    no.type = "button";
+    no.addEventListener("click", function () {
+      cell.removeChild(yes);
+      cell.removeChild(no);
+      ask.hidden = false;
+      ask.focus();
+    });
+    yes.addEventListener("click", function () {
+      yes.disabled = true;
+      apiPost("/api/v1/admin/keys/" + encodeURIComponent(k.id) + "/revoke").then(function (resp) {
+        if (resp.status === 401) { show(false, ""); return; }
+        byId("keys-note").textContent = resp.ok ? "Key " + k.prefix + " was revoked." : "The key could not be revoked.";
+        loadKeys();
+      }).catch(function () {
+        byId("keys-note").textContent = "The key could not be revoked.";
+        yes.disabled = false;
+      });
+    });
+    cell.appendChild(yes);
+    cell.appendChild(no);
+    yes.focus();
+  }
+
+  function loadKeys() {
+    var body = byId("keys-body");
+    apiGet("/api/v1/admin/keys").then(function (resp) {
+      if (resp.status === 401) { show(false, ""); return null; }
+      if (!resp.ok) { throw new Error("status " + resp.status); }
+      return resp.json();
+    }).then(function (doc) {
+      if (!doc) { return; }
+      clear(body);
+      doc.keys.forEach(function (k) { body.appendChild(keyRow(k)); });
+    }).catch(function () { byId("keys-note").textContent = "The keys could not be loaded."; });
+  }
+
+  function onCreateKey(event) {
+    event.preventDefault();
+    var scopes = Array.prototype.filter.call(document.querySelectorAll("#keys-form input[name=scope]"),
+      function (box) { return box.checked; }).map(function (box) { return box.value; });
+    var note = byId("keys-note");
+    if (!scopes.length) { note.textContent = "Choose at least one scope."; return; }
+    clearSecret();
+    apiPost("/api/v1/admin/keys", { scopes: scopes, owner: byId("k-owner").value.trim() }).then(function (resp) {
+      if (resp.status === 401) { show(false, ""); return null; }
+      if (!resp.ok) { note.textContent = "The key could not be created. Check the owner and scopes."; return null; }
+      return resp.json();
+    }).then(function (doc) {
+      if (!doc) { return; }
+      byId("secret-value").textContent = doc.secret;
+      byId("secret-box").hidden = false;
+      note.textContent = "Key " + doc.key.prefix + " was created.";
+      byId("k-owner").value = "";
+      loadKeys();
+      byId("secret-dismiss").focus();
+    }).catch(function () { note.textContent = "The key could not be created."; });
+  }
+
+  // Audit log: filtering and paging are done by GET /api/v1/admin/audit, which has no write route.
+  var auditCursor = null;
+
+  function auditParams(cursor) {
+    var q = new URLSearchParams();
+    ["kind", "actor"].forEach(function (name) {
+      var v = byId("a-" + name).value.trim();
+      if (v) { q.set(name, v); }
+    });
+    var span = Number(byId("a-since").value);
+    if (span > 0) { q.set("since", String(Date.now() / 1000 - span)); }
+    q.set("limit", String(EVENT_PAGE));
+    if (cursor) { q.set("before_id", String(cursor)); }
+    return q.toString();
+  }
+
+  function auditRow(r) {
+    var tr = el("tr");
+    [new Date(r.ts * 1000).toLocaleString(), r.actor, r.kind, r.method, r.path, r.status, r.remote,
+     JSON.stringify(r.detail)].forEach(function (v) { tr.appendChild(el("td", v)); });
+    return tr;
+  }
+
+  function loadAudit(append) {
+    var body = byId("audit-body");
+    var note = byId("audit-note");
+    apiGet("/api/v1/admin/audit?" + auditParams(append ? auditCursor : null)).then(function (resp) {
+      if (resp.status === 401) { show(false, ""); return null; }
+      if (!resp.ok) { throw new Error("status " + resp.status); }
+      return resp.json();
+    }).then(function (doc) {
+      if (!doc) { return; }
+      if (!append) { clear(body); }
+      doc.rows.forEach(function (r) { body.appendChild(auditRow(r)); });
+      auditCursor = doc.rows.length === EVENT_PAGE ? doc.rows[doc.rows.length - 1].id : null;
+      byId("audit-more").hidden = auditCursor === null;
+      note.textContent = body.children.length ? body.children.length + " rows shown." : "No audit rows match these filters.";
+    }).catch(function () { note.textContent = "The audit log could not be loaded."; });
+  }
+
   function selectView(name) {
     var events = name === "events";
     var history = name === "history";
-    byId("status-panel").hidden = events || history;
+    byId("status-panel").hidden = name !== "status";
     byId("events-panel").hidden = !events;
     byId("history-panel").hidden = !history;
+    byId("keys-panel").hidden = name !== "keys";
+    byId("audit-panel").hidden = name !== "audit";
+    byId("tab-keys").setAttribute("aria-pressed", String(name === "keys"));
+    byId("tab-audit").setAttribute("aria-pressed", String(name === "audit"));
+    clearSecret();
     byId("tab-status").setAttribute("aria-pressed", String(!events && !history));
     byId("tab-events").setAttribute("aria-pressed", String(events));
     byId("tab-history").setAttribute("aria-pressed", String(history));
     if (events) { loadEvents(false); }
     if (history) { loadSeries(); }
+    if (name === "keys") { loadKeys(); }
+    if (name === "audit") { loadAudit(false); }
   }
 
   function show(signedIn, username) {
-    if (!signedIn) { stopRefresh(); }
+    if (!signedIn) { stopRefresh(); clearSecret(); setAdmin(false); }
     byId("login-view").hidden = signedIn;
     byId("app-view").hidden = !signedIn;
     byId("logout").hidden = !signedIn;
     byId("app-user").textContent = signedIn ? "Signed in as " + username + "." : "";
     byId(signedIn ? "main" : "username").focus();
-    if (signedIn) { refresh(); }
+    if (signedIn) { refresh(); probeAdmin(); }
   }
 
   // State-changing requests carry the CSRF token in a header. The session cookie is HttpOnly
@@ -375,6 +532,13 @@
     byId("tab-status").addEventListener("click", function () { selectView("status"); });
     byId("tab-events").addEventListener("click", function () { selectView("events"); });
     byId("tab-history").addEventListener("click", function () { selectView("history"); });
+    byId("tab-keys").addEventListener("click", function () { selectView("keys"); });
+    byId("tab-audit").addEventListener("click", function () { selectView("audit"); });
+    byId("keys-form").addEventListener("submit", onCreateKey);
+    byId("secret-dismiss").addEventListener("click", clearSecret);
+    byId("audit-form").addEventListener("submit", function (e) { e.preventDefault(); loadAudit(false); });
+    byId("audit-more").addEventListener("click", function () { loadAudit(true); });
+    window.addEventListener("pagehide", clearSecret);
     byId("history-form").addEventListener("submit", function (e) { e.preventDefault(); loadHistory(); });
     byId("events-form").addEventListener("submit", function (e) { e.preventDefault(); loadEvents(false); });
     byId("events-more").addEventListener("click", function () { loadEvents(true); });

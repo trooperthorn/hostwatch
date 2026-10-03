@@ -86,4 +86,9 @@ button { background: var(--accent); color: var(--accent-fg); border-color: var(-
 .s2 { stroke: var(--warn); fill: var(--warn); }
 .s3 { stroke: var(--crit); fill: var(--crit); }
 .s4 { stroke: var(--muted); fill: var(--muted); }
+#secret-box { border: 3px solid var(--warn); padding: 0.75rem; margin: 0.5rem 0; background: var(--surface); }
+#secret-value { word-break: break-all; font-size: 1.05rem; }
+#keys-form fieldset { border: 1px solid var(--border); }
+#keys-form fieldset label { display: inline-block; margin-right: 1rem; }
+.events code { word-break: break-all; }
 [hidden] { display: none !important; }
