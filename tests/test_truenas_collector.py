@@ -155,14 +155,14 @@ def test_known_disk_without_a_temperature_is_unavailable_not_zero(tmp_path):
     assert next(s for s in samples if s.metric == "disk_temp_c" and s.labels["disk"] == "sda").value is None
 
 
-def test_dismissed_critical_alert_is_one_event_with_critical_severity(tmp_path):
+def test_dismissed_critical_alert_is_one_info_event_with_dismissed_true(tmp_path):
     c = collector(tmp_path)
     c.collect()
     status, events = c.read_events()
     assert status.available
     assert len(events) == 1
     ev = events[0]
-    assert ev.kind == "truenas.alert" and ev.severity == "critical" and ev.source == "truenas"
+    assert ev.kind == "truenas.alert" and ev.severity == "info" and ev.source == "truenas"
     assert ev.detail["dismissed"] is True and ev.detail["uuid"] == "u-apps-1"
     assert ev.ts == 1_790_000_050.0
     assert ev.dedup_key == "truenas.alert:u-apps-1:1790000050000"
@@ -256,3 +256,24 @@ def test_summary_shows_the_corrected_error_pool_as_a_warning_naming_the_disk(tmp
     assert SDM_SERIAL in pools["Apps"].reason and "sdm" in pools["Apps"].reason
     assert pools["Vault"].state == "ok"
     assert summary.status == 1
+
+
+@pytest.mark.parametrize("state", ["CANT_OPEN", "UNKNOWN", "", "OFFLINE", "DEGRADED"])
+def test_any_leaf_state_other_than_online_is_a_warning(tmp_path, state):
+    pool = vault_pool()
+    pool["topology"]["data"][0]["children"][1]["status"] = state
+    h = health(collector(tmp_path, **{"pool.query": [pool]}).collect(), "Vault")
+    assert h.value == 1.0 and "sdb" in h.labels["reason"]
+
+
+def test_spare_avail_and_inuse_are_healthy_but_not_in_a_data_vdev(tmp_path):
+    pool = vault_pool()
+    pool["topology"]["spare"] = [leaf("sdc", "sp1"), leaf("sdd", "sp2")]
+    pool["topology"]["spare"][0]["status"] = "AVAIL"
+    pool["topology"]["spare"][1]["status"] = "INUSE"
+    assert health(collector(tmp_path, **{"pool.query": [pool]}).collect(), "Vault").value == 0.0
+    pool["topology"]["spare"][0]["status"] = "CANT_OPEN"
+    assert health(collector(tmp_path, **{"pool.query": [pool]}).collect(), "Vault").value == 1.0
+    pool["topology"]["spare"][0]["status"] = "AVAIL"
+    pool["topology"]["data"][0]["children"][0]["status"] = "AVAIL"
+    assert health(collector(tmp_path, **{"pool.query": [pool]}).collect(), "Vault").value == 1.0

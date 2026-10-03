@@ -81,7 +81,7 @@ def test_online_pool_is_ok_everywhere(tmp_path):
     doc = client.get(f"/api/v1/orion/hosts/{H}/pools", headers=good).json()
     assert doc["pools_available"] == 1 and doc["pools_status"] == 0
     by = {(n, tuple(sorted(lbl.items()))): v for n, lbl, v in parse(client.get("/metrics", headers=good).text)}
-    assert by[("hostwatch_pool_status", (("host", H), ("pool", "Apps")))] == 0.0
+    assert by[("hostwatch_pool_status", (("host", H), ("pool", "Apps"), ("source", "zfs")))] == 0.0
     ui = ui_status.host_document(s)
     assert ui["pools"][0]["state"] == "ok" and ui["pools"][0]["name"] == "pool.Apps"
 
@@ -93,7 +93,7 @@ def test_degraded_pool_in_prometheus_ha_and_ui(tmp_path):
     s = ingest(store, agent_batch(tmp_path, {"Stash": "DEGRADED"}))
     good = key(store, "read:metrics")
     by = {(n, tuple(sorted(lbl.items()))): v for n, lbl, v in parse(client.get("/metrics", headers=good).text)}
-    assert by[("hostwatch_pool_status", (("host", H), ("pool", "Stash")))] == 2.0
+    assert by[("hostwatch_pool_status", (("host", H), ("pool", "Stash"), ("source", "zfs")))] == 2.0
     assert ui_status.host_document(s)["pools"][0]["state"] == "critical"
     broker = FakeBroker()
     pub, _ = make_publisher(make_config(tmp_path), store, broker)
@@ -167,3 +167,43 @@ def test_host_that_never_reported_zfs_does_not_expect_pools(tmp_path):
     s = build_host_summary(store, H, time.time())
     assert "pools" not in s.unmeasured and "pools" not in s.not_present
     assert ui_status.host_document(s)["pools"][0]["value"] is None
+
+
+def test_kstat_online_and_api_warning_is_one_pool_at_warning_everywhere(tmp_path):
+    store = Store(tmp_path / "db.sqlite")
+    config = dataclasses.replace(cfg(tmp_path), prometheus_enabled=True)
+    client = TestClient(create_app(config, store))
+    batch = agent_batch(tmp_path, {"Apps": "ONLINE"})
+    extra = [sample("truenas", "pool_health", 1.0, pool="Apps", status="ONLINE", reason="disk sdm has 1 checksum errors")]
+    batch = batch.model_copy(update={"sources": [*batch.sources, SourceStatus(source="truenas", available=True)],
+                                     "samples": [*batch.samples, *extra]})
+    s = ingest(store, batch)
+    assert len(s.pools) == 1
+    pool = s.pools[0]
+    assert pool.state == "warning" and pool.status == 1
+    assert pool.labels["source"] == "zfs+truenas" and pool.labels["zfs_state"] == "ONLINE"
+    assert pool.labels["truenas_status"] == "ONLINE" and "sdm" in pool.reason
+    assert s.overall_status == 1
+    good = key(store, "read:metrics")
+    doc = client.get(f"/api/v1/orion/hosts/{H}/pools", headers=good).json()
+    assert doc["pools_status"] == 1 and doc["pool_apps_status"] == 1
+    assert len([k for k in doc if k.startswith("pool_") and k.endswith("_status")]) == 1
+    series = [(lbl, v) for n, lbl, v in parse(client.get("/metrics", headers=good).text)
+              if n == "hostwatch_pool_status"]
+    assert series == [({"host": H, "pool": "Apps", "source": "zfs+truenas"}, 1.0)]
+    assert ui_status.host_document(s)["pools"][0]["state"] == "warning"
+    broker = FakeBroker()
+    pub, _ = make_publisher(make_config(tmp_path), store, broker)
+    assert pub.tick() is True
+    assert [t for t in broker.retained if t.startswith("homeassistant/") and "pool_" in t] ==         ["homeassistant/sensor/hostwatch_h1/pool_apps/config"]
+    assert broker.retained["hostwatch/h1/pool_apps/state"] in (b"1", "1", b"1.0", "1.0", 1, 1.0)
+
+
+def test_unmeasured_api_row_does_not_let_kstat_ok_claim_health(tmp_path):
+    store = Store(tmp_path / "db.sqlite")
+    batch = agent_batch(tmp_path, {"Apps": "ONLINE"})
+    extra = [sample("truenas", "pool_health", 9.0, pool="Apps", status="ONLINE")]
+    batch = batch.model_copy(update={"sources": [*batch.sources, SourceStatus(source="truenas", available=True)],
+                                     "samples": [*batch.samples, *extra]})
+    pool = ingest(store, batch).pools[0]
+    assert pool.state == "unknown" and pool.status is None

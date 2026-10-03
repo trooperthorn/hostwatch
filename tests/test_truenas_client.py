@@ -196,3 +196,22 @@ def test_from_config(monkeypatch):
     monkeypatch.setenv("HOSTWATCH_TRUENAS_URL", "wss://nas/api/current")
     monkeypatch.setenv("HOSTWATCH_TRUENAS_API_KEY_FILE", "/run/secrets/key")
     assert TruenasClient.from_config(Config()) is not None
+
+
+def test_environment_proxy_is_ignored_and_the_client_connects_directly(tmp_path, monkeypatch):
+    for name in ("HTTPS_PROXY", "https_proxy", "HTTP_PROXY", "http_proxy", "ALL_PROXY", "all_proxy"):
+        monkeypatch.setenv(name, "http://127.0.0.1:9")
+    monkeypatch.delenv("NO_PROXY", raising=False)
+    monkeypatch.delenv("no_proxy", raising=False)
+    server = FakeServer()
+
+    async def body(url):
+        client = TruenasClient(url, _key_file(tmp_path), timeout=5)
+        try:
+            return await client.call("pool.query")
+        finally:
+            await client.close()
+
+    result = _run(server, body)
+    assert result.available
+    assert server.frames[0]["method"] == "auth.login_with_api_key"

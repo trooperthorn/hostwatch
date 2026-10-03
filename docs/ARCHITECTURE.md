@@ -44,12 +44,19 @@ and a `reason` label), `pool_healthy`, `pool_warning`, `pool_scan_errors`, per l
 pool). Health rules: a DEGRADED, FAULTED, UNAVAIL, SUSPENDED or REMOVED pool is critical;
 `healthy` true together with `warning` true is a warning, because TrueNAS keeps a pool healthy
 after a corrected error; any non-zero read, write or checksum count on a device is at least a
-warning that names the disk and its serial; a leaf device that is not ONLINE, or a scan that
-found errors, is a warning. The summary adds one `truenas_pool.<name>` component per pool next
-to the kstat `zfs` pool components, so the worse of the two views is visible.
+warning that names the disk and its serial; a leaf device in any state other than ONLINE
+(CANT_OPEN and UNKNOWN included; a spare may also be AVAIL or INUSE), or a scan that
+found errors, is a warning. The summary merges the kstat `zfs` row and the `truenas` row of the
+same host and pool into one `pool.<name>` component whose state is the worse of the two. An
+unmeasured part outranks ok, so one readable source never claims health the other could not
+measure. The component keeps both sources' details as labels prefixed `zfs_` and `truenas_`
+and a `source` label (`zfs`, `truenas` or `zfs+truenas`). Prometheus emits one
+`hostwatch_pool_status` series per pool with that `source` label, and Home Assistant and Orion
+publish one entity or item per pool. The WebSocket client passes `proxy=None`, so an
+`HTTPS_PROXY` or `ALL_PROXY` variable in the container never carries the login frame.
 
 Alerts are events of kind `truenas.alert` from a second event source, `truenas_alerts`, read
-after the collectors in the same cycle. Dismissed alerts are included. Levels map to severity:
+after the collectors in the same cycle. Dismissed alerts are included but are always info, with `dismissed` true in the detail. Otherwise levels map to severity:
 INFO and NOTICE to info, WARNING to warning, ERROR, CRITICAL, ALERT and EMERGENCY to critical,
 and an unknown level to warning. The dedup key is the alert uuid plus its `last_occurrence`, so
 the agent sends an occurrence once and the hub keeps one row per key across restarts.
@@ -633,7 +640,7 @@ Discovery is republished when the connection epoch changes (first connect, recon
 restart), when a `online` birth message arrives (the listener only sets a flag; the next tick
 publishes), when an entity definition changes, and after any failed publish. A new hub process
 starts with nothing marked as published, so a restart on the same database republishes
-everything. ZFS pools publish as diagnostic sensors named `pool_<slug>`.
+everything. Pools publish as one diagnostic sensor per pool named `pool_<slug>`, merged across the zfs and truenas sources.
 
 ### Events topic
 
@@ -1130,7 +1137,7 @@ DEGRADED, FAULTED, UNAVAIL and SUSPENDED are critical; any other text is unknown
 A state file that cannot be read gives a sample with no value, which is unmeasured. The source is
 reported not present only when the zfs kstat directory is readable and empty, or is missing while
 `/proc` is readable. The pool list is a separate group from `raid`, so a host with both md and
-ZFS shows both. Pool state events and the TrueNAS API detail are not part of this slice.
+ZFS shows both. Pool state events are not part of this slice; the TrueNAS API view is merged into the same pool component as described under the TrueNAS source.
 
 ### Raspberry Pi throttling
 

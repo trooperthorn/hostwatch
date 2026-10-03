@@ -72,5 +72,8 @@ reported unavailable with a reason.
 
 ## 3. TrueNAS-SVR
 
+A pool seen by both the kstat and API sources appears once on the hub, at the worse of the two states. The TrueNAS API client does not use proxy environment variables.
+
+
 Follow `docs/deploy-truenas.md`. Add the TrueNAS-SVR address to `HOSTWATCH_ALLOWED_CLIENTS`
 on the hub and use its own ingest key, as in step 1 above.

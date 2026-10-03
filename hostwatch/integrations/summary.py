@@ -95,6 +95,33 @@ def status_for(component: Component) -> int | None:
     return {"ok": STATUS_OK, "warning": STATUS_WARNING, "critical": STATUS_CRITICAL}.get(component.state)
 
 
+_POOL_RANK = {"critical": 4, "warning": 3, "unknown": 2, "ok": 1, "not_present": 0}
+
+
+def _merge_pool(pool: str, parts: list[tuple[str, Component]]) -> Component:
+    """Merge the zfs and truenas components of one pool into one, worst state first.
+
+    An unmeasured part outranks ok, so an unreadable source never lets the other source
+    claim a health nobody measured. The merged labels carry `source` (the contributing
+    sources joined with a plus sign) and each source's own detail, prefixed by the source name.
+    """
+    if len(parts) == 1:
+        src, c = parts[0]
+        c.name = f"pool.{pool}"
+        c.labels["source"] = src
+        return c
+    worst = max((c for _, c in parts), key=lambda c: _POOL_RANK.get(c.state, 2))
+    labels = {"pool": pool, "source": "+".join(src for src, _ in parts)}
+    reasons = []
+    for src, c in parts:
+        for k, v in c.labels.items():
+            if k != "pool":
+                labels[f"{src}_{k}"] = v
+        if c.reason:
+            reasons.append(f"{src}: {c.reason}")
+    return Component(f"pool.{pool}", worst.value, worst.unit, worst.state, "; ".join(reasons), labels)
+
+
 def _level(value: float, limits: tuple[float, float]) -> str:
     return "critical" if value >= limits[1] else "warning" if value >= limits[0] else "ok"
 
@@ -293,6 +320,7 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
 
     # ZFS pool health from the kstat state text. Unknown text stays unknown, never ok.
     pools: list[Component] = []
+    by_pool: dict[str, list[tuple[str, Component]]] = {}
     for pool in sorted({r["labels"].get("pool", "") for r in rows if r["source"] == "zfs"}):
         c = comp(f"pool.{pool}", "zfs", pick("zfs", "pool_state", pool=pool), "", labels={"pool": pool})
         if c.value is not None:
@@ -305,7 +333,7 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
                 c.value, c.state, c.reason = 2.0, "critical", f"pool {pool} is {text}"
             else:
                 c.value, c.state, c.reason = None, "unknown", f"pool {pool} has unrecognised state {text!r}"
-        pools.append(c)
+        by_pool.setdefault(pool, []).append(("zfs", c))
     if "zfs" in gone and not pools:
         pools.append(comp("pool", "zfs", [], ""))
 
@@ -325,9 +353,13 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
                 c.labels["status"] = newest["labels"].get("status", "")
                 if c.state == "unknown":
                     c.value, c.reason = None, f"pool {pool} has unrecognised health value {newest['value']!r}"
-            pools.append(c)
+            by_pool.setdefault(pool, []).append(("truenas", c))
         if not names:
             pools.append(comp("truenas_pools", "truenas", [], ""))
+    # One component per pool. When the kstat row and the API row both describe a pool, the worse
+    # of the two wins, so an ONLINE kstat row can never hide the API warning. Both sources keep
+    # their detail in the labels and the reason.
+    pools = [_merge_pool(pool, parts) for pool, parts in sorted(by_pool.items())] + pools
 
     # Raspberry Pi throttling: under-voltage now is critical, capped or throttled now is a warning,
     # and a has-occurred bit stays a warning until a reboot clears it. SoC temperature joins the

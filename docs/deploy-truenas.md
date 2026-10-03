@@ -107,7 +107,7 @@ In the UI open Apps, Discover Apps, the three dot menu, Install via YAML. Name t
 hostwatch and paste `deploy/truenas/compose.yaml`, with the dataset paths and the
 second group id adjusted. The file runs the `agent` role as uid 10001 with a read-only
 root filesystem, all capabilities dropped, no privileged mode, `/sys` mounted read-only
-and host networking. The host `/proc` is not mounted; ZFS pool state comes from the
+and host networking. The API client ignores proxy environment variables on purpose, so the TrueNAS URL must be reachable directly from the container. Each pool appears once in the outputs, at the worse of the kstat and API states. The host `/proc` is not mounted; ZFS pool state comes from the
 container's own `/proc/spl/kstat`.
 
 The compose file sets `HOSTWATCH_TRUENAS_INSECURE` to 1 because the API is reached at

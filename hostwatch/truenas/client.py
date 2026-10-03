@@ -193,7 +193,7 @@ class TruenasClient:
         ctx = self._ssl_context(parsed.scheme, parsed.hostname)
         self._key = self._read_key()
         kwargs = {"ssl": ctx} if ctx is not None else {}
-        self._ws = await connect(self._url, open_timeout=self._timeout, **kwargs)
+        self._ws = await connect(self._url, open_timeout=self._timeout, proxy=None, **kwargs)
         if await self._request(LOGIN_METHOD, [str(self._key)]) is not True:
             raise _Unavailable("API key rejected")
 

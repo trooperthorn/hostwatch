@@ -21,10 +21,11 @@ Health rules, worst wins:
   * `healthy` true with `warning` true (TrueNAS keeps a pool healthy after a corrected error) is
     a warning, not ok
   * any non-zero read, write or checksum count on a device is at least a warning, naming the disk
-  * a leaf device whose own status is not ONLINE is at least a warning
+  * a leaf device whose own status is not ONLINE (CANT_OPEN, UNKNOWN and an empty status
+    included; a spare may also be AVAIL or INUSE) is at least a warning
   * a scan that finished with errors, or `healthy` false on an otherwise online pool, is a warning
 
-Alerts (including dismissed ones) are events of kind truenas.alert from `read_events`, keyed by
+Alerts (including dismissed ones, which are reported as info with dismissed true) are events of kind truenas.alert from `read_events`, keyed by
 alert uuid and last_occurrence so a repeat of the same occurrence is the same event. The agent
 drops keys it has already handed to a batch, which is how an alert is not repeated next cycle.
 
@@ -43,7 +44,10 @@ from .base import Collector
 CRITICAL_POOL_STATES = frozenset({"DEGRADED", "FAULTED", "UNAVAIL", "SUSPENDED", "REMOVED"})
 CRITICAL_LEVELS = frozenset({"ERROR", "CRITICAL", "ALERT", "EMERGENCY"})
 INFO_LEVELS = frozenset({"INFO", "NOTICE"})
-BAD_DEVICE_STATES = frozenset({"DEGRADED", "FAULTED", "UNAVAIL", "REMOVED", "OFFLINE"})
+# A leaf in any state other than ONLINE is at least a warning, including CANT_OPEN and UNKNOWN.
+# Only a spare that is waiting (AVAIL) or in use (INUSE) is healthy besides ONLINE.
+OK_DEVICE_STATES = frozenset({"ONLINE"})
+OK_SPARE_STATES = frozenset({"AVAIL", "INUSE"})
 VDEV_CLASSES = ("data", "log", "cache", "spare", "special", "dedup")
 ERROR_METRICS = (("read_errors", "vdev_read_errors"), ("write_errors", "vdev_write_errors"),
                  ("checksum_errors", "vdev_checksum_errors"))
@@ -202,8 +206,8 @@ class TruenasCollector(Collector):
                     out.append(self.sample("vdev_self_healed_bytes", _num(stats.get("self_healed")), "B",
                                            **labels))
                     dev_status = str(leaf.get("status") or "")
-                    if dev_status in BAD_DEVICE_STATES:
-                        raise_to(1, f"{who} in pool {name} is {dev_status}")
+                    if dev_status not in OK_DEVICE_STATES and not (cls == "spare" and dev_status in OK_SPARE_STATES):
+                        raise_to(1, f"{who} in pool {name} is {dev_status or 'in an unknown state'}")
 
         labels = {"pool": name, "status": status, "status_code": str(pool.get("status_code") or ""),
                   "scan_function": str(scan.get("function") or ""), "scan_state": str(scan.get("state") or ""),
@@ -252,9 +256,10 @@ class TruenasCollector(Collector):
             return None
         text = " ".join(str(alert.get("formatted") or alert.get("klass") or "TrueNAS alert").split())
         level = str(alert.get("level") or "")
+        dismissed = bool(alert.get("dismissed"))
         return Event(
-            kind="truenas.alert", severity=alert_severity(level), source="truenas", ts=occurred,
+            kind="truenas.alert", severity="info" if dismissed else alert_severity(level), source="truenas", ts=occurred,
             title=text[:MAX_TITLE],
             detail={"uuid": str(uuid), "klass": alert.get("klass"), "alert_source": alert.get("source"),
-                    "level": level, "dismissed": bool(alert.get("dismissed")), "formatted": text},
+                    "level": level, "dismissed": dismissed, "formatted": text},
             dedup_key=f"truenas.alert:{uuid}:{int(occurred * 1000)}")

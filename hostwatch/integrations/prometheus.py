@@ -76,8 +76,8 @@ def render(summaries: list[HostSummary]) -> str:
             _add(fam, "hostwatch_md_degraded_devices", "Degraded devices in an md RAID array.", h, c,
                  {"array": c.labels.get("array", "")})
         for c in s.pools:
-            _add(fam, "hostwatch_pool_status", "ZFS pool health, 0 when ONLINE and 2 when DEGRADED, FAULTED, UNAVAIL or SUSPENDED.", h, c,
-                 {"pool": c.labels.get("pool", "")})
+            _add(fam, "hostwatch_pool_status", "Pool health, the worse of the zfs kstat and TrueNAS API views: 0 ok, 1 warning, 2 critical. The source label names the contributing sources.", h, c,
+                 {"pool": c.labels.get("pool", ""), "source": c.labels.get("source", "")})
         for c in s.disks:
             _add(fam, "hostwatch_disk_device_status", "Scrutiny device status, 0 when healthy.", h, c,
                  {k: v for k, v in sorted(c.labels.items())})

@@ -404,10 +404,10 @@ nor drops them, including events stored while the broker was unreachable at firs
 first tick starts at the newest existing event. Entities that are no longer produced have their
 retained discovery config cleared after being marked unavailable, using a list of published
 entities kept in the data directory. Host names that differ only in case or punctuation get a
-short hash suffix on their device identifier and topics, with a warning in the log. Each ZFS pool read from kstat becomes a
-diagnostic sensor, 0 when the pool is ONLINE and 2 when it is not. When the TrueNAS API is configured, the `truenas` source adds a
+short hash suffix on their device identifier and topics, with a warning in the log. Each pool becomes one
+diagnostic sensor, the worse of the kstat state and the TrueNAS API health (0 ok, 1 warning, 2 critical), so an ONLINE kstat row cannot hide an API warning. When the TrueNAS API is configured, the `truenas` source adds a
 per pool health (a corrected checksum error is a warning naming the disk and serial, a DEGRADED or FAULTED pool is critical),
-per device error counts, per disk temperatures, and every TrueNAS alert, dismissed ones included, as a `truenas.alert` event.
+per device error counts, per disk temperatures, and every TrueNAS alert, dismissed ones included, as a `truenas.alert` event (a dismissed alert is reported as info with `dismissed` true, whatever its level). Any device state other than ONLINE, including CANT_OPEN and UNKNOWN, is at least a warning. The client connects directly and ignores proxy environment variables, so the API key login frame never goes through a proxy.
 
 ## Power witnesses (Phase 6, off by default)
 
