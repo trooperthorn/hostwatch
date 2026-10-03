@@ -11,7 +11,11 @@ RUN groupadd --system --gid 10001 hostwatch \
 
 # journalctl reads the read-only journal mount for the event engine. Only the
 # systemd package is added, without recommended extras, and apt lists are removed.
+# Pending Debian security updates are applied at build time, because the pinned
+# base image ages between digest updates and the CI scan fails on fixable
+# critical vulnerabilities.
 RUN apt-get update \
+ && apt-get upgrade -y --no-install-recommends \
  && apt-get install -y --no-install-recommends systemd \
  && rm -rf /var/lib/apt/lists/*
 
@@ -24,7 +28,9 @@ RUN pip install --require-hashes --no-cache-dir -r requirements.lock
 COPY hostwatch ./hostwatch
 # pip, setuptools and wheel are only needed to build. They are removed afterwards
 # so the runtime image carries no installer with its own vulnerability history.
-RUN pip install --no-cache-dir --no-deps .  && pip uninstall -y pip setuptools wheel  && rm -rf /root/.cache
+RUN pip install --no-cache-dir --no-deps . \
+ && pip uninstall -y pip setuptools wheel \
+ && rm -rf /root/.cache
 
 # A fresh named volume copies the ownership of the image directory, so /data is
 # created here owned by the runtime user. Without this the volume would be

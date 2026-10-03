@@ -94,7 +94,8 @@ def test_every_action_is_pinned_to_a_full_commit_sha():
 
 def test_trivy_gate_is_critical_and_fails_the_job():
     scan = _jobs()["scan"]
-    step = scan.split("aquasecurity/trivy-action@", 1)[1].split("\n      - ", 1)[0]
+    # The first trivy step only prints a readable table; the last one is the gate.
+    step = scan.rsplit("aquasecurity/trivy-action@", 1)[1].split("\n      - ", 1)[0]
     assert re.search(r"severity:\s*CRITICAL\s*$", step, re.M)
     assert re.search(r'exit-code:\s*"1"', step)
     assert re.search(r"ignore-unfixed:\s*true", step)
