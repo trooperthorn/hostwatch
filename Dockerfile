@@ -1,3 +1,7 @@
+# The base image is pinned by the multi-arch index digest, so a moved tag cannot change the
+# build. To update: pull python:3.12-slim, read the new index digest with
+# "docker buildx imagetools inspect python:3.12-slim", replace the digest below, then rebuild
+# and let CI scan the result before merging.
 FROM python:3.12-slim@sha256:dddfd7e07f9d15aeeca61529320492139d21cac7f0070c00609243e51e4e0016
 
 # Non-root runtime user. UID/GID are fixed so host-side file ownership on the
@@ -25,6 +29,22 @@ RUN pip install --no-cache-dir --no-deps . && rm -rf /root/.cache
 # root-owned and the non-root process could not write to it.
 RUN mkdir /data && chown 10001:10001 /data
 
+ARG VERSION=unknown
+ARG REVISION=unknown
+# The repository declares no license yet, so the default is the SPDX value for "not asserted".
+# Pass the real SPDX identifier once the owner chooses one.
+ARG LICENSES=NOASSERTION
+LABEL org.opencontainers.image.title="hostwatch" \
+      org.opencontainers.image.source="https://github.com/trooperthorn/hostwatch" \
+      org.opencontainers.image.version="${VERSION}" \
+      org.opencontainers.image.revision="${REVISION}" \
+      org.opencontainers.image.licenses="${LICENSES}"
+
 USER hostwatch
 VOLUME ["/data"]
+# The check uses the Python standard library, so the image needs no curl. It probes the
+# local health endpoint on the configured port and scheme. The start period gives the first
+# collection cycle and database setup time before failures count.
+HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
+  CMD ["python", "-m", "hostwatch", "healthcheck"]
 ENTRYPOINT ["python", "-m", "hostwatch"]

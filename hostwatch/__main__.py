@@ -3,6 +3,8 @@
   python -m hostwatch                run the configured role (HOSTWATCH_ROLE)
   python -m hostwatch bootstrap-admin | user ... | key ...
                                      operator commands, see cli.py
+  python -m hostwatch healthcheck    exit 0 when the local hub health endpoint answers, used by the
+                                     container HEALTHCHECK
   python -m hostwatch collect-once   print one cycle of detection and samples,
                                      without a hub; useful for verification
 """
@@ -18,6 +20,7 @@ import ssl
 import sys
 import threading
 import time
+import urllib.request
 
 from . import cli
 from .agent import Agent
@@ -35,6 +38,64 @@ def collect_once(cfg: Config) -> int:
     for s in batch.samples:
         lbl = " ".join(f"{k}={v}" for k, v in s.labels.items())
         print(f"{s.source:9} {s.metric:22} {str(s.value):>14} {s.unit:4} {lbl}")
+    return 0
+
+
+HEALTH_PATH = "/internal/v1/health"
+HEALTH_TIMEOUT_S = 5.0
+
+
+def health_url(cfg: Config) -> str:
+    """The local health URL: the configured port, the scheme the hub serves, and an address it listens on.
+
+    The all role always listens on loopback. The hub role listens only on its bind address, so a
+    specific non-loopback bind is used as is; a wildcard bind is reached over loopback.
+    """
+    host = LOOPBACK_V4
+    if cfg.role != "all" and not _is_loopback(cfg.hub_bind):
+        try:
+            if not normalize_ip(cfg.hub_bind).is_unspecified:
+                host = cfg.hub_bind
+        except ValueError:
+            pass
+    if ":" in host:
+        host = f"[{host}]"
+    scheme = "https" if cfg.tls_configured else "http"
+    return f"{scheme}://{host}:{cfg.hub_port}{HEALTH_PATH}"
+
+
+def healthcheck(cfg: Config, opener=None) -> int:
+    """Return 0 when the local hub answers its health endpoint with HTTP 200 and status ok, else 1.
+
+    The standard library is used so the image needs no curl. Over TLS the certificate is not
+    verified, because it is issued for the public name and not for the loopback address. The
+    endpoint is unauthenticated and returns only a status and a version, so this is a liveness
+    probe and not an authentication step. The agent role serves nothing, so there is nothing to
+    probe and the command reports that and returns 0 rather than failing every agent container.
+    """
+    if cfg.role == "agent":
+        print("agent role: no health endpoint to check")
+        return 0
+    url = health_url(cfg)
+    if opener is None:
+        ctx = None
+        if url.startswith("https://"):
+            ctx = ssl.create_default_context()
+            ctx.check_hostname = False
+            ctx.verify_mode = ssl.CERT_NONE
+        opener = lambda u: urllib.request.urlopen(u, timeout=HEALTH_TIMEOUT_S, context=ctx)  # noqa: E731
+    try:
+        with opener(url) as resp:
+            if resp.status != 200:
+                print(f"unhealthy: HTTP {resp.status} from {url}", file=sys.stderr)
+                return 1
+            body = json.loads(resp.read().decode("utf-8"))
+    except Exception as exc:  # any failure means unhealthy; the reason goes to the health log
+        print(f"unhealthy: {url}: {exc}", file=sys.stderr)
+        return 1
+    if body.get("status") != "ok":
+        print(f"unhealthy: {url} reported {body!r}", file=sys.stderr)
+        return 1
     return 0
 
 
@@ -167,6 +228,8 @@ def main(argv: list[str] | None = None) -> int:
     argv = sys.argv[1:] if argv is None else argv
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
     cfg = Config()
+    if argv and argv[0] == "healthcheck":
+        return healthcheck(cfg)
     if argv and argv[0] == "collect-once":
         return collect_once(cfg)
     if argv and argv[0] in cli.COMMANDS:

@@ -351,6 +351,22 @@ Pruning is the only deletion the audit log allows, and history beyond the window
 is not recoverable, so export rows first if you need a longer record. This is an
 application-layer control, not tamper-proofing.
 
+## Container health and image labels
+
+The image declares a `HEALTHCHECK` that runs `python -m hostwatch healthcheck` every 30 seconds.
+The command requests `/internal/v1/health` on the configured port, over HTTPS when TLS is
+configured, using only the Python standard library, and exits 0 only when it answers HTTP 200 with
+status ok. Over TLS it does not verify the certificate, because the certificate is issued for a
+public name and not for the loopback address. The endpoint is unauthenticated and returns only a
+status and a version, so this is a liveness probe and not an authentication control. In the agent
+role there is no endpoint, so the command reports that and exits 0. Check the result with
+`sudo docker inspect --format '{{.State.Health.Status}}' hostwatch`.
+
+The image carries OCI labels for source, version, revision and licenses. Set them at build time
+with `--build-arg VERSION=...`, `--build-arg REVISION=...` and `--build-arg LICENSES=...`. The
+licenses label defaults to `NOASSERTION` because the repository does not declare a license yet.
+The base image is pinned by digest; the Dockerfile comment explains how to update it.
+
 ## Dependency lock
 
 The container image installs its runtime dependencies from `requirements.lock`, which pins every

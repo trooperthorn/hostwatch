@@ -808,6 +808,19 @@ The Dockerfile copies `requirements.lock` and installs it with
 parses `pyproject.toml` and the lock and checks that every runtime dependency is pinned with `==`,
 that every lock entry carries a sha256 hash, and that the Dockerfile uses `--require-hashes`.
 
+## Container healthcheck and image labels
+
+`python -m hostwatch healthcheck` builds the local health URL from the configuration: the
+configured port, https when TLS is configured, and 127.0.0.1 unless the hub role is bound to one
+specific address, which is then probed instead because it is the only address that listens. It
+uses `urllib.request`, so the image needs no curl, and a five second timeout. It exits 0 only for
+HTTP 200 with status ok. The certificate is not verified over TLS because it does not name the
+loopback address; the endpoint is unauthenticated and reveals only status and version, so this is a
+liveness probe and not an authentication control. The agent role serves nothing, so the command
+exits 0 with a message. The Dockerfile `HEALTHCHECK` uses interval 30s, timeout 10s, start period
+30s and 3 retries, and sets OCI labels from the build args `VERSION`, `REVISION` and `LICENSES`.
+`tests/test_healthcheck.py` covers the command with a mocked transport and checks the Dockerfile.
+
 ## Web UI shell (Phase 5)
 
 The hub serves a static page from `hostwatch/web/`: `GET /` returns `index.html` and
