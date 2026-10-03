@@ -93,7 +93,7 @@ def test_migration_from_version_4_keeps_rows(tmp_path):
     db.commit()
     db.close()
     upgraded = Store(p)
-    assert SCHEMA_VERSION == 9
+    assert SCHEMA_VERSION == 10
     assert len(upgraded.events("h1")) == 1
     assert upgraded.get_user("u") is not None
     upgraded.set_cursor("x", 3)

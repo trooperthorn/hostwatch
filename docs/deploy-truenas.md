@@ -28,10 +28,12 @@ wildcard bind, and a non-loopback bind without TLS needs a non-empty allowlist. 
 Restart with `cd deploy && sudo docker compose up -d`. Add the address of any other
 agent, such as ai-pi, to the same comma separated list.
 
-Create a scoped ingest key for this agent. The secret is printed once:
+Create an ingest key for this agent, bound to the host name it will report. The key carries only
+the `ingest` scope, and the hub refuses batches from it that name any other host. The secret is
+printed once:
 
 ```
-sudo docker exec hostwatch python -m hostwatch key create --scopes ingest,read:events --owner agent-truenas
+sudo docker exec hostwatch python -m hostwatch key create --scopes ingest --host TrueNAS-SVR --owner agent-truenas
 ```
 
 ## 2. Create the TrueNAS API key

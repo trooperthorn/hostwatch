@@ -2,7 +2,7 @@
 
   python -m hostwatch bootstrap-admin [--username NAME]
   python -m hostwatch user create|disable|unlock|passwd|grant-admin|revoke-admin USERNAME
-  python -m hostwatch key create --scopes a,b [--owner NAME] | list | revoke ID
+  python -m hostwatch key create --scopes a,b [--owner NAME] [--host NAME] | list | revoke ID
   python -m hostwatch source forget HOST SOURCE
   python -m hostwatch event ack ID
   python -m hostwatch cert bind SUBJECT USER | list | revoke SUBJECT
@@ -47,6 +47,7 @@ def _parser() -> argparse.ArgumentParser:
     create = key.add_parser("create")
     create.add_argument("--scopes", required=True, help="comma separated: " + ", ".join(sorted(auth.SCOPES)))
     create.add_argument("--owner", default="cli")
+    create.add_argument("--host", default=None, help="bind the key to one host name; required for the ingest scope")
     key.add_parser("list")
     key.add_parser("revoke").add_argument("key_id", type=int)
     cert = sub.add_parser("cert", help="manage client certificate bindings").add_subparsers(dest="action", required=True)
@@ -230,11 +231,12 @@ def run(argv: list[str], cfg: Config) -> int:
 
     if args.action == "create":
         try:
-            secret, row = auth.generate_api_key(store, args.scopes, args.owner)
+            secret, row = auth.generate_api_key(store, args.scopes, args.owner, host=args.host)
         except ValueError as exc:
             return fail(str(exc), {"scopes": args.scopes[:200]})
-        audit(0, {"key_id": row["id"], "prefix": row["prefix"], "scopes": row["scopes"], "owner": row["owner"]})
-        print(f"Created key id {row['id']} with scopes {','.join(row['scopes'])}. The secret below is shown once:",
+        audit(0, {"key_id": row["id"], "prefix": row["prefix"], "scopes": row["scopes"], "owner": row["owner"],
+                  "host": row["host"]})
+        print(f"Created key id {row['id']} with scopes {','.join(row['scopes'])}{' bound to host ' + row['host'] if row['host'] else ''}. The secret below is shown once:",
               file=sys.stderr)
         print(secret)
         return 0
@@ -242,6 +244,7 @@ def run(argv: list[str], cfg: Config) -> int:
         for k in store.list_api_keys():
             state = "revoked " + _fmt(k["revoked_at"]) if k["revoked_at"] else "active"
             print(f"{k['id']}\t{k['prefix']}\t{','.join(k['scopes'])}\t{k['owner']}\t"
+                  f"host {k['host'] or 'unbound'}\t"
                   f"created {_fmt(k['created'])}\tlast used {_fmt(k['last_used'])}\t{state}")
         audit(0, {})
         return 0

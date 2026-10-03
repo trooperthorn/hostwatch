@@ -81,7 +81,7 @@ def test_revoked_key_is_rejected_on_its_next_request(tmp_path):
 
 def test_every_request_in_a_scripted_session_is_audited(tmp_path):
     client, store = build(tmp_path)
-    key, row = auth.generate_api_key(store, "ingest,read:metrics", "exit-test")
+    key, row = auth.generate_api_key(store, "ingest,read:metrics", "exit-test", host="h1")
     keyh = {"Authorization": f"Bearer {key}"}
 
     keyclient = TestClient(client.app)  # no cookie jar shared with the session client

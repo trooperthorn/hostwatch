@@ -50,6 +50,7 @@ SESSION_SCOPES = frozenset({"read:metrics", "read:events"})
 class KeyCreate(BaseModel):
     scopes: list[str] = Field(min_length=1, max_length=8)
     owner: str = Field(min_length=1, max_length=64)
+    host: str | None = Field(default=None, min_length=1, max_length=128)
 
 
 class LoginBody(BaseModel):
@@ -108,6 +109,7 @@ class Principal:
     kind: str  # session, api_key, mtls or legacy_token
     scopes: frozenset
     detail: dict = field(default_factory=dict)
+    host: str | None = None  # the one host a bound API key may ingest as and read; None means unbound
     is_admin: bool = False  # session and mTLS users carry the users.is_admin flag; API keys use the admin scope
 
     def allows(self, scope: str) -> bool:
@@ -207,7 +209,8 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
                 key = store.find_api_key(token)
                 if key:
                     return Principal(f"key:{key['prefix']}", "api_key", frozenset(key["scopes"]),
-                                     {"owner": key["owner"]}, is_admin="admin" in key["scopes"])
+                                     {"owner": key["owner"]}, is_admin="admin" in key["scopes"],
+                                     host=key.get("host"))
                 prefix, why = store.classify_api_key_failure(token)
                 extra = {"key_reason": why}
                 if prefix:
@@ -251,11 +254,39 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
             return principal
         return check
 
+    def require_events_reader(request: Request, principal: Principal = Depends(authenticate)) -> Principal:
+        """read:events, or a host-bound ingest key reading its own host's events. The second case is
+        how an agent restores its threshold state after a restart without holding a read scope;
+        scoped_host still limits it to the bound host."""
+        if principal.kind == "api_key" and principal.host is not None and "ingest" in principal.scopes:
+            return principal
+        return require_scope("read:events")(request, principal)
+
     def require_admin(request: Request, principal: Principal = Depends(authenticate)) -> Principal:
         if not principal.is_admin:
             request.state.auth_reason = "administrator required"
             raise HTTPException(status_code=403, detail="administrator required")
         return principal
+
+    def deny_host(request: Request, principal: Principal, wanted: str, role: str) -> None:
+        request.state.auth_reason = f"key is bound to host {principal.host}, not {wanted}"
+        request.state.audit_extra = {"key_host": principal.host, f"{role}_host": wanted}
+        raise HTTPException(status_code=403, detail="key is bound to a different host")
+
+    def scoped_host(request: Request, principal: Principal, host: str | None) -> str | None:
+        """Apply a host-bound key's restriction to a requested host. An unbound principal is unchanged.
+        A bound key reading no particular host is narrowed to its own, and another host is refused."""
+        if principal.host is None:
+            return host
+        if host is None:
+            return principal.host
+        if host != principal.host:
+            deny_host(request, principal, host, "requested")
+        return host
+
+    def visible_hosts(principal: Principal) -> list[str]:
+        names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
+        return names if principal.host is None else [n for n in names if n == principal.host]
 
     app.state.require_admin = require_admin
 
@@ -407,12 +438,13 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
     def admin_create_key(body: KeyCreate, request: Request, principal: Principal = Depends(require_admin)):
         """Create a key. The secret appears in this response only and the response must not be cached."""
         try:
-            secret, row = auth.generate_api_key(store, body.scopes, body.owner)
+            secret, row = auth.generate_api_key(store, body.scopes, body.owner, host=body.host)
         except ValueError as exc:
             raise HTTPException(status_code=422, detail=str(exc))
         request.state.audit = {"actor": principal.actor, "kind": "api_key_create",
                                "detail": {"key_id": row["id"], "prefix": row["prefix"],
-                                          "scopes": row["scopes"], "owner": row["owner"]}}
+                                          "scopes": row["scopes"], "owner": row["owner"],
+                                          "host": row["host"]}}
         return JSONResponse(status_code=201, content={"key": row, "secret": secret},
                             headers={"Cache-Control": "no-store"})
 
@@ -439,8 +471,14 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
     def health():
         return {"status": "ok", "version": __version__}
 
-    @app.post("/internal/v1/ingest", dependencies=[Depends(require_scope("ingest"))])
-    def ingest(batch: Batch, background: BackgroundTasks):
+    @app.post("/internal/v1/ingest")
+    def ingest(batch: Batch, background: BackgroundTasks, request: Request,
+               principal: Principal = Depends(require_scope("ingest"))):
+        if principal.host is not None and batch.host != principal.host:
+            deny_host(request, principal, batch.host, "batch")
+        if principal.kind == "api_key" and principal.host is None:
+            # Created before host binding existed; it can post as any host, so the audit says so.
+            request.state.audit_extra = {"unbound_key": True}
         n, e, duplicate = store.ingest_batch(batch)
         if e and not duplicate:
             from .witness.power import assess_batch_events, eligible
@@ -454,18 +492,25 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
             out["duplicate"] = True
         return out
 
-    @app.get("/internal/v1/latest", dependencies=[Depends(require_scope("read:metrics"))])
-    def latest(host: str | None = None):
-        return store.latest(host)
+    @app.get("/internal/v1/latest")
+    def latest(request: Request, host: str | None = None,
+               principal: Principal = Depends(require_scope("read:metrics"))):
+        return store.latest(scoped_host(request, principal, host))
 
-    @app.get("/internal/v1/sources", dependencies=[Depends(require_scope("read:metrics"))])
-    def sources():
-        return {"agents": store.agents(), "sources": store.sources()}
+    @app.get("/internal/v1/sources")
+    def sources(principal: Principal = Depends(require_scope("read:metrics"))):
+        agents, srcs = store.agents(), store.sources()
+        if principal.host is not None:
+            agents = [a for a in agents if a["host"] == principal.host]
+            srcs = [r for r in srcs if r["host"] == principal.host]
+        return {"agents": agents, "sources": srcs}
 
-    @app.get("/internal/v1/events", dependencies=[Depends(require_scope("read:events"))])
-    def events(response: Response, host: str | None = None, since: float | None = None,
+    @app.get("/internal/v1/events")
+    def events(request: Request, response: Response, principal: Principal = Depends(require_events_reader),
+               host: str | None = None, since: float | None = None,
                kind: str | None = None, source: str | None = None, before: float | None = None,
                before_id: int | None = None, limit: int = Query(default=100, ge=1, le=1000)):
+        host = scoped_host(request, principal, host)
         rows = store.events(host=host, since=since, kind=kind, limit=limit, source=source,
                             before=before, before_id=before_id)
         if len(rows) == limit:
@@ -475,9 +520,11 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
             response.headers["X-Next-Before-Id"] = str(rows[-1]["id"])
         return rows
 
-    @app.get("/internal/v1/gaps", dependencies=[Depends(require_scope("read:metrics"))])
-    def gaps(host: str, source: str, metric: str, hours: float = 24, max_gap_s: float = 60):
+    @app.get("/internal/v1/gaps")
+    def gaps(request: Request, host: str, source: str, metric: str, hours: float = 24, max_gap_s: float = 60,
+             principal: Principal = Depends(require_scope("read:metrics"))):
         import time
+        scoped_host(request, principal, host)
         now = time.time()
         found = store.gaps(host, source, metric, now - hours * 3600, max_gap_s, until=now + 1.0)
         return {"gap_count": len(found), "gaps": found}
@@ -500,11 +547,13 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
     HISTORY_MAX_POINTS = 1000
     HISTORY_MAX_RANGE_S = 366 * 86400.0
 
-    @app.get("/api/v1/hosts/{host}/history", dependencies=[Depends(require_scope("read:metrics"))])
-    def host_history(host: str, source: str = Query(min_length=1, max_length=64),
+    @app.get("/api/v1/hosts/{host}/history")
+    def host_history(request: Request, host: str, principal: Principal = Depends(require_scope("read:metrics")),
+                     source: str = Query(min_length=1, max_length=64),
                      metric: str = Query(min_length=1, max_length=64),
                      since: float = Query(allow_inf_nan=False), until: float | None = Query(default=None, allow_inf_nan=False),
                      step: float | None = Query(default=None, gt=0, allow_inf_nan=False)):
+        scoped_host(request, principal, host)
         end = time.time() if until is None else until
         span = end - since
         if span <= 0:
@@ -518,15 +567,14 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
                                 detail=f"range and step would return more than {HISTORY_MAX_POINTS} points per series")
         return store.history(host, source, metric, since, end, step, limit=HISTORY_MAX_POINTS * 50)
 
-    @app.get("/api/v1/ui/status", dependencies=[Depends(require_scope("read:metrics"))])
-    def ui_status():
+    @app.get("/api/v1/ui/status")
+    def ui_status(principal: Principal = Depends(require_scope("read:metrics"))):
         now = time.time()
-        names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
-        return ui_status_doc.status_document([summarize(n, now) for n in names], now)
+        return ui_status_doc.status_document([summarize(n, now) for n in visible_hosts(principal)], now)
 
-    @app.get("/api/v1/orion/hosts", dependencies=[Depends(require_scope("read:metrics"))])
-    def orion_hosts():
-        names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
+    @app.get("/api/v1/orion/hosts")
+    def orion_hosts(principal: Principal = Depends(require_scope("read:metrics"))):
+        names = visible_hosts(principal)
         out: dict = {"host_count": len(names)}
         for name, key in orion_doc.host_keys(names).items():
             s = summarize(name)
@@ -534,23 +582,25 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
             out[f"host_{key}_status"] = s.overall_status
         return out
 
-    @app.get("/api/v1/orion/hosts/{host}/summary", dependencies=[Depends(require_scope("read:metrics"))])
-    def orion_host_summary(host: str):
+    @app.get("/api/v1/orion/hosts/{host}/summary")
+    def orion_host_summary(request: Request, host: str, principal: Principal = Depends(require_scope("read:metrics"))):
+        scoped_host(request, principal, host)
         return orion_doc.summary_document(orion_summary(host))
 
-    @app.get("/api/v1/orion/hosts/{host}/{group}", dependencies=[Depends(require_scope("read:metrics"))])
-    def orion_group(host: str, group: str):
+    @app.get("/api/v1/orion/hosts/{host}/{group}")
+    def orion_group(request: Request, host: str, group: str,
+                    principal: Principal = Depends(require_scope("read:metrics"))):
+        scoped_host(request, principal, host)
         if group not in orion_doc.GROUPS:
             raise HTTPException(status_code=404, detail="unknown group")
         return orion_doc.group_document(orion_summary(host), group)
 
     if cfg.prometheus_enabled:
         # Registered only when enabled, so a disabled endpoint is a plain 404 for everyone.
-        @app.get("/metrics", dependencies=[Depends(require_scope("read:metrics"))])
-        def metrics():
+        @app.get("/metrics")
+        def metrics(principal: Principal = Depends(require_scope("read:metrics"))):
             now = time.time()
-            names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
-            body = prom.render([summarize(n, now) for n in names])
+            body = prom.render([summarize(n, now) for n in visible_hosts(principal)])
             return Response(content=body, media_type=prom.CONTENT_TYPE)
 
     return app

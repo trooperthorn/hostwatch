@@ -776,9 +776,19 @@ when the request carried a cookie or Authorization header, which keeps
 unauthenticated scanner traffic out of the log. A test enumerates `app.routes` and fails if any route other
 than health answers without credentials.
 
+Host binding: `api_keys.host` (schema version 10, nullable) names the one host a key is bound to.
+Creating an `ingest` key without a host is refused, and an `admin` key cannot be bound. At ingest
+a bound key whose batch names another host gets 403 and an audit row holding `key_host` and
+`batch_host`, and nothing is stored. A bound key on any read route is limited to its own host:
+a request for another host gets 403, and a request naming no host is narrowed to its own, as are
+the lists on `/api/v1/ui/status`, the Orion host list and `/metrics`. A bound ingest key may also
+read its own host's events so the agent can seed thresholds. Keys that predate the column stay
+unbound; their ingests carry `unbound_key` in the audit detail. The internal key minted in the
+`all` role is bound to `HOSTWATCH_HOST_NAME`. The legacy shared token is unbound by nature.
+
 Consequence: an agent that has only the shared token can ingest but gets 403
 when it seeds threshold state from `/internal/v1/events`. The agent therefore
-prefers `HOSTWATCH_INGEST_KEY`, a scoped key with `ingest` and `read:events`,
+prefers `HOSTWATCH_INGEST_KEY`, a scoped key with the `ingest` scope bound to its host,
 and falls back to `HOSTWATCH_INGEST_TOKEN` only when no key is set. The agent
 role accepts either credential. In the `all` role the process mints an internal
 key for its local agent at start when none is configured: it is held in memory,

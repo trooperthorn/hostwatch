@@ -115,10 +115,17 @@ def parse_scopes(raw: str | list[str]) -> list[str]:
 
 
 def generate_api_key(store: Store, scopes: str | list[str], owner: str,
-                     now: float | None = None) -> tuple[str, dict]:
+                     now: float | None = None, host: str | None = None) -> tuple[str, dict]:
     """Create a scoped key. Returns (secret, row). The secret is `hw_<lookup prefix>_<random>`,
-    is shown once, and only its SHA-256 digest and the lookup prefix are stored."""
-    return store.create_api_key(parse_scopes(scopes), owner, now=now)
+    is shown once, and only its SHA-256 digest and the lookup prefix are stored. An ingest key must
+    name the one host it may post as. Keys made before host binding existed remain unbound."""
+    parsed = parse_scopes(scopes)
+    host = (host or "").strip() or None
+    if host is not None and "admin" in parsed:
+        raise ValueError("an admin key cannot be bound to a host")
+    if "ingest" in parsed and host is None:
+        raise ValueError("an ingest key must be bound to a host; pass the host name the agent reports")
+    return store.create_api_key(parsed, owner, now=now, host=host)
 
 
 def generate_session_token(store: Store, user_id: int, ttl_s: float, now: float | None = None) -> str:
@@ -134,14 +141,15 @@ def mint_internal_ingest_key(cfg: Config, store: Store) -> str:
 
     If HOSTWATCH_INGEST_KEY is set it is used unchanged. Otherwise a fresh key
     with the ingest and read:events scopes is created in memory for this process
-    only. The store keeps its hash, never the key, and the key is never logged.
+    only, bound to the local agent's host name. The store keeps its hash, never the key, and the
+    key is never logged.
     Earlier internal keys are revoked first, so restarts do not accumulate
     active credentials nobody holds.
     """
     if cfg.ingest_key:
         return cfg.ingest_key
     store.revoke_api_keys_by_owner(INTERNAL_AGENT_OWNER)
-    full, _ = store.create_api_key(["ingest", "read:events"], INTERNAL_AGENT_OWNER)
+    full, _ = store.create_api_key(["ingest", "read:events"], INTERNAL_AGENT_OWNER, host=cfg.host_name)
     return full
 
 

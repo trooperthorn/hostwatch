@@ -33,12 +33,18 @@ role the hub also keeps listening on 127.0.0.1 so the local agent keeps deliveri
 with `cd deploy && sudo docker compose up -d`.
 
 Create one key per agent so that one agent can be revoked without touching the others.
-The secret is printed once. The agent needs `ingest` to push and `read:events` to restore
-its threshold state after a restart, and no other scope:
+The secret is printed once. Each agent key carries only the `ingest` scope and is bound to
+one host with `--host`, which must match the `HOSTWATCH_HOST_NAME` the agent reports. This is
+enforced: the hub answers 403 and writes an audit row naming both hosts when a batch names a
+different host, so one agent cannot post as another. A host-bound ingest key may also read its
+own host's events, which is how the agent restores its threshold state after a restart, and
+nothing else. The hub refuses to create an ingest key without `--host`. Keys created before
+this existed stay unbound and keep working, and the audit log marks each of their ingests as
+`unbound_key`; replace them with bound keys and revoke the old ones:
 
 ```
-sudo docker exec hostwatch python -m hostwatch key create --scopes ingest,read:events --owner agent-ai-pi
-sudo docker exec hostwatch python -m hostwatch key create --scopes ingest,read:events --owner agent-truenas
+sudo docker exec hostwatch python -m hostwatch key create --scopes ingest --host ai-pi --owner agent-ai-pi
+sudo docker exec hostwatch python -m hostwatch key create --scopes ingest --host TrueNAS-SVR --owner agent-truenas
 sudo docker exec hostwatch python -m hostwatch key list
 ```
 

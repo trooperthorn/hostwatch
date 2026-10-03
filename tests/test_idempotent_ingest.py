@@ -100,7 +100,7 @@ def test_version2_database_migrates_and_keeps_rows(tmp_path):
     assert count(p, "batch_ids") == 0
     assert count(p, "samples") == 1 and len(store.events("h1")) == 1
     db = sqlite3.connect(p)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == 9
+    assert db.execute("PRAGMA user_version").fetchone()[0] == 10
     db.close()
     assert store.ingest_batch(make_batch()) == (1, 0, False)
     assert store.ingest_batch(make_batch())[2] is True

@@ -72,7 +72,7 @@ def test_agent_validate_accepts_either_credential_but_not_none():
 
 
 def test_all_role_validates_without_legacy_token(tmp_path):
-    Config(role="all", data_dir=tmp_path).validate()
+    Config(role="all", data_dir=tmp_path, host_name="h1").validate()
     with pytest.raises(ValueError):
         Config(role="all", ingest_token="short").validate()
 
@@ -111,7 +111,7 @@ def test_legacy_token_use_writes_deprecation_audit_entry(tmp_path):
 
 def test_minted_internal_key_ingests_and_is_stored_hashed(tmp_path):
     client, store = hub(tmp_path)  # no legacy token configured
-    cfg = Config(role="all", data_dir=tmp_path)
+    cfg = Config(role="all", data_dir=tmp_path, host_name="h1")
     key = auth.mint_internal_ingest_key(cfg, store)
     assert key.startswith("hw_")
     h = {"Authorization": f"Bearer {key}", "Content-Type": "application/json"}

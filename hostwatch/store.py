@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS agents (
 # a database with user_version 0 is treated as version 1 once its Phase 1 tables
 # exist. Each migration step is additive: it only creates objects and is guarded
 # with IF NOT EXISTS so that running it twice changes nothing.
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # Longest history range served from raw samples. Longer ranges use the hourly rollups.
 HISTORY_RAW_MAX_S = 2 * 86400.0
@@ -55,6 +55,13 @@ def _add_sources_present(db: sqlite3.Connection) -> None:
     cols = {r[1] for r in db.execute("PRAGMA table_info(sources)")}
     if "present" not in cols:
         db.execute("ALTER TABLE sources ADD COLUMN present INTEGER NOT NULL DEFAULT 1")
+
+
+def _add_api_keys_host(db: sqlite3.Connection) -> None:
+    """Add api_keys.host (NULL means unbound, which is what every earlier key stays) once."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(api_keys)")}
+    if "host" not in cols:
+        db.execute("ALTER TABLE api_keys ADD COLUMN host TEXT")
 
 
 def _add_users_is_admin(db: sqlite3.Connection) -> None:
@@ -145,6 +152,8 @@ MIGRATIONS: dict[int, tuple] = {
   event_id INTEGER PRIMARY KEY, acked_at REAL NOT NULL, actor TEXT NOT NULL
 )""",
     ),
+    # Optional host a key is bound to. Additive: one guarded nullable column, existing keys stay unbound.
+    10: (_add_api_keys_host,),
 }
 
 
@@ -301,7 +310,7 @@ class Store:
 
     def list_api_keys(self) -> list[dict]:
         """Every key without its secret or hash, newest first."""
-        rows = self._rows("SELECT id, prefix, scopes, owner, created, revoked_at, last_used "
+        rows = self._rows("SELECT id, prefix, scopes, owner, host, created, revoked_at, last_used "
                           "FROM api_keys ORDER BY id DESC")
         for r in rows:
             r["scopes"] = json.loads(r["scopes"])
@@ -339,18 +348,19 @@ class Store:
             return self._db.execute("UPDATE sessions SET revoked = 1 WHERE id_hash = ? AND revoked = 0",
                                     (self._digest(token),)).rowcount > 0
 
-    def create_api_key(self, scopes: list[str], owner: str, now: float | None = None) -> tuple[str, dict]:
+    def create_api_key(self, scopes: list[str], owner: str, now: float | None = None,
+                       host: str | None = None) -> tuple[str, dict]:
         """Create a key. Returns (full key, row). The full key is shown once and is not recoverable."""
         now = time.time() if now is None else now
         prefix = secrets.token_hex(4)
         full = f"hw_{prefix}_{secrets.token_urlsafe(32)}"
         with self._lock, self._db:
             cur = self._db.execute(
-                "INSERT INTO api_keys (prefix, hash, scopes, owner, created) VALUES (?,?,?,?,?)",
-                (prefix, self._digest(full), json.dumps(sorted(scopes)), owner, now))
+                "INSERT INTO api_keys (prefix, hash, scopes, owner, host, created) VALUES (?,?,?,?,?,?)",
+                (prefix, self._digest(full), json.dumps(sorted(scopes)), owner, host, now))
             key_id = int(cur.lastrowid)
         return full, {"id": key_id, "prefix": prefix, "scopes": sorted(scopes), "owner": owner,
-                      "created": now, "revoked_at": None, "last_used": None}
+                      "host": host, "created": now, "revoked_at": None, "last_used": None}
 
     def find_api_key(self, key: str, now: float | None = None) -> dict | None:
         """Return the active key row for a presented key, or None if unknown or revoked.
@@ -360,7 +370,7 @@ class Store:
         if len(parts) != 3 or parts[0] != "hw":
             return None
         with self._lock, self._db:
-            cur = self._db.execute("SELECT id, prefix, hash, scopes, owner, created, revoked_at, last_used "
+            cur = self._db.execute("SELECT id, prefix, hash, scopes, owner, host, created, revoked_at, last_used "
                                    "FROM api_keys WHERE prefix = ? AND revoked_at IS NULL", (parts[1],))
             row = cur.fetchone()
             if row is None:

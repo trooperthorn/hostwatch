@@ -108,7 +108,7 @@ trust boundary, not a network control):
 ```
 python -m hostwatch bootstrap-admin               # only when no users exist; prints a random password once
 python -m hostwatch user create|disable|unlock|passwd|grant-admin|revoke-admin NAME   # password from a prompt, or one line on stdin
-python -m hostwatch key create --scopes read:metrics,read:events [--owner NAME]   # prints the key once
+python -m hostwatch key create --scopes read:metrics,read:events [--owner NAME] [--host NAME]   # prints the key once
 python -m hostwatch key list
 python -m hostwatch key revoke ID                 # rejected on the key's next request
 python -m hostwatch source forget HOST SOURCE      # declare a removed source deliberate (audited)
@@ -304,12 +304,14 @@ sudo docker exec -it hostwatch python -m hostwatch user create alice
 ```
 
 Create, list and revoke scoped API keys. Valid scopes are `read:metrics`,
-`read:events`, `ingest` and `admin`. The secret is shown once and cannot be
-recovered. A revoked key is rejected on its next request.
+`read:events`, `ingest` and `admin`. An `ingest` key must be created with `--host NAME` and
+can then post only batches for that host (enforced, 403 and an audit row otherwise). A read key
+given `--host` can read only that host; read keys without it read every host. The secret is shown
+once and cannot be recovered. A revoked key is rejected on its next request.
 
 ```
 sudo docker exec hostwatch python -m hostwatch key create --scopes read:metrics,read:events --owner homeassistant
-sudo docker exec hostwatch python -m hostwatch key create --scopes ingest,read:events --owner agent-truenas
+sudo docker exec hostwatch python -m hostwatch key create --scopes ingest --host TrueNAS-SVR --owner agent-truenas
 sudo docker exec hostwatch python -m hostwatch key list
 sudo docker exec hostwatch python -m hostwatch key revoke 2
 ```

@@ -69,7 +69,7 @@ Each threat names the controls against it. Controls are written as `Control [lab
 
 - Control [enforced]: ingest needs the `ingest` scope, and batches are idempotent, so a replay does not duplicate samples or events.
 - Control [enforced]: a malformed batch is rejected by schema validation before storage.
-- Control [advisory]: a holder of an ingest key can still send false but well-formed data for any host name it chooses, because keys are not bound to a host.
+- Control [enforced]: an ingest key created with a bound host can post only that host's batches, and a bound read key reads only that host. Keys created before binding existed, and the legacy shared token, remain unbound and can post as any host; the audit log marks unbound key ingests. A holder of an unbound key can still send false but well-formed data for any host name.
 
 ### Container escape and privilege
 

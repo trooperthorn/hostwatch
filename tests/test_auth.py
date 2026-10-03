@@ -80,7 +80,7 @@ def test_login_upgrades_outdated_hash(store, cfg):
 
 
 def test_api_key_secret_not_stored(store):
-    secret, row = auth.generate_api_key(store, "ingest, read:metrics", "agent1", now=1.0)
+    secret, row = auth.generate_api_key(store, "ingest, read:metrics", "agent1", now=1.0, host="h1")
     assert secret.startswith("hw_") and row["scopes"] == ["ingest", "read:metrics"]
     dump = " ".join(str(v) for r in store._db.execute("SELECT * FROM api_keys") for v in r)
     assert secret not in dump

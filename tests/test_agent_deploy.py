@@ -61,5 +61,5 @@ def test_guide_names_only_real_settings_commands_and_files():
             assert action in subs, f"{command} {action}"
     for rel in set(re.findall(r"`((?:deploy/[\w./\-]+|docs/[\w./\-]+)\.(?:md|sh|yaml|yml))`", text)):
         assert (ROOT / rel).is_file(), rel
-    for needle in ("HOSTWATCH_ALLOWED_CLIENTS", "HOSTWATCH_HUB_BIND", "--scopes ingest,read:events", "ai-pi"):
+    for needle in ("HOSTWATCH_ALLOWED_CLIENTS", "HOSTWATCH_HUB_BIND", "--scopes ingest --host ai-pi", "ai-pi"):
         assert needle in text, needle
