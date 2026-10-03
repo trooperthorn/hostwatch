@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from hostwatch.integrations.summary import GROUP_IDS
 
-from tests.test_ui_views import build, login, seed, web
+from test_ui_views import build, login, seed, web
 
 URL = "/api/v1/me/preferences"
 
