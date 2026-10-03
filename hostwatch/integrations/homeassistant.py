@@ -108,6 +108,8 @@ def build_entities(summary: HostSummary) -> list[Entity]:
     if "power" not in summary.not_present:
         out.append(_sensor("package_power", "Package power", summary.package_power, device_class="power",
                            unit="W"))
+    if summary.wall_power is not None:
+        out.append(_sensor("wall_power", "Wall power", summary.wall_power, device_class="power", unit="W"))
     for c in summary.temperatures:
         if c.name.startswith("disk_temp."):
             who = c.labels.get("device") or c.labels.get("wwn", "")
@@ -142,13 +144,14 @@ def build_entities(summary: HostSummary) -> list[Entity]:
 class HomeAssistantPublisher:
     def __init__(self, config: Config, client: MqttClient, store: StoreLike, *,
                  clock: Callable[[], float] = time.time, hosts: Callable[[], list[str]] | None = None,
-                 version: str = "") -> None:
+                 version: str = "", wall_power: Callable[[str, float], object] | None = None) -> None:
         self.config = config
         self.client = client
         self.store = store
         self._clock = clock
         self._hosts = hosts or self._store_hosts
         self._version = version
+        self._wall_power = wall_power  # reads and stores the host's wall power before a summary build
         self._epoch = -1
         self._birth = threading.Event()
         self._published: dict[str, str] = {}  # discovery topic -> last payload sent
@@ -265,6 +268,8 @@ class HomeAssistantPublisher:
         hosts = self._hosts()
         self._assign_slugs(hosts)
         for host in hosts:
+            if self._wall_power is not None:
+                self._wall_power(host, now)
             summary = build_host_summary(self.store, host, now, silent_after_s=self.config.silence_window_s,
                                        crash_hold_s=self.config.crash_hold_s)
             entities = build_entities(summary)

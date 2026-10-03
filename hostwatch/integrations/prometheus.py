@@ -66,6 +66,8 @@ def render(summaries: list[HostSummary]) -> str:
         _add(fam, "hostwatch_cpu_utilization_percent", "CPU utilization in percent.", h, s.cpu)
         _add(fam, "hostwatch_memory_used_percent", "Memory used in percent.", h, s.memory)
         _add(fam, "hostwatch_package_power_watts", "CPU package power in watts.", h, s.package_power)
+        if s.wall_power is not None:
+            _add(fam, "hostwatch_wall_power_watts", "Power drawn at the wall in watts.", h, s.wall_power)
         for c in s.temperatures:
             if c.labels:
                 _add(fam, "hostwatch_temperature_celsius", "Temperature in degrees Celsius.", h, c,

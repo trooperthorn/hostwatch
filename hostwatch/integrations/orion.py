@@ -97,7 +97,10 @@ def memory(s: HostSummary) -> dict[str, Any]:
 
 
 def power(s: HostSummary) -> dict[str, Any]:
-    return _single(s, "power", s.package_power, "package_power_w")
+    doc = _single(s, "power", s.package_power, "package_power_w")
+    if s.wall_power is not None:
+        _item(doc, "wall_power", s.wall_power, "wall_power_w")
+    return doc
 
 
 def temperatures(s: HostSummary) -> dict[str, Any]:

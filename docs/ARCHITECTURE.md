@@ -74,6 +74,22 @@ an unexpected shape returns `available=False` with a reason. An empty interval
 list is returned only when Home Assistant did answer with history, so a missing
 witness is never read as proof of no outage. The hub applies this reader to unclean boots; see Witness-confirmed power loss.
 
+A host may list several entities (`host=entity1|entity2`), each with a role: `switch`, `node_status`
+or `power`, given as a prefix or inferred from the entity id. A Z-Wave plug cannot report its own
+power loss, so a `node_status` entity counts `dead`, `unavailable` and `unknown` as outage while
+`alive`, `awake` and `asleep` do not. `outages` asks each switch and node status entity separately and
+combines the intervals, each carrying its `entity_id`; it is available when at least one entity
+answered, and the entities that did not are named in the reason. The controller's detection time
+means an outage shorter than it is not witnessed and the boot stays `unknown_unclean`.
+
+A `power` entity is not history. `read_power(host)` reads `/api/states/<entity>` and gives watts
+(W or kW), or an unavailable reading with a reason, reused for 10 seconds. The hub's `summarize`
+helper calls `read_wall_power` before every summary build (UI, Orion, Prometheus) and the Home
+Assistant publisher calls the same function before its own build. It stores a `wall_watts` sample
+under the source `wall`, with a NULL value and the reason in the labels when unavailable.
+`HostSummary.wall_power` is built from that sample and is absent for a host with no power entity. It
+does not affect the host's overall status or the unmeasured groups.
+
 ## Data flow
 
 ```

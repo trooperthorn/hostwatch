@@ -40,6 +40,7 @@ def host_document(s: HostSummary) -> dict[str, Any]:
         "cpu": _component(s.cpu, "CPU"),
         "memory": _component(s.memory, "Memory"),
         "power": _component(s.package_power, "Package power"),
+        "wall_power": _component(s.wall_power, "Wall power") if s.wall_power is not None else None,
         "temperatures": [_component(c) for c in s.temperatures],
         "raid": [_component(c) for c in s.md_arrays],
         "pools": [_component(pools, "Pools")],

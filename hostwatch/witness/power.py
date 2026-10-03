@@ -26,6 +26,11 @@ a witness was unavailable and nothing confirmed an outage, the evidence carries
 24 hours) and once at every hub start. `python -m hostwatch boot reassess HOST BOOT_ID` asks
 again on demand and is audited.
 
+A Z-Wave plug cannot report its own power loss, so its node status entity (`dead`) is read as an
+outage like the unavailable state of a switch. The controller needs time to notice a dead node, so an
+outage shorter than that is not witnessed and stays `unknown_unclean`; see `UNVERIFIED.md`.
+The host's wall power is read by `read_wall_power` below.
+
 A fresh pstore panic (`boot.kernel_panic`) and a watchdog reset (`boot.watchdog_reset`) outrank
 a power loss. For those the outage is only noted under `detail.power_witness`.
 """
@@ -100,7 +105,8 @@ def collect_evidence(store, witness, host: str, lo: float, hi: float, skew_s: fl
             evidence["plug"] = {"available": False, "reason": f"the witness failed ({type(exc).__name__})"}
         if res is not None:
             def row(i):
-                return {"start": i.start, "end": i.end, "state": i.state, "open_ended": i.open_ended}
+                return {"start": i.start, "end": i.end, "state": i.state, "open_ended": i.open_ended,
+                        "entity_id": i.entity_id}
             hits = [i for i in res.intervals if confirms(i.start, i.end, lo, hi)]
             late = [i for i in res.intervals if not confirms(i.start, i.end, lo, hi)]
             evidence["plug"] = {
@@ -217,3 +223,29 @@ def assess_batch_events(store, witness, host: str, events: list[dict], skew_s: f
             assess_boot_event(store, witness, host, ev, skew_s, retry_s)
         except Exception as exc:
             log.warning("power witness assessment failed (%s)", type(exc).__name__)
+
+
+WALL_SOURCE = "wall"
+WALL_METRIC = "wall_watts"
+
+
+def read_wall_power(store, witness, host: str, now: float | None = None) -> bool:
+    """Read the host's power entity and store it as a `wall_watts` sample. Returns True when a
+    sample was stored. A host without a power entity stores nothing. A reading that cannot be
+    made is stored as an unavailable sample (value NULL) whose labels carry the reason, so the
+    summary reports it unavailable and never as zero. Never raises."""
+    if witness is None or not getattr(witness, "configured", False):
+        return False
+    try:
+        reading = witness.read_power(host)
+        if reading is None:
+            return False
+        labels = {"entity": reading.entity_id}
+        if reading.watts is None:
+            labels["reason"] = reading.reason[:200]
+        store.add_sample(host, WALL_SOURCE, WALL_METRIC, reading.watts, "W", labels,
+                         time.time() if now is None else now)
+        return True
+    except Exception as exc:
+        log.warning("wall power read failed (%s)", type(exc).__name__)
+        return False

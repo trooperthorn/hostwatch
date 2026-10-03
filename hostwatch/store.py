@@ -633,6 +633,14 @@ class Store:
                 self._INSERT_EVENT, self._event_rows(batch.host, [e.model_dump() for e in batch.events]))
             return len(rows), self._db.total_changes - before, False
 
+    def add_sample(self, host: str, source: str, metric: str, value: float | None, unit: str,
+                   labels: dict[str, str], ts: float) -> None:
+        """Store one hub-side sample (the wall power reading). A value of None is stored as
+        unavailable, never as zero."""
+        with self._lock, self._db:
+            self._db.execute("INSERT INTO samples VALUES (?,?,?,?,?,?,?)",
+                             (ts, host, source, metric, json.dumps(labels, sort_keys=True), value, unit))
+
     def latest(self, host: str | None = None) -> list[dict]:
         sql = ("SELECT s.host, s.source, s.metric, s.labels, s.value, s.unit, s.ts FROM samples s "
                "JOIN (SELECT host, source, metric, labels, MAX(ts) AS mts FROM samples "

@@ -115,9 +115,10 @@ class HostSummary:
     silent: str = ""
     crashes: list[dict] = field(default_factory=list)
     ups: Component | None = None
+    wall_power: Component | None = None
 
     def components(self) -> list[Component]:
-        extra = [self.ups] if self.ups is not None else []
+        extra = [c for c in (self.ups, self.wall_power) if c is not None]
         return [self.cpu, self.memory, self.package_power, *self.temperatures, *self.md_arrays,
                 *self.disks, *extra, *self.sources.values()]
 
@@ -250,6 +251,22 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     packages = [r for r in pick("rapl", "watts") if str(r["labels"].get("domain", "")).startswith("package")]
     power = comp("package_power", "rapl", packages, "W")
 
+    # Wall power is a hub-side reading of the host's power entity (source "wall"), not an agent
+    # source. A host with no such sample has no wall power component. An unavailable reading
+    # (stored as a NULL value with its reason in the labels) stays unavailable, never zero.
+    wall: Component | None = None
+    wall_rows = pick("wall", "wall_watts")
+    if wall_rows:
+        newest = max(wall_rows, key=lambda x: x["ts"])
+        if newest["value"] is None:
+            wall = Component("wall_power", None, "W", "unknown",
+                             newest["labels"].get("reason") or "the power entity could not be read")
+        elif now - newest["ts"] > STALE_AFTER_S:
+            wall = Component("wall_power", None, "W", "unknown",
+                             f"wall_power sample is stale: {now - newest['ts']:.0f}s old")
+        else:
+            wall = Component("wall_power", float(newest["value"]), "W", "ok")
+
     temps: list[Component] = []
     for r in pick("hwmon", "temp"):
         lab = {"chip": r["labels"].get("chip", ""), "sensor": r["labels"].get("sensor", "")}
@@ -372,4 +389,4 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     crash_rows = [{"id": e["id"], "kind": e["kind"].split(".", 1)[1], "ts": e["ts"]} for e in crashes]
     return HostSummary(host, now, cpu, memory, power, temps, md, disks, sources, problems,
                        sorted(open_conditions), last_seen, unmeasured, not_present, sorted(gone),
-                       silent, crash_rows, ups)
+                       silent, crash_rows, ups, wall)

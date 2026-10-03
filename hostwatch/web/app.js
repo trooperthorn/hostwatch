@@ -53,7 +53,7 @@
     if (h.last_seen !== null) { tile.appendChild(el("p", "Last seen " + new Date(h.last_seen * 1000).toLocaleString(), "muted")); }
     addList(tile, "CPU", [h.cpu]);
     addList(tile, "Memory", [h.memory]);
-    addList(tile, "Power", [h.power]);
+    addList(tile, "Power", h.wall_power ? [h.power, h.wall_power] : [h.power]);
     addList(tile, "Temperatures", h.temperatures);
     addList(tile, "RAID", h.raid);
     addList(tile, "Pools", h.pools);

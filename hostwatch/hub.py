@@ -483,10 +483,18 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
 
     summary_opts = {"silent_after_s": cfg.silence_window_s, "crash_hold_s": cfg.crash_hold_s}
 
+    def summarize(host: str, now: float | None = None):
+        """The host summary, built after the wall power entity (if the host has one) is read and
+        stored as a wall_watts sample."""
+        from .witness.power import read_wall_power
+        now = time.time() if now is None else now
+        read_wall_power(store, power_witness, host, now)
+        return build_host_summary(store, host, now, **summary_opts)
+
     def orion_summary(host: str):
         if not any(a["host"] == host for a in store.agents()) and not any(r["host"] == host for r in store.sources()):
             raise HTTPException(status_code=404, detail="unknown host")
-        return build_host_summary(store, host, time.time(), **summary_opts)
+        return summarize(host)
 
     HISTORY_MAX_POINTS = 1000
     HISTORY_MAX_RANGE_S = 366 * 86400.0
@@ -513,14 +521,14 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
     def ui_status():
         now = time.time()
         names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
-        return ui_status_doc.status_document([build_host_summary(store, n, now, **summary_opts) for n in names], now)
+        return ui_status_doc.status_document([summarize(n, now) for n in names], now)
 
     @app.get("/api/v1/orion/hosts", dependencies=[Depends(require_scope("read:metrics"))])
     def orion_hosts():
         names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
         out: dict = {"host_count": len(names)}
         for name, key in orion_doc.host_keys(names).items():
-            s = build_host_summary(store, name, time.time(), **summary_opts)
+            s = summarize(name)
             out[f"host_{key}_name"] = name
             out[f"host_{key}_status"] = s.overall_status
         return out
@@ -541,7 +549,7 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
         def metrics():
             now = time.time()
             names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
-            body = prom.render([build_host_summary(store, n, now, **summary_opts) for n in names])
+            body = prom.render([summarize(n, now) for n in names])
             return Response(content=body, media_type=prom.CONTENT_TYPE)
 
     return app

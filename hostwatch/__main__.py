@@ -130,7 +130,7 @@ def serve_hub(app, cfg: Config) -> None:
             s.close()
 
 
-def build_ha(cfg: Config, store, transport_factory=None):
+def build_ha(cfg: Config, store, transport_factory=None, wall_power=None):
     """The Home Assistant discovery publisher and events publisher, sharing one MQTT client, or
     (None, None) when MQTT is not configured. Only the hub and all roles call this."""
     if not cfg.mqtt_enabled:
@@ -140,7 +140,8 @@ def build_ha(cfg: Config, store, transport_factory=None):
     from .integrations.mqtt_client import MqttClient, PahoTransport
     transport = transport_factory() if transport_factory else PahoTransport("hostwatch-hub")
     client = MqttClient(cfg, transport)
-    return HomeAssistantPublisher(cfg, client, store), HomeAssistantEventPublisher(cfg, client, store)
+    return (HomeAssistantPublisher(cfg, client, store, wall_power=wall_power),
+            HomeAssistantEventPublisher(cfg, client, store))
 
 
 def build_witness(cfg: Config):
@@ -190,11 +191,16 @@ def main(argv: list[str] | None = None) -> int:
                                   hub_url=local_agent_hub_url(cfg))
     agent = Agent(cfg) if cfg.role == "all" else None
     thread = threading.Thread(target=agent.run, name="agent", daemon=True) if agent else None
-    ha_publisher, ha_events = build_ha(cfg, store)
+    witness = build_witness(cfg)
+    wall_power = None
+    if witness is not None:
+        from .witness.power import read_wall_power
+        wall_power = lambda host, now: read_wall_power(store, witness, host, now)  # noqa: E731
+    ha_publisher, ha_events = build_ha(cfg, store, wall_power=wall_power)
     app = create_app(cfg, store,
                      on_start=chain(thread.start if thread else None, ha_events.start if ha_events else None),
                      on_stop=chain(ha_events.stop if ha_events else None, agent.stop_and_wait if agent else None),
-                     ha_publisher=ha_publisher, power_witness=build_witness(cfg))
+                     ha_publisher=ha_publisher, power_witness=witness)
     serve_hub(app, cfg)
     return 0
 

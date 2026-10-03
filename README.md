@@ -320,6 +320,28 @@ by kind and window with no row cap, and a record cut short is marked incomplete.
 detail of the new `boot.power_loss` event. The exit test is `tests/test_phase6_exit.py`; the real
 plug pull and UPS checks are owner checks listed in `UNVERIFIED.md`.
 
+Z-Wave plug and wall power. A host may have several entities, written `host=entity1|entity2`, and
+each has a role: `switch` (outage when `unavailable`, `unknown` or `off`), `node_status` (a Z-Wave
+node status entity; outage when `dead`, `unavailable` or `unknown`, while `alive`, `awake` and
+`asleep` are not outages) or `power` (a watt reading). Write the role as a prefix, for example
+`MediaIn-SVR=node_status:sensor.plug_node_status|power:sensor.plug_electric_consumption_power`.
+Without a prefix the role is inferred: an id ending in `_node_status` is a node status, a `sensor`
+id ending in `_power` is a power reading, anything else is a switch. A Z-Wave plug cannot report its
+own power loss, so its node status is what shows a dead period. Evidence from several entities is
+combined, so an outage on any of them counts; an entity that cannot be read is named in the reason
+and does not hide the others. The power entity is read by the hub on each summary build (a reading
+under 10 seconds old is reused) and stored as a `wall_watts` sample for the host. It is shown next
+to package power in the web UI, in the Orion power group as `wall_power_w`, in Prometheus as
+`hostwatch_wall_power_watts` and as the Home Assistant sensor `wall_power`. A power entity that is
+unavailable, unknown, not a number or in a unit other than W or kW stays unavailable with a reason
+and is never shown as zero.
+
+Z-Wave detection lag. The Z-Wave controller marks a node dead only after it has failed to reach
+the node for some time, so an outage shorter than that is not witnessed. Such a boot stays
+`unknown_unclean` instead of becoming `boot.power_loss`. Pair a Z-Wave plug with a UPS event or a
+second entity where that matters. The detection time on the real controller is an owner check in
+`UNVERIFIED.md`.
+
 ## Tests
 
 ```
