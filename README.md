@@ -298,7 +298,8 @@ NUT UPS client (agent side). Set `HOSTWATCH_NUT_HOST` and `HOSTWATCH_NUT_UPS`; t
 to 3493. `HOSTWATCH_NUT_USER` and `HOSTWATCH_NUT_PASSWORD_FILE` are optional and only needed if your
 `upsd` demands a login. The client sends read-only `LIST VAR` requests, never `SET`, `INSTCMD` or
 `FSD`. It stores `ups.status`, battery charge and runtime, input voltage and load as samples and
-raises `ups.on_battery`, `ups.low_battery` and `ups.on_line` events.
+raises `ups.on_battery`, `ups.low_battery` and `ups.on_line` events. A failed poll is retried every
+cycle, and the UPS name and user may not contain spaces or control characters.
 
 Home Assistant smart plug (hub side). Create a long-lived access token in your Home Assistant
 profile, save it to a file readable only by the container user, and mount that file read-only.

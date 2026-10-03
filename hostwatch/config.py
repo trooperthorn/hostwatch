@@ -19,6 +19,20 @@ from pathlib import Path
 log = logging.getLogger(__name__)
 
 
+class Secret(str):
+    """A string whose repr hides its value, so a logged or printed Config never leaks it.
+
+    It behaves as a normal str everywhere else (comparison, encoding, slicing), which keeps
+    credential checks unchanged. str() and format() still return the value on purpose: code that
+    sends the credential needs it. Only repr, which dataclass reprs and log %r use, is redacted.
+    """
+
+    __slots__ = ()
+
+    def __repr__(self) -> str:
+        return "Secret('***')" if self else "Secret('')"
+
+
 def _env(name: str, default: str) -> str:
     return os.environ.get(name, default)
 
@@ -60,8 +74,8 @@ class Config:
     hub_url: str = field(default_factory=lambda: _env("HOSTWATCH_HUB_URL", "http://127.0.0.1:8090"))
     hub_bind: str = field(default_factory=lambda: _env("HOSTWATCH_HUB_BIND", "127.0.0.1"))
     hub_port: int = field(default_factory=lambda: int(_env("HOSTWATCH_HUB_PORT", "8090")))
-    ingest_token: str = field(default_factory=lambda: _env("HOSTWATCH_INGEST_TOKEN", ""))
-    ingest_key: str = field(default_factory=lambda: _env("HOSTWATCH_INGEST_KEY", ""))
+    ingest_token: str = field(default_factory=lambda: Secret(_env("HOSTWATCH_INGEST_TOKEN", "")), repr=False)
+    ingest_key: str = field(default_factory=lambda: Secret(_env("HOSTWATCH_INGEST_KEY", "")), repr=False)
     legacy_token_disabled: bool = field(
         default_factory=lambda: parse_bool("HOSTWATCH_LEGACY_TOKEN_DISABLED"))
     argon2_time_cost: int = field(default_factory=lambda: int(_env("HOSTWATCH_ARGON2_TIME_COST", "3")))
@@ -92,7 +106,7 @@ class Config:
     mqtt_host: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_HOST", "").strip())
     mqtt_port: int = field(default_factory=lambda: int(_env("HOSTWATCH_MQTT_PORT", "1883")))
     mqtt_username: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_USERNAME", ""))
-    mqtt_password: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_PASSWORD", ""), repr=False)
+    mqtt_password: str = field(default_factory=lambda: Secret(_env("HOSTWATCH_MQTT_PASSWORD", "")), repr=False)
     mqtt_password_file: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_PASSWORD_FILE", ""))
     mqtt_tls: bool = field(default_factory=lambda: parse_bool("HOSTWATCH_MQTT_TLS"))
     mqtt_tls_ca: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_TLS_CA", ""))
@@ -104,7 +118,15 @@ class Config:
     mqtt_events_interval: float = field(default_factory=lambda: float(_env("HOSTWATCH_MQTT_EVENTS_INTERVAL", "10")))
     prometheus_enabled: bool = field(default_factory=lambda: parse_bool("HOSTWATCH_PROMETHEUS"))
 
+    def __post_init__(self) -> None:
+        # Values passed explicitly or through dataclasses.replace are plain str; wrap them too.
+        for name in ("ingest_token", "ingest_key", "mqtt_password"):
+            value = getattr(self, name)
+            if not isinstance(value, Secret):
+                object.__setattr__(self, name, Secret(value))
+
     def validate(self) -> None:
+        self._validate_nut()
         if self.role not in {"all", "hub", "agent"}:
             raise ValueError(f"HOSTWATCH_ROLE must be all, hub, or agent (got {self.role!r})")
         if self.mtls_mode not in {"off", "uvicorn", "proxy"}:
@@ -151,6 +173,13 @@ class Config:
             raise ValueError(f"HOSTWATCH_WITNESS_RETRY_S must be 0 or more seconds (got {self.witness_retry_s})")
         self._validate_bind()
         self._validate_mqtt()
+
+    def _validate_nut(self) -> None:
+        """The UPS name and user go into protocol lines, so they may hold no whitespace or control
+        characters. A newline there would otherwise inject a second command."""
+        for var, value in (("HOSTWATCH_NUT_UPS", self.nut_ups), ("HOSTWATCH_NUT_USER", self.nut_user)):
+            if any(ch.isspace() or ord(ch) < 32 or ord(ch) == 127 for ch in value):
+                raise ValueError(f"{var} must not contain spaces, tabs, CR, LF or other control characters")
 
     @property
     def mqtt_enabled(self) -> bool:

@@ -44,6 +44,20 @@ source unavailable with the reason. The threshold engine turns the `OL`, `OB` an
 `LB` flags into the events `ups.on_battery` (warning), `ups.low_battery` (critical)
 and `ups.on_line` (info); see Threshold events.
 
+Three hardening rules apply to this source. First, `NutClient._send` refuses any
+line containing a CR or LF, and config validation refuses a `HOSTWATCH_NUT_UPS`
+or `HOSTWATCH_NUT_USER` containing whitespace or control characters, so a value
+cannot smuggle a second protocol line past the command allow-list. Second, a
+failed poll does not wait for the next re-detection: the agent polls a configured
+`nut` source every cycle (the collector sets `retry_each_cycle`), marks it
+unavailable for the cycle that failed, and marks it available again as soon as a
+poll succeeds, so an on-battery transition in between is not missed. Third, the
+credentials held in `Config` (`ingest_token`, `ingest_key`, `mqtt_password`) use
+the `Secret` string type, whose repr is redacted, so a printed or logged `Config`
+never shows them. The NUT password, the Home Assistant token and the MQTT
+password file are held only as file paths. The redaction covers repr only; code
+that formats a secret with `str()` still gets the value.
+
 ### Home Assistant plug witness (`hostwatch/witness/homeassistant.py`)
 
 A smart plug on the same circuit as a host drops off the network when the power

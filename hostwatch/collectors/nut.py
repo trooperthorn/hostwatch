@@ -75,6 +75,9 @@ class NutClient:
         self._buf = b""
 
     def _send(self, line: str) -> None:
+        if chr(13) in line or chr(10) in line:
+            # A CR or LF would let a value smuggle a second protocol line past the allow-list.
+            raise NutError("refusing to send a line containing a CR or LF")
         verb = line.split(" ", 1)[0]
         if verb not in ALLOWED_COMMANDS:
             raise NutError(f"refusing to send command {verb!r}")
@@ -151,6 +154,9 @@ class NutClient:
 
 class NutCollector(Collector):
     id = "nut"
+    # A failed poll must not hide the source until the next re-detection: an on-battery
+    # transition in that window would be missed. The agent polls it every cycle instead.
+    retry_each_cycle = True
 
     def __init__(self, sysfs, procfs, host: str = "", ups: str = "", user: str = "",
                  password_file: str = "", port: int = 3493, timeout: float = 5.0) -> None:

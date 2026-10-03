@@ -297,15 +297,27 @@ class Agent:
             self.status[c.id] = SourceStatus(source=c.id, available=ok, reason=reason, present=not absent)
         self._last_detect = time.monotonic()
 
+    def _retry_now(self, c) -> bool:
+        """A configured polled source is tried again every cycle after a failure."""
+        if not c.retry_each_cycle:
+            return False
+        try:
+            return not c.is_absent()
+        except Exception:
+            return False
+
     def collect_once(self) -> Batch:
         if self._last_detect is None or time.monotonic() - self._last_detect > self.cfg.redetect_s:
             self.detect()
         samples = []
         for c in self.collectors:
-            if not self.status[c.id].available:
+            if not self.status[c.id].available and not self._retry_now(c):
                 continue
             try:
                 samples.extend(c.collect())
+                if not self.status[c.id].available:
+                    log.info("source %s: available again", c.id)
+                    self.status[c.id] = SourceStatus(source=c.id, available=True, reason="")
             except Exception as exc:
                 log.warning("collector %s failed: %s", c.id, exc)
                 self.status[c.id] = SourceStatus(source=c.id, available=False,

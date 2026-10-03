@@ -21,6 +21,9 @@ from ..schema import Sample
 
 class Collector:
     id: str = "base"
+    # True for a configured network source that is polled every cycle even after a failure,
+    # being unavailable for that cycle only. Local sysfs sources wait for re-detection.
+    retry_each_cycle: bool = False
 
     def __init__(self, sysfs: Path, procfs: Path) -> None:
         self.sysfs = sysfs
