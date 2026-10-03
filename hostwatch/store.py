@@ -473,6 +473,43 @@ class Store:
             self._db.execute("UPDATE events SET detail = ? WHERE id = ?", (json.dumps(merged, sort_keys=True), row[0]))
             return True
 
+    def events_in_window(self, host: str, kinds: tuple[str, ...], lo: float, hi: float) -> list[dict]:
+        """Every event of the given kinds for the host with lo <= ts <= hi, oldest first. The
+        filter runs in SQL and there is deliberately no row cap, so unrelated newer events cannot
+        hide one."""
+        marks = ",".join("?" for _ in kinds)
+        with self._lock:
+            cur = self._db.execute(
+                "SELECT id, host, ts, kind, severity, source, title, detail, dedup_key, boot_id FROM events "
+                f"WHERE host = ? AND kind IN ({marks}) AND ts >= ? AND ts <= ? ORDER BY ts, id",
+                (host, *kinds, lo, hi))
+            cols = [c[0] for c in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            r["detail"] = json.loads(r["detail"])
+        return rows
+
+    def pending_witness_events(self) -> list[dict]:
+        """Boot events whose last power witness assessment was incomplete and still awaits a retry."""
+        with self._lock:
+            cur = self._db.execute(
+                "SELECT id, host, ts, kind, severity, source, title, detail, dedup_key, boot_id FROM events "
+                "WHERE source = 'boot' AND json_extract(detail, '$.power_witness.retry_pending') = 1 ORDER BY id")
+            cols = [c[0] for c in cur.description]
+            rows = [dict(zip(cols, r)) for r in cur.fetchall()]
+        for r in rows:
+            r["detail"] = json.loads(r["detail"])
+        return rows
+
+    def boot_events(self, host: str, boot_id: str) -> list[dict]:
+        """Boot events stored for the host and boot id."""
+        rows = self._rows("SELECT id, host, ts, kind, severity, source, title, detail, dedup_key, boot_id "
+                          "FROM events WHERE host = ? AND boot_id = ? AND source = 'boot' ORDER BY id",
+                          (host, boot_id))
+        for r in rows:
+            r["detail"] = json.loads(r["detail"])
+        return rows
+
     def events(self, host: str | None = None, since: float | None = None,
                kind: str | None = None, limit: int = 100, source: str | None = None,
                before: float | None = None, before_id: int | None = None) -> list[dict]:

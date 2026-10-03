@@ -30,7 +30,7 @@ from . import auth
 from .config import Config
 from .store import Store
 
-COMMANDS = {"user", "key", "cert", "source", "event", "bootstrap-admin"}
+COMMANDS = {"user", "key", "cert", "source", "event", "boot", "bootstrap-admin"}
 MIN_PASSWORD_LEN = 12
 
 
@@ -63,6 +63,10 @@ def _parser() -> argparse.ArgumentParser:
     event = sub.add_parser("event", help="manage events").add_subparsers(dest="action", required=True)
     event.add_parser("ack", help="acknowledge a crash event so it stops holding the host critical").add_argument(
         "event_id", type=int)
+    bootp = sub.add_parser("boot", help="manage boot events").add_subparsers(dest="action", required=True)
+    reassess = bootp.add_parser("reassess", help="ask the power witnesses again about an unclean boot")
+    reassess.add_argument("host")
+    reassess.add_argument("boot_id")
     return p
 
 
@@ -168,6 +172,23 @@ def run(argv: list[str], cfg: Config) -> int:
         audit(0, detail)
         print(f"Forgot {args.source!r} on {args.host!r}. A report of present false now reads as absent "
               "by design until the source is seen again.", file=sys.stderr)
+        return 0
+
+    if args.command == "boot":
+        from .witness.homeassistant import HomeAssistantWitness
+        from .witness.power import assess_boot_event, eligible
+        detail = {"host": args.host[:128], "boot_id": args.boot_id[:64]}
+        rows = store.boot_events(args.host, args.boot_id)
+        if any(r["kind"] == "boot.power_loss" for r in rows):
+            return fail("that boot is already recorded as a power loss", detail)
+        rows = [r for r in rows if eligible(r)]
+        if not rows:
+            return fail("no unclean boot event for that host and boot id", detail)
+        witness = HomeAssistantWitness.from_config(cfg)
+        outcome = assess_boot_event(store, witness if witness.configured else None, args.host, rows[0],
+                                    cfg.witness_skew_s, cfg.witness_retry_s, force=True)
+        audit(0, {**detail, "outcome": outcome or "nothing applied"})
+        print(f"Reassessed boot {args.boot_id!r} on {args.host!r}: {outcome or 'nothing applied'}.", file=sys.stderr)
         return 0
 
     if args.command == "event":

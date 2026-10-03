@@ -114,6 +114,9 @@ class Principal:
         return scope in self.scopes or ("admin" in self.scopes and scope != "ingest")
 
 
+WITNESS_RETRY_TICK_S = 60.0
+
+
 def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_clock=time.monotonic,
                mtls_identity: Callable[[Request], Principal | None] | None = None,
                ha_publisher=None, ha_interval_s: float = 30.0, power_witness=None) -> FastAPI:
@@ -137,9 +140,25 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
                 log.warning("Home Assistant publish failed (%s)", type(exc).__name__)
             await asyncio.sleep(ha_interval_s)
 
+    async def witness_retry_loop(startup_done: asyncio.Event):
+        from .witness.power import retry_pending
+        startup = True
+        while True:
+            try:
+                await asyncio.to_thread(retry_pending, store, power_witness, cfg.witness_skew_s,
+                                        cfg.witness_retry_s, time.time(), startup)
+            except Exception as exc:
+                log.warning("power witness retry pass failed (%s)", type(exc).__name__)
+            if startup:
+                startup = False
+                startup_done.set()
+            await asyncio.sleep(WITNESS_RETRY_TICK_S)
+
     @asynccontextmanager
     async def lifespan(app: FastAPI):
         task = asyncio.create_task(maintenance_loop())
+        app.state.witness_startup_done = asyncio.Event()
+        retry_task = asyncio.create_task(witness_retry_loop(app.state.witness_startup_done))
         ha_task = asyncio.create_task(ha_loop()) if ha_publisher else None
         if on_start:
             on_start()
@@ -147,6 +166,8 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
         if on_stop:
             on_stop()
         task.cancel()
+        retry_task.cancel()
+        await asyncio.gather(retry_task, return_exceptions=True)
         if ha_task:
             ha_task.cancel()
             await asyncio.gather(ha_task, return_exceptions=True)
@@ -425,7 +446,8 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
             boots = [d for d in (ev.model_dump() for ev in batch.events) if eligible(d)]
             if boots:
                 # After the response: the witness may take seconds and the agent must not wait.
-                background.add_task(assess_batch_events, store, power_witness, batch.host, boots, cfg.witness_skew_s)
+                background.add_task(assess_batch_events, store, power_witness, batch.host, boots, cfg.witness_skew_s,
+                                    cfg.witness_retry_s)
         out = {"stored": n, "events_stored": e}
         if duplicate:
             out["duplicate"] = True

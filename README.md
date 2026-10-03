@@ -308,7 +308,14 @@ Then set `HOSTWATCH_HA_URL`, `HOSTWATCH_HA_TOKEN_FILE` (the path inside the cont
 from the file at call time and never logged. A period where the plug was unavailable, unknown or
 off that overlaps the window from the host's last heartbeat to its next boot, widened by
 `HOSTWATCH_WITNESS_SKEW_S` (default 120 seconds), counts as evidence. A stored UPS on-battery event
-in the same window counts too. The original boot event is kept and every piece of evidence is in the
+in the same window counts too. An outage counts only if it began no later than the boot plus the
+allowance and ended no earlier than the last heartbeat minus the allowance; one that began after
+that is recorded under `non_confirming` and proves nothing. `unknown_unclean`, an abrupt
+`agent_stopped` and `unknown` boots are all assessed. When a witness was unavailable and nothing
+confirmed an outage, the hub asks again with a growing delay for `HOSTWATCH_WITNESS_RETRY_S` seconds
+(default 86400, 0 turns retries off) and once at every hub start; `python -m hostwatch boot reassess
+HOST BOOT_ID` asks again on demand and is written to the audit log. UPS events are selected in SQL
+by kind and window with no row cap, and a record cut short is marked incomplete. The original boot event is kept and every piece of evidence is in the
 detail of the new `boot.power_loss` event. The exit test is `tests/test_phase6_exit.py`; the real
 plug pull and UPS checks are owner checks listed in `UNVERIFIED.md`.
 

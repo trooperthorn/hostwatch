@@ -136,8 +136,8 @@ but inconclusive, or journal not checked).
 
 ### Witness-confirmed power loss (`hostwatch/witness/power.py`)
 
-When the hub stores a `boot.unknown_unclean` event (or a `boot.agent_stopped` event whose
-journal hints show an abrupt end), it asks the witnesses about the window from the previous
+When the hub stores a `boot.unknown_unclean` or `boot.unknown` event (or a `boot.agent_stopped`
+event whose journal hints show an abrupt end), it asks the witnesses about the window from the previous
 heartbeat minus a skew allowance to the boot time plus the allowance. The boot time is the
 event's `detail.detected_at`, when the agent noticed the new boot. The allowance is
 `HOSTWATCH_WITNESS_SKEW_S` (default 120 seconds) and absorbs clock differences between the
@@ -153,7 +153,24 @@ UPS events, and `supersedes`. The original event is kept and gets the same `powe
 with `superseded_by`. Otherwise the original event stays and `detail.power_witness` records
 what was asked and why there was no confirmation. A witness that is not configured, refuses the
 token or cannot be reached is recorded as unavailable with its reason, never as no outage.
-An event that already has `power_witness` is not assessed again, so a resend adds nothing.
+An event that already has `power_witness` is not assessed again by a resend, so a resend adds
+nothing.
+
+An outage confirms only if it began no later than the boot time plus the allowance and ended no
+earlier than the last heartbeat minus the allowance. The witnesses are asked one hour beyond the
+window (`LOOKAHEAD_S`), and an outage found there is kept under `non_confirming` for both the plug
+and the UPS, because a host that was already back is not evidence of a power cut. UPS events are
+read with one SQL query by kind and time window and no row limit, so newer unrelated events
+cannot hide one. At most 50 are recorded in the detail; when more matched, `ups.total` holds the
+count and `ups.incomplete` is true.
+
+When any witness was unavailable and nothing confirmed an outage, the evidence carries
+`incomplete` and `retry_pending` with a `retry` record (first attempt, attempts, next attempt and
+expiry). The hub loop checks every 60 seconds, retries when the backoff (60 seconds doubling to
+one hour) has passed, retries every pending event once at hub start, and stops at
+`HOSTWATCH_WITNESS_RETRY_S` (default 86400, 0 disables) by setting `retry_expired`. A retry that
+finds an outage adds `boot.power_loss` as above. `python -m hostwatch boot reassess HOST BOOT_ID`
+assesses again regardless of the period and writes an audit row of kind `cli`.
 
 Precedence of the final classification, strongest first:
 
