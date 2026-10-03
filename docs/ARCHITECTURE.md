@@ -44,6 +44,23 @@ source unavailable with the reason. The threshold engine turns the `OL`, `OB` an
 `LB` flags into the events `ups.on_battery` (warning), `ups.low_battery` (critical)
 and `ups.on_line` (info); see Threshold events.
 
+### Home Assistant plug witness (`hostwatch/witness/homeassistant.py`)
+
+A smart plug on the same circuit as a host drops off the network when the power
+fails, so its history can confirm an outage the host cannot see. The hub reads
+it; the agent does not. It is off unless `HOSTWATCH_HA_URL`,
+`HOSTWATCH_HA_TOKEN_FILE` and `HOSTWATCH_POWER_WITNESS` (`host=entity_id` pairs
+separated by commas) are set. The long-lived token is read from the file at call
+time, sent only as a bearer header, and never logged or placed in a reason. TLS
+verification is always on. `outages(host, start, end)` asks the REST history
+endpoint for the entity and returns intervals, in epoch UTC and clipped to the
+window, where the state was `unavailable`, `unknown` or `off`. An unreachable
+server, a 401 or 403, another HTTP error, an empty history (a missing entity) or
+an unexpected shape returns `available=False` with a reason. An empty interval
+list is returned only when Home Assistant did answer with history, so a missing
+witness is never read as proof of no outage. The boot classifier does not use
+this reader yet.
+
 ## Data flow
 
 ```
