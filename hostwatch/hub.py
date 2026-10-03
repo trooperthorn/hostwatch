@@ -18,12 +18,14 @@ import hmac
 import logging
 import time
 from contextlib import asynccontextmanager
+from importlib.resources import files
 from dataclasses import dataclass, field
 from typing import Callable
 
 from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
-from fastapi.responses import JSONResponse
+from fastapi.responses import FileResponse, JSONResponse
+from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__, auth
@@ -87,6 +89,10 @@ class DenialAggregator:
         covered = entry[1] + 1
         self._state[peer] = [now, 0]
         return covered
+
+
+CSP = ("default-src 'self'; script-src 'self'; style-src 'self'; object-src 'none'; "
+       "frame-ancestors 'none'; base-uri 'none'")
 
 
 def csrf_token_for(session_token: str) -> str:
@@ -249,7 +255,9 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
 
     async def _write_audit(request: Request, status: int) -> bool:
         """Append the audit row for this request. Returns False only if the write failed."""
-        if request.url.path == "/internal/v1/health":
+        if request.url.path == "/internal/v1/health" or request.url.path == "/"                 or request.url.path.startswith("/static/"):
+            # The UI shell is public static content. Browsers send the session cookie with every
+            # asset request, so auditing these would bury the real access rows.
             return True
         principal = getattr(request.state, "principal", None)
         override = getattr(request.state, "audit", None)
@@ -307,6 +315,25 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
                 except Exception as exc:
                     log.error("audit write failed: %s", exc)
             return JSONResponse(status_code=403, content={"detail": "forbidden"})
+
+    @app.middleware("http")
+    async def security_headers(request: Request, call_next):
+        # Outermost middleware, so it also covers allowlist refusals and audit failures.
+        response = await call_next(request)
+        response.headers["Content-Security-Policy"] = CSP
+        response.headers["X-Content-Type-Options"] = "nosniff"
+        response.headers["Referrer-Policy"] = "no-referrer"
+        return response
+
+    # Static UI shell: public by design, it holds no data. Every data call it makes goes through
+    # the authenticated API.
+    web_dir = files("hostwatch").joinpath("web")
+
+    async def index(request: Request):
+        return FileResponse(str(web_dir.joinpath("index.html")), media_type="text/html")
+
+    app.add_route("/", index, methods=["GET"], include_in_schema=False)
+    app.mount("/static", StaticFiles(directory=str(web_dir)), name="static")
 
     def _uniform_401() -> JSONResponse:
         return JSONResponse(status_code=401, content={"detail": "invalid credentials"})

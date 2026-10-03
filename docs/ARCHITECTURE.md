@@ -640,6 +640,26 @@ and names both kinds (`session_cookie` and `bearer`). This is enforced in
 refused by `Config.validate`, because the hub routes any `hw_` bearer to the API
 key lookup and such a token could never match.
 
+## Web UI shell (Phase 5, first slice)
+
+The hub serves a static page from `hostwatch/web/`: `GET /` returns `index.html` and
+`/static/` serves `app.css` and `app.js`. There is no frontend build step. The files are
+package data in `pyproject.toml`, so the wheel and the Docker image, which installs the
+package, both contain them. The shell holds no data, so these paths need no credential; every
+data call the page makes goes through the authenticated API. The page signs in with
+`POST /api/v1/login`, keeps the returned CSRF token in memory, and sends it in the
+`X-CSRF-Token` header on state-changing calls. All text from the API is set with
+`textContent`, never `innerHTML`.
+
+An outermost middleware adds `Content-Security-Policy` (`default-src 'self'; script-src 'self';
+style-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'`),
+`X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` to every response,
+including allowlist refusals. The source allowlist applies to the UI paths like any other.
+Requests for `/` and `/static/` are not audited, because browsers send the session cookie with
+every asset request and the rows would hide real access. The CSS uses colour tokens with a
+`prefers-color-scheme` dark variant and a visible `:focus-visible` outline. Status tiles, the
+timeline, charts and key management arrive in later slices. Tests: `tests/test_ui_shell.py`.
+
 ## Security model
 
 Control summary for Phase 3, each labelled honestly. Enforced means the code

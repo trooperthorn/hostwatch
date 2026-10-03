@@ -178,9 +178,10 @@ def test_default_deny_every_route_but_health(tmp_path):
     seen = []
     for route in client.app.routes:
         methods = getattr(route, "methods", None)
-        # Health and login are the only routes that answer without a credential. Login
-        # grants nothing without a correct password (tests/test_login.py).
-        if not methods or route.path in ("/internal/v1/health", "/api/v1/login"):
+        # Health, login and the static UI shell page are the only routes that answer without a
+        # credential. Login grants nothing without a correct password (tests/test_login.py), and
+        # the shell holds no data (tests/test_ui_shell.py).
+        if not methods or route.path in ("/internal/v1/health", "/api/v1/login", "/"):
             continue
         # Path parameters get a placeholder value: authentication runs before the handler, so
         # the value is never looked up and every parameterised route must still answer 401.

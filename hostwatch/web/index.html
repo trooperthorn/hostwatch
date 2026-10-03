@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="color-scheme" content="light dark">
+<title>hostwatch</title>
+<link rel="stylesheet" href="/static/app.css">
+<script src="/static/app.js" defer></script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to content</a>
+<header class="bar">
+  <h1>hostwatch</h1>
+  <button type="button" id="logout" hidden>Sign out</button>
+</header>
+<main id="main" tabindex="-1">
+  <noscript><p>This page needs JavaScript to sign in and show host status.</p></noscript>
+  <section id="login-view" aria-labelledby="login-title" hidden>
+    <h2 id="login-title">Sign in</h2>
+    <form id="login-form" autocomplete="on">
+      <label for="username">User name</label>
+      <input id="username" name="username" type="text" autocomplete="username" required>
+      <label for="password">Password</label>
+      <input id="password" name="password" type="password" autocomplete="current-password" required>
+      <button type="submit">Sign in</button>
+      <p id="login-error" role="alert"></p>
+    </form>
+  </section>
+  <section id="app-view" aria-labelledby="app-title" hidden>
+    <h2 id="app-title">Status</h2>
+    <p id="app-user"></p>
+  </section>
+</main>
+</body>
+</html>
