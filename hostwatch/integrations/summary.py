@@ -64,6 +64,8 @@ CPU_TEMP_C = (80.0, 90.0)
 # input that floats at 100 C, is informational so it cannot raise an alarm.
 CPU_TEMP_CHIPS = frozenset({"coretemp", "k10temp", "zenpower", "cpu_thermal"})
 INFORMATIONAL_NOTE = "informational: no threshold applies to this sensor"
+FAN_INFORMATIONAL_NOTE = ("informational: reads 0 RPM and is not listed in HOSTWATCH_HWMON_REQUIRED_FANS, "
+                          "so an unused header cannot raise an alarm")
 DISK_TEMP_C = (50.0, 60.0)
 MEMORY_USED_PCT = (90.0, 97.0)
 
@@ -81,6 +83,8 @@ class Component:
     state: str = "unknown"
     reason: str = ""
     labels: dict[str, str] = field(default_factory=dict)
+    source: str = ""
+    ts: float | None = None
 
     @property
     def available(self) -> bool:
@@ -126,7 +130,9 @@ def _merge_pool(pool: str, parts: list[tuple[str, Component]]) -> Component:
                 labels[f"{src}_{k}"] = v
         if c.reason:
             reasons.append(f"{src}: {c.reason}")
-    return Component(f"pool.{pool}", worst.value, worst.unit, worst.state, "; ".join(reasons), labels)
+    stamps = [c.ts for _, c in parts if c.ts is not None]
+    return Component(f"pool.{pool}", worst.value, worst.unit, worst.state, "; ".join(reasons), labels,
+                     labels["source"], max(stamps) if stamps else None)
 
 
 def _level(value: float, limits: tuple[float, float]) -> str:
@@ -156,10 +162,11 @@ class HostSummary:
     wall_power: Component | None = None
     pools: list[Component] = field(default_factory=list)
     pi: Component | None = None
+    fans: list[Component] = field(default_factory=list)
 
     def components(self) -> list[Component]:
         extra = [c for c in (self.ups, self.wall_power, self.pi) if c is not None]
-        return [self.cpu, self.memory, self.package_power, *self.temperatures, *self.md_arrays,
+        return [self.cpu, self.memory, self.package_power, *self.temperatures, *self.fans, *self.md_arrays,
                 *self.pools, *self.disks, *extra, *self.sources.values()]
 
     @property
@@ -213,7 +220,8 @@ def _label(labels: dict[str, str]) -> str:
 
 
 def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: float = SILENT_AFTER_S,
-                       crash_hold_s: float = CRASH_HOLD_S, cpu_sensors: tuple[str, ...] = ()) -> HostSummary:
+                       crash_hold_s: float = CRASH_HOLD_S, cpu_sensors: tuple[str, ...] = (),
+                       required_fans: tuple[str, ...] = ()) -> HostSummary:
     rows = [r for r in store.latest(host) if r["host"] == host]
     src_rows = {r["source"]: r for r in store.sources() if r["host"] == host}
     events = store.events(host=host, since=now - EVENT_WINDOW_S, source="thresholds", limit=1000)
@@ -254,6 +262,12 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
              labels: dict[str, str] | None = None) -> Component:
         """Build a component from the newest of `metric_rows`, or explain why not."""
         labels = labels or {}
+        c = _comp(name, source, metric_rows, unit, limits, labels)
+        c.source = source
+        return c
+
+    def _comp(name: str, source: str, metric_rows: list[dict], unit: str, limits,
+              labels: dict[str, str]) -> Component:
         if source in gone:
             return Component(name, None, unit, "critical", gone[source], labels)
         if source in absent:
@@ -271,7 +285,7 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
             return Component(name, None, unit, "unknown",
                              f"{name} sample is stale: {now - r['ts']:.0f}s old", labels)
         state = _level(r["value"], limits) if limits else "ok"
-        return Component(name, float(r["value"]), unit, state, "", labels)
+        return Component(name, float(r["value"]), unit, state, "", labels, source, r["ts"])
 
     cpu = comp("cpu_utilization", "cpu", pick("cpu", "utilization_pct"), "%")
 
@@ -317,6 +331,19 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
         temps.append(c)
     if not temps and "hwmon" not in absent:
         temps.append(comp("temp", "hwmon", [], "C", CPU_TEMP_C))
+
+    # Fans from hwmon. A 0 RPM reading is informational (an unused header reads 0) unless the
+    # operator lists the fan in HOSTWATCH_HWMON_REQUIRED_FANS, where a stopped fan is critical.
+    fans: list[Component] = []
+    for r in pick("hwmon", "fan"):
+        lab = {"chip": r["labels"].get("chip", ""), "sensor": r["labels"].get("sensor", "")}
+        c = comp(f"fan.{_label(lab)}", "hwmon", [r], "RPM", None, lab)
+        if c.value is not None and c.value <= 0:
+            if sensor_matches(required_fans, lab["chip"], lab["sensor"]):
+                c.state, c.reason = "critical", "required fan reads 0 RPM"
+            else:
+                c.reason = FAN_INFORMATIONAL_NOTE
+        fans.append(c)
 
     md: list[Component] = []
     for arr in sorted({r["labels"].get("array", "") for r in rows if r["source"] == "mdraid"}):
@@ -503,4 +530,159 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     crash_rows = [{"id": e["id"], "kind": e["kind"].split(".", 1)[1], "ts": e["ts"]} for e in crashes]
     return HostSummary(host, now, cpu, memory, power, temps, md, disks, sources, problems,
                        sorted(open_conditions), last_seen, unmeasured, not_present, sorted(gone),
-                       silent, crash_rows, ups, wall, pools, pi)
+                       silent, crash_rows, ups, wall, pools, pi, fans)
+
+
+# ---------------------------------------------------------------------------------------------
+# Grouped view for the dashboard. Group membership and the worst status per group are decided
+# here once, so the page only draws what it is given.
+# ---------------------------------------------------------------------------------------------
+
+# (id, label, icon name in hostwatch/web/icons, sources that make an empty group worth showing).
+GROUPS: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    ("cpu", "CPU", "cpu", ("cpu",)),
+    ("memory", "Memory", "cpu-2", ("memory",)),
+    ("power", "Power", "bolt", ("rapl",)),
+    ("temperatures", "Temperatures", "temperature", ("hwmon",)),
+    ("fans", "Fans", "propeller", ()),
+    ("pools", "Storage pools", "database", ("zfs", "truenas")),
+    ("raid", "RAID", "stack-2", ("mdraid",)),
+    ("disks", "Disks", "device-floppy", ("scrutiny",)),
+    ("ups", "UPS", "battery-charging", ("nut",)),
+    ("pi_power", "Pi power supply", "plug-connected", ("rpi",)),
+    ("alerts", "Alerts and events", "bell", ()),
+    ("sources", "Sources", "plug-connected", ()),
+)
+GROUP_IDS = tuple(g[0] for g in GROUPS)
+
+STATUS_KEYS = ("good", "warning", "critical", "unknown")
+_KEY_FOR_STATE = {"ok": "good", "warning": "warning", "critical": "critical"}
+_KEY_TEXT = {"good": "Good", "warning": "Warning", "critical": "Critical", "unknown": "Unknown"}
+_KEY_RANK = {"unknown": 0, "good": 1, "warning": 2, "critical": 3}
+_HOST_KEY = {0: "good", 1: "warning", 2: "critical"}
+
+
+def status_key(state: str) -> str:
+    """good, warning, critical or unknown for a component state (not present reads unknown)."""
+    return _KEY_FOR_STATE.get(state, "unknown")
+
+
+def worst_key(keys: list[str]) -> str:
+    """The worst member status. Unknown only when every member is unknown."""
+    return max(keys, key=lambda k: _KEY_RANK[k]) if keys else "unknown"
+
+
+def _member_label(c: Component) -> str:
+    lab = c.labels
+    if "sensor" in lab:
+        return f"{lab.get('chip', '')} {lab['sensor']}".strip()
+    for key in ("pool", "array", "device"):
+        if lab.get(key):
+            return lab[key]
+    return c.name
+
+
+def _member(c: Component, default_source: str) -> dict[str, Any]:
+    key = status_key(c.state)
+    return {"name": c.name, "label": _member_label(c), "value": c.value, "unit": c.unit,
+            "labels": dict(c.labels), "source": c.source or c.labels.get("source") or default_source,
+            "status": key, "status_text": _KEY_TEXT[key], "reason": c.reason, "ts": c.ts}
+
+
+def _group_summary(members: list[dict], agg: str) -> str:
+    if not members:
+        return "No readings reported."
+    if len(members) == 1:
+        m = members[0]
+        if m["value"] is not None:
+            text = f"{m['label']}: {m['value']:g} {m['unit']}".rstrip()
+            return f"{text}. {m['reason']}" if m["reason"] else text
+        return f"{m['label']}: {m['reason'] or m['status_text']}"
+    counts = [f"{sum(1 for m in members if m['status'] == k)} {k}" for k in STATUS_KEYS
+              if any(m["status"] == k for m in members)]
+    text = ", ".join(counts)
+    info = sum(1 for m in members if m["reason"].startswith("informational"))
+    if info:
+        text += f" ({info} informational)"
+    if agg in ("warning", "critical", "unknown"):
+        worst = next(m for m in members if m["status"] == agg)
+        text += f". {worst['label']}: {worst['reason'] or worst['status_text']}"
+    return text
+
+
+def _alert_members(s: HostSummary) -> list[Component]:
+    out: list[Component] = []
+    if s.silent:
+        out.append(Component("host_silent", None, "", "critical", s.silent, source="agent"))
+    for c in s.crashes:
+        out.append(Component(f"crash.{c['id']}", None, "", "critical",
+                             f"unacknowledged crash event {c['id']}: {c['kind']} at {_iso(c['ts'])}",
+                             {"event": str(c["id"])}, "boot", c["ts"]))
+    for key in s.open_conditions:
+        out.append(Component(f"condition.{key}", None, "", "warning", f"open threshold condition {key}",
+                             source="thresholds"))
+    return out
+
+
+def group_documents(s: HostSummary) -> list[dict[str, Any]]:
+    """The ordered groups of one host. A group is omitted when it has no members and none of its
+    sources is present on the host."""
+    power = [s.package_power] + ([s.wall_power] if s.wall_power is not None else [])
+    members_for: dict[str, list[Component]] = {
+        "cpu": [s.cpu], "memory": [s.memory], "power": power, "temperatures": list(s.temperatures),
+        "fans": list(s.fans), "pools": list(s.pools), "raid": list(s.md_arrays), "disks": list(s.disks),
+        "ups": [s.ups] if s.ups is not None else [], "pi_power": [s.pi] if s.pi is not None else [],
+        "alerts": _alert_members(s), "sources": list(s.sources.values()),
+    }
+    out = []
+    for gid, label, icon, srcs in GROUPS:
+        comps = members_for[gid]
+        if gid != "sources":
+            comps = [c for c in comps if c.state != "not_present"]
+        present = any(n in s.sources and s.sources[n].state != "not_present" for n in srcs)
+        if not comps and not present and gid != "alerts":
+            continue
+        members = [_member(c, srcs[0] if srcs else gid) for c in comps]
+        if gid == "alerts" and not members:
+            agg, text = "good", "No open alerts or crash events."
+        else:
+            agg = worst_key([m["status"] for m in members])
+            text = _group_summary(members, agg)
+        out.append({"id": gid, "label": label, "icon": icon, "status": agg,
+                    "status_text": _KEY_TEXT[agg], "summary": text, "members": members})
+    return out
+
+
+def grouped_host_document(s: HostSummary) -> dict[str, Any]:
+    status = s.overall_status
+    return {"host": s.host, "status": status, "status_key": _HOST_KEY[status],
+            "status_text": _KEY_TEXT[_HOST_KEY[status]], "reason": s.overall_reason,
+            "last_seen": s.last_seen, "groups": group_documents(s)}
+
+
+def grouped_document(summaries: list[HostSummary], now: float) -> dict[str, Any]:
+    """All hosts worst first, then by name, with a banner naming the worst problem and counts."""
+    hosts = sorted((grouped_host_document(s) for s in summaries), key=lambda h: (-h["status"], h["host"]))
+    host_counts = {k: sum(1 for h in hosts if h["status_key"] == k) for k in ("good", "warning", "critical")}
+    group_counts = {k: sum(1 for h in hosts for g in h["groups"] if g["status"] == k) for k in STATUS_KEYS}
+    if not hosts:
+        banner = {"status": 1, "status_key": "warning", "status_text": "Warning", "host": None,
+                  "text": "No hosts have reported yet."}
+    else:
+        worst = hosts[0]
+        if worst["status"] == 0:
+            text = "All hosts are good."
+        else:
+            text = f"{worst['host']}: {worst['status_text']}"
+            problem = worst["reason"]
+            if not problem:
+                bad = [g for g in worst["groups"] if g["status"] in ("warning", "critical")]
+                if bad:
+                    g = max(bad, key=lambda g: _KEY_RANK[g["status"]])
+                    problem = f"{g['label']}: {g['summary']}"
+            if problem:
+                text += f". {problem}"
+        banner = {"status": worst["status"], "status_key": worst["status_key"],
+                  "status_text": worst["status_text"], "host": worst["host"], "text": text}
+    banner["counts"] = {"hosts": host_counts, "groups": group_counts}
+    return {"generated": now, "banner": banner, "hosts": hosts}

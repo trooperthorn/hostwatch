@@ -443,6 +443,20 @@ share a timestamp from being skipped). The body stays a plain list. The
 threshold state with `source=thresholds` and reads every page, and it logs an
 HTTP 401 as a rejected token, distinct from an unreachable hub.
 
+## Grouped summary
+
+`summary.py` also builds the grouped view that the dashboard draws. `group_documents` decides the
+membership of each group (`cpu`, `memory`, `power`, `temperatures`, `fans`, `pools`, `raid`, `disks`,
+`ups`, `pi_power`, `alerts`, `sources`, in that order) and its aggregate status once on the server, so
+the page never re-derives either. The aggregate is the worst member; it is unknown only when every
+member is unknown. A group with no members is omitted unless one of its sources is present on the host.
+The alerts group holds unacknowledged crash events, a silent host and open threshold conditions.
+TrueNAS API alerts are not collected yet, so they are not in this group. Fans are `fan.*` components
+from the hwmon `fan` readings. A 0 RPM fan is informational unless it matches
+`HOSTWATCH_HWMON_REQUIRED_FANS` (hub side `chip:sensor` globs), where it is critical. Hosts are sorted
+worst first by `grouped_document`, which also builds the banner text and the per-status counts, and
+`GET /api/v1/hosts/summary/grouped` serves it behind the same scope as `/api/v1/ui/status`.
+
 ## Host health summary
 
 `hostwatch/integrations/summary.py` holds the one model that the Home Assistant,

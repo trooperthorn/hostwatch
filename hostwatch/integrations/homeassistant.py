@@ -276,7 +276,9 @@ class HomeAssistantPublisher:
             summary = build_host_summary(self.store, host, now, silent_after_s=self.config.silence_window_s,
                                        crash_hold_s=self.config.crash_hold_s,
                                        cpu_sensors=parse_sensor_patterns("HOSTWATCH_HWMON_CPU_SENSORS",
-                                                                         self.config.hwmon_cpu_sensors))
+                                                                         self.config.hwmon_cpu_sensors),
+                                       required_fans=parse_sensor_patterns("HOSTWATCH_HWMON_REQUIRED_FANS",
+                                                                           self.config.hwmon_required_fans))
             entities = build_entities(summary)
             for entity in entities:
                 if not self._publish_entity(host, entity):

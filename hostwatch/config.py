@@ -157,6 +157,7 @@ class Config:
     prometheus_enabled: bool = field(default_factory=lambda: parse_bool("HOSTWATCH_PROMETHEUS"))
     hwmon_ignore: str = field(default_factory=lambda: _env("HOSTWATCH_HWMON_IGNORE", "").strip())
     hwmon_cpu_sensors: str = field(default_factory=lambda: _env("HOSTWATCH_HWMON_CPU_SENSORS", "").strip())
+    hwmon_required_fans: str = field(default_factory=lambda: _env("HOSTWATCH_HWMON_REQUIRED_FANS", "").strip())
 
     def __post_init__(self) -> None:
         # Values passed explicitly or through dataclasses.replace are plain str; wrap them too.
@@ -169,6 +170,7 @@ class Config:
         self._validate_nut()
         parse_sensor_patterns("HOSTWATCH_HWMON_IGNORE", self.hwmon_ignore)
         parse_sensor_patterns("HOSTWATCH_HWMON_CPU_SENSORS", self.hwmon_cpu_sensors)
+        parse_sensor_patterns("HOSTWATCH_HWMON_REQUIRED_FANS", self.hwmon_required_fans)
         if self.audit_retention_days < 0:
             raise ValueError("HOSTWATCH_AUDIT_RETENTION_DAYS must be 0 (keep forever) or a positive number of days")
         if self.role not in {"all", "hub", "agent"}:

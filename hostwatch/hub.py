@@ -33,7 +33,7 @@ from .config import Config, normalize_ip, parse_allowed_clients, parse_sensor_pa
 from .integrations import orion as orion_doc
 from .integrations import ui_status as ui_status_doc
 from .integrations import prometheus as prom
-from .integrations.summary import build_host_summary
+from .integrations.summary import build_host_summary, grouped_document
 from .schema import Batch
 from .store import Store
 
@@ -530,7 +530,9 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
         return {"gap_count": len(found), "gaps": found}
 
     summary_opts = {"silent_after_s": cfg.silence_window_s, "crash_hold_s": cfg.crash_hold_s,
-                    "cpu_sensors": parse_sensor_patterns("HOSTWATCH_HWMON_CPU_SENSORS", cfg.hwmon_cpu_sensors)}
+                    "cpu_sensors": parse_sensor_patterns("HOSTWATCH_HWMON_CPU_SENSORS", cfg.hwmon_cpu_sensors),
+                    "required_fans": parse_sensor_patterns("HOSTWATCH_HWMON_REQUIRED_FANS",
+                                                           cfg.hwmon_required_fans)}
 
     def summarize(host: str, now: float | None = None):
         """The host summary, built after the wall power entity (if the host has one) is read and
@@ -572,6 +574,11 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
     def ui_status(principal: Principal = Depends(require_scope("read:metrics"))):
         now = time.time()
         return ui_status_doc.status_document([summarize(n, now) for n in visible_hosts(principal)], now)
+
+    @app.get("/api/v1/hosts/summary/grouped")
+    def grouped_summary(principal: Principal = Depends(require_scope("read:metrics"))):
+        now = time.time()
+        return grouped_document([summarize(n, now) for n in visible_hosts(principal)], now)
 
     @app.get("/api/v1/orion/hosts")
     def orion_hosts(principal: Principal = Depends(require_scope("read:metrics"))):

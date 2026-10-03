@@ -394,6 +394,22 @@ Raspberry Pi SoC, and any `chip:sensor` glob you list in `HOSTWATCH_HWMON_CPU_SE
 for example `nct6779:CPUTIN`). All other hwmon temperatures are shown with their value and no
 threshold, so a floating input cannot make the host read critical.
 
+### Fans and the grouped summary
+
+`GET /api/v1/hosts/summary/grouped` (a login session or a `read:metrics` key) returns every host,
+worst first, with an ordered list of component groups: `cpu`, `memory`, `power`, `temperatures`,
+`fans`, `pools`, `raid`, `disks`, `ups`, `pi_power`, `alerts` and `sources`. Each group carries its
+label, an icon name, an aggregate status of `good`, `warning`, `critical` or `unknown` (the worst
+member; unknown only when every member is unknown), a one-line summary and its member readings with
+value, unit, labels, source, status, reason and timestamp. A group is left out on a host that has no
+members for it and no present source behind it. The `banner` names the worst problem and counts hosts
+and groups per status.
+
+Fans come from the hwmon `fan` readings. A fan at 0 RPM is informational (an unused header reads 0),
+so it never raises an alarm unless you list it in `HOSTWATCH_HWMON_REQUIRED_FANS` on the hub as
+comma-separated `chip:sensor` globs, for example `nct6779:fan2`. A listed fan at 0 RPM is critical.
+An invalid entry stops the service at start with a message naming the variable.
+
 To remove an input completely, set `HOSTWATCH_HWMON_IGNORE` on the agent to comma-separated
 `chip:sensor` globs. A MediaIn-SVR example is
 `HOSTWATCH_HWMON_IGNORE=nct6779:AUXTIN*,nct6779:PCH_*`. An invalid entry stops the service at
