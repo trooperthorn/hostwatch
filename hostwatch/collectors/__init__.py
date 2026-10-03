@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from ..config import Config
+from ..truenas.client import TruenasClient
 from .base import Collector
 from .cpu import CpuCollector
 from .hwmon import HwmonCollector
@@ -11,6 +12,7 @@ from .memory import MemoryCollector
 from .nut import NutCollector
 from .rapl import RaplCollector
 from .scrutiny import ScrutinyCollector
+from .truenas import TruenasCollector
 from .zfs import ZfsCollector
 
 
@@ -25,4 +27,5 @@ def build_collectors(cfg: Config) -> list[Collector]:
         ZfsCollector(s, p),
         ScrutinyCollector(s, p, cfg.scrutiny_url),
         NutCollector(s, p, cfg.nut_host, cfg.nut_ups, cfg.nut_user, cfg.nut_password_file, cfg.nut_port),
+        TruenasCollector(s, p, TruenasClient.from_config(cfg)),
     ]

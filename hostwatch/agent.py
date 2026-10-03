@@ -76,6 +76,11 @@ class Agent:
             "rasdaemon": rasdaemon.read,
             "journal": journal.read,
         }
+        # TrueNAS alerts come from the same API reads as the truenas collector, so they are read
+        # after the collectors have run this cycle. Registered only when TrueNAS is configured.
+        for c in self.collectors:
+            if c.id == "truenas" and not c.is_absent():
+                self.event_sources["truenas_alerts"] = c.read_events
         # Pstore and rasdaemon re-read whole records, so keys already handed to a
         # batch are remembered and not sent again by this process.
         self._seen_keys: dict[str, None] = {}

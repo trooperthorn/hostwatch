@@ -26,6 +26,34 @@ zero. Collectors read from roots given in config (`HOSTWATCH_SYSFS`,
 `HOSTWATCH_PROCFS`) so tests can point them at fake trees built in
 `tests/conftest.py`.
 
+### TrueNAS collector (`truenas`)
+
+The `truenas` collector reads pool, device, temperature and alert state from the TrueNAS
+JSON-RPC API through the read-only client in `hostwatch/truenas/client.py`. It is off unless
+`HOSTWATCH_TRUENAS_URL` is set; unconfigured it is reported not present. Each cycle it calls
+`pool.query`, `disk.query`, `disk.temperatures` and `alert.list`. If any call fails the whole
+source is unavailable for that cycle with the reason, because a device count without its disk
+name or a temperature without its serial would be a guess. The agent loop is synchronous, so the
+collector runs the async client on one private event loop and keeps one WebSocket open. Like
+`nut`, it sets `retry_each_cycle`.
+
+Samples: `pool_health` (0 ok, 1 warning, 2 critical, with the status, status code, scan state
+and a `reason` label), `pool_healthy`, `pool_warning`, `pool_scan_errors`, per leaf device
+`vdev_read_errors`, `vdev_write_errors`, `vdev_checksum_errors` and `vdev_self_healed_bytes`
+(labels pool, class, group, vdev, disk, serial), and `disk_temp_c` (labels disk, serial, model,
+pool). Health rules: a DEGRADED, FAULTED, UNAVAIL, SUSPENDED or REMOVED pool is critical;
+`healthy` true together with `warning` true is a warning, because TrueNAS keeps a pool healthy
+after a corrected error; any non-zero read, write or checksum count on a device is at least a
+warning that names the disk and its serial; a leaf device that is not ONLINE, or a scan that
+found errors, is a warning. The summary adds one `truenas_pool.<name>` component per pool next
+to the kstat `zfs` pool components, so the worse of the two views is visible.
+
+Alerts are events of kind `truenas.alert` from a second event source, `truenas_alerts`, read
+after the collectors in the same cycle. Dismissed alerts are included. Levels map to severity:
+INFO and NOTICE to info, WARNING to warning, ERROR, CRITICAL, ALERT and EMERGENCY to critical,
+and an unknown level to warning. The dedup key is the alert uuid plus its `last_occurrence`, so
+the agent sends an occurrence once and the hub keeps one row per key across restarts.
+
 ### NUT client (`nut`)
 
 The `nut` collector asks a Network UPS Tools server for UPS state so a UPS can

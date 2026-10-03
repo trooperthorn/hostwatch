@@ -308,6 +308,26 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     if "zfs" in gone and not pools:
         pools.append(comp("pool", "zfs", [], ""))
 
+    # TrueNAS API pool health (0 ok, 1 warning, 2 critical), computed by the truenas collector from
+    # the pool flags and per-device error counts. A corrected checksum error is a warning here
+    # even though the kstat state still reads ONLINE. Not configured (not present) adds nothing.
+    if "truenas" in src_rows and "truenas" not in absent:
+        names = sorted({r["labels"].get("pool", "") for r in rows if r["source"] == "truenas"
+                        and r["metric"] == "pool_health"})
+        for pool in names:
+            c = comp(f"truenas_pool.{pool}", "truenas", pick("truenas", "pool_health", pool=pool), "",
+                     labels={"pool": pool})
+            if c.value is not None:
+                newest = max(pick("truenas", "pool_health", pool=pool), key=lambda x: x["ts"])
+                c.state = {0: "ok", 1: "warning", 2: "critical"}.get(int(c.value), "unknown")
+                c.reason = newest["labels"].get("reason", "")
+                c.labels["status"] = newest["labels"].get("status", "")
+                if c.state == "unknown":
+                    c.value, c.reason = None, f"pool {pool} has unrecognised health value {newest['value']!r}"
+            pools.append(c)
+        if not names:
+            pools.append(comp("truenas_pools", "truenas", [], ""))
+
     disks: list[Component] = []
     for r in pick("scrutiny", "device_status"):
         lab = {k: r["labels"].get(k, "") for k in ("wwn", "device", "model")}
