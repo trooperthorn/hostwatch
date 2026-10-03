@@ -59,7 +59,7 @@ def test_phase1_database_upgrades_in_place(tmp_path):
     make_phase1(p)
     store = Store(p)
     assert {"events", "boot_state"} <= tables(p)
-    assert version(p) == 10
+    assert version(p) == 11
     assert store.agents()[0]["host"] == "h1"
     assert store.sources()[0]["source"] == "cpu"
     db = sqlite3.connect(p)
@@ -74,7 +74,7 @@ def test_migration_twice_is_noop(tmp_path):
                                 "title": "t", "dedup_key": "a"}])
     store = Store(p)
     store._migrate()
-    assert version(p) == 10
+    assert version(p) == 11
     assert len(store.events("h1")) == 1
 
 
@@ -86,7 +86,7 @@ def test_future_version_is_refused(tmp_path):
     db.close()
     with pytest.raises(SchemaTooNewError, match="supports up to"):
         Store(p)
-    assert version(p) == 11
+    assert version(p) == 12
     assert "events" not in tables(p)
 
 
@@ -141,7 +141,7 @@ def test_v3_database_migrates_to_v4_with_rows_intact(tmp_path):
     make_v3(p)
     assert not (AUTH_TABLES & tables(p))
     store = Store(p)
-    assert version(p) == 10
+    assert version(p) == 11
     assert AUTH_TABLES <= tables(p)
     assert len(store.events("h1")) == 1
     assert store.agents()[0]["host"] == "h1"
@@ -158,12 +158,12 @@ def test_v4_second_run_is_noop(tmp_path):
     store.append_audit("a", "k", "GET", "/x", 200, "127.0.0.1")
     store._migrate()
     Store(p)
-    assert version(p) == 10
+    assert version(p) == 11
     assert len(store.audit_rows()) == 1
 
 
 def test_v7_to_v8_adds_is_admin_marks_earliest_user_and_keeps_rows(tmp_path):
-    assert SCHEMA_VERSION == 10
+    assert SCHEMA_VERSION == 11
     p = tmp_path / "db.sqlite"
     store = Store(p)
     for i, name in enumerate(("first", "second", "third")):
@@ -177,10 +177,34 @@ def test_v7_to_v8_adds_is_admin_marks_earliest_user_and_keeps_rows(tmp_path):
     db.commit()
     db.close()
     upgraded = Store(p)
-    assert version(p) == 10
+    assert version(p) == 11
     assert [(u["username"], u["hash"], u["is_admin"])
             for u in map(upgraded.get_user, ("first", "second", "third"))] == [
         ("first", "hash-first", 1), ("second", "hash-second", 0), ("third", "hash-third", 0)]
     assert len(upgraded.events("h1")) == 1
     upgraded._migrate()  # a repeat run changes nothing
     assert upgraded.get_user("second")["is_admin"] == 0
+
+
+def test_v10_to_v11_adds_user_preferences_and_keeps_rows(tmp_path):
+    p = tmp_path / "db.sqlite"
+    store = Store(p)
+    uid = store.create_user("first", "hash-first", now=100.0)
+    store.add_events("h1", [{"ts": 1.0, "kind": "k", "severity": "info", "source": "s",
+                             "title": "t", "dedup_key": "a"}])
+    del store
+    db = sqlite3.connect(p)
+    db.execute("DROP TABLE user_preferences")
+    db.execute("PRAGMA user_version = 10")
+    db.commit()
+    db.close()
+    assert "user_preferences" not in tables(p)
+    upgraded = Store(p)
+    assert version(p) == 11
+    assert "user_preferences" in tables(p)
+    assert upgraded.get_user("first")["id"] == uid
+    assert len(upgraded.events("h1")) == 1
+    assert upgraded.get_preferences(uid) is None
+    upgraded.set_preferences(uid, "expert", [{"id": "cpu", "visible": False}])
+    upgraded._migrate()  # a repeat run changes nothing
+    assert upgraded.get_preferences(uid)["view"] == "expert"

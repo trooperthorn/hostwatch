@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS agents (
 # a database with user_version 0 is treated as version 1 once its Phase 1 tables
 # exist. Each migration step is additive: it only creates objects and is guarded
 # with IF NOT EXISTS so that running it twice changes nothing.
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # Longest history range served from raw samples. Longer ranges use the hourly rollups.
 HISTORY_RAW_MAX_S = 2 * 86400.0
@@ -154,6 +154,13 @@ MIGRATIONS: dict[int, tuple] = {
     ),
     # Optional host a key is bound to. Additive: one guarded nullable column, existing keys stay unbound.
     10: (_add_api_keys_host,),
+    # Per-user dashboard preferences. Additive: one new table, guarded, existing rows untouched.
+    11: (
+        """CREATE TABLE IF NOT EXISTS user_preferences (
+  user_id INTEGER PRIMARY KEY REFERENCES users(id), view TEXT NOT NULL,
+  groups TEXT NOT NULL, updated REAL NOT NULL
+)""",
+    ),
 }
 
 
@@ -307,6 +314,22 @@ class Store:
             return self._db.execute(
                 "UPDATE sessions SET revoked = 1 WHERE revoked = 0 AND user_id = "
                 "(SELECT id FROM users WHERE username = ?)", (username,)).rowcount
+
+    def get_preferences(self, user_id: int) -> dict | None:
+        """The stored dashboard preferences of one user (view, groups list, updated), or None."""
+        rows = self._rows("SELECT view, groups, updated FROM user_preferences WHERE user_id = ?", (user_id,))
+        if not rows:
+            return None
+        return {"view": rows[0]["view"], "groups": json.loads(rows[0]["groups"]), "updated": rows[0]["updated"]}
+
+    def set_preferences(self, user_id: int, view: str, groups: list[dict], now: float | None = None) -> None:
+        """Replace the dashboard preferences of one user. The caller has already validated them."""
+        with self._lock, self._db:
+            self._db.execute(
+                "INSERT INTO user_preferences (user_id, view, groups, updated) VALUES (?,?,?,?) "
+                "ON CONFLICT(user_id) DO UPDATE SET view=excluded.view, groups=excluded.groups, "
+                "updated=excluded.updated",
+                (user_id, view, json.dumps(groups), time.time() if now is None else now))
 
     def list_api_keys(self) -> list[dict]:
         """Every key without its secret or hash, newest first."""

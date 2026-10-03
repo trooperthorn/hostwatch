@@ -33,7 +33,7 @@ from .config import Config, normalize_ip, parse_allowed_clients, parse_sensor_pa
 from .integrations import orion as orion_doc
 from .integrations import ui_status as ui_status_doc
 from .integrations import prometheus as prom
-from .integrations.summary import build_host_summary, grouped_document
+from .integrations.summary import GROUP_IDS, build_host_summary, grouped_document
 from .schema import Batch
 from .store import Store
 
@@ -114,6 +114,16 @@ class Principal:
 
     def allows(self, scope: str) -> bool:
         return scope in self.scopes or ("admin" in self.scopes and scope != "ingest")
+
+
+class GroupPref(BaseModel):
+    id: str
+    visible: bool = True
+
+
+class PreferencesIn(BaseModel):
+    view: str
+    groups: list[GroupPref] = Field(default_factory=list, max_length=64)
 
 
 WITNESS_RETRY_TICK_S = 60.0
@@ -579,6 +589,50 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
     def grouped_summary(principal: Principal = Depends(require_scope("read:metrics"))):
         now = time.time()
         return grouped_document([summarize(n, now) for n in visible_hosts(principal)], now)
+
+    VIEWS = ("simple", "expanded", "expert")
+
+    def own_user_id(request: Request, principal: Principal) -> int:
+        """Preferences belong to a login user, so only a session principal may use them."""
+        if principal.kind != "session":
+            request.state.auth_reason = "preferences need a user session"
+            raise HTTPException(status_code=403, detail="a user session is required")
+        user = store.get_user(principal.actor)
+        if user is None:
+            raise HTTPException(status_code=403, detail="a user session is required")
+        return int(user["id"])
+
+    def normalized_groups(stored: list[dict]) -> list[dict]:
+        """Stored order first, then any known group not stored, in the default order. Unknown ids are dropped."""
+        out, seen = [], set()
+        for g in stored:
+            gid = g.get("id")
+            if gid in GROUP_IDS and gid not in seen:
+                seen.add(gid)
+                out.append({"id": gid, "visible": bool(g.get("visible", True))})
+        out.extend({"id": gid, "visible": True} for gid in GROUP_IDS if gid not in seen)
+        return out
+
+    def preferences_doc(row: dict | None) -> dict:
+        return {"view": row["view"] if row and row["view"] in VIEWS else "expanded",
+                "groups": normalized_groups(row["groups"] if row else []),
+                "default_groups": list(GROUP_IDS)}
+
+    @app.get("/api/v1/me/preferences")
+    def get_preferences(request: Request, principal: Principal = Depends(authenticate)):
+        return preferences_doc(store.get_preferences(own_user_id(request, principal)))
+
+    @app.put("/api/v1/me/preferences")
+    def put_preferences(request: Request, body: PreferencesIn, principal: Principal = Depends(authenticate)):
+        uid = own_user_id(request, principal)
+        if body.view not in VIEWS:
+            raise HTTPException(status_code=422, detail="view must be simple, expanded or expert")
+        unknown = [g.id for g in body.groups if g.id not in GROUP_IDS]
+        if unknown:
+            raise HTTPException(status_code=422, detail="unknown group id")
+        groups = normalized_groups([{"id": g.id, "visible": g.visible} for g in body.groups])
+        store.set_preferences(uid, body.view, groups)
+        return preferences_doc(store.get_preferences(uid))
 
     @app.get("/api/v1/orion/hosts")
     def orion_hosts(principal: Principal = Depends(require_scope("read:metrics"))):

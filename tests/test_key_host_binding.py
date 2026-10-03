@@ -108,7 +108,7 @@ def test_migration_from_version_9_keeps_keys_unbound(tmp_path):
     db.execute("PRAGMA user_version = 9")
     db.commit()
     db.close()
-    assert SCHEMA_VERSION == 10
+    assert SCHEMA_VERSION == 11
     upgraded = Store(p)
     assert upgraded.find_api_key(secret)["host"] is None
     assert Store(p).find_api_key(secret)["host"] is None  # guarded, a second open changes nothing

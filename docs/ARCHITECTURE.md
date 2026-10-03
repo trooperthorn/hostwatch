@@ -457,6 +457,8 @@ from the hwmon `fan` readings. A 0 RPM fan is informational unless it matches
 worst first by `grouped_document`, which also builds the banner text and the per-status counts, and
 `GET /api/v1/hosts/summary/grouped` serves it behind the same scope as `/api/v1/ui/status`.
 
+Dashboard preferences are stored per user in `user_preferences` (schema version 11, additive). `GET /api/v1/me/preferences` returns the view (`simple`, `expanded` or `expert`, default `expanded`) and the full ordered group list with a visible flag for each group. `PUT /api/v1/me/preferences` replaces them. Both work only for a login session, and the PUT needs the CSRF token like every other session write; API keys and certificate identities get 403. An unknown view or group id gives 422. Duplicate ids keep the first entry, and groups the request omits are appended in the default order, so a group added by a later release appears without a migration. The row is chosen from the session, never from the request, so a user can read and change only their own.
+
 ## Host health summary
 
 `hostwatch/integrations/summary.py` holds the one model that the Home Assistant,
@@ -701,7 +703,7 @@ set it, so a database with version 0 is adopted as version 1. `Store._migrate()`
 applies numbered steps in a transaction, each created with `IF NOT EXISTS` so a
 repeat run changes nothing. Version 2 adds the `events` table (unique per host
 on `dedup_key`) and the `boot_state` heartbeat table; existing tables are never
-altered. Version 6 adds the `present` column to `sources` (default 1, added only when missing). Version 7 adds the `source_seen` table (first seen, last seen and forgotten time per host and source). Version 8 adds `users.is_admin` (default 0, added only when missing); the earliest user, which is the one `bootstrap-admin` created, is marked admin by the migration so no deployment loses admin access. Version 9 adds the `event_acks` table (event id, acknowledged time, actor). Version 3 adds the `batch_ids` table (unique per host and batch id) the same way;
+altered. Version 6 adds the `present` column to `sources` (default 1, added only when missing). Version 7 adds the `source_seen` table (first seen, last seen and forgotten time per host and source). Version 8 adds `users.is_admin` (default 0, added only when missing); the earliest user, which is the one `bootstrap-admin` created, is marked admin by the migration so no deployment loses admin access. Version 9 adds the `event_acks` table (event id, acknowledged time, actor). Version 11 adds the `user_preferences` table (user id, view, groups JSON, updated). Version 3 adds the `batch_ids` table (unique per host and batch id) the same way;
 maintenance prunes ids older than the raw retention. If the stored version is newer than the code supports, the store
 refuses to start with `SchemaTooNewError` rather than risk damaging data.
 

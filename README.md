@@ -405,6 +405,8 @@ value, unit, labels, source, status, reason and timestamp. A group is left out o
 members for it and no present source behind it. The `banner` names the worst problem and counts hosts
 and groups per status.
 
+`GET /api/v1/me/preferences` and `PUT /api/v1/me/preferences` (login session only, the PUT needs the CSRF token) read and save the signed-in user's dashboard view (`simple`, `expanded` or `expert`) and the order and visibility of the component groups. Each user has one row and cannot reach another's; API keys are refused.
+
 Fans come from the hwmon `fan` readings. A fan at 0 RPM is informational (an unused header reads 0),
 so it never raises an alarm unless you list it in `HOSTWATCH_HWMON_REQUIRED_FANS` on the hub as
 comma-separated `chip:sensor` globs, for example `nct6779:fan2`. A listed fan at 0 RPM is critical.
