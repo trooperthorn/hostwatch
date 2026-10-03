@@ -14,6 +14,8 @@
 # What it changes: the group and mode of /sys/fs/pstore (g+rx) and of the files
 # in it (g+r), plus a systemd oneshot unit ordered after sys-fs-pstore.mount so
 # the grant is repeated at every boot, because pstore is recreated each boot.
+# The unit uses After= and ConditionPathIsDirectory=, not Requires=, so on a host where pstore
+# is not a separate mount unit the service is skipped instead of failing.
 # It also creates the hostwatch-rapl group if it is missing. Nothing else.
 #
 # Usage:
@@ -33,7 +35,7 @@ DRY=0; REMOVE=0; YES=0
 for a in "$@"; do
   case "$a" in
     --dry-run) DRY=1 ;; --remove) REMOVE=1 ;; --yes) YES=1 ;;
-    -h|--help) sed -n '2,28p' "$0"; exit 0 ;;
+    -h|--help) sed -n '2,30p' "$0"; exit 0 ;;
     *) echo "unknown arg $a" >&2; exit 2 ;;
   esac
 done
@@ -57,14 +59,26 @@ fi
 
 run "getent group $GROUP >/dev/null || groupadd --system $GROUP"
 
+# Idempotent: a path that already has the group and the needed group bits is reported ok.
+grant() {
+  local path="$1" perm="$2" cur bits want=r
+  cur="$(stat -c '%G %A' "$path" 2>/dev/null || true)"
+  bits="${cur#* }"
+  [[ "$perm" == g+rx ]] && want=rx
+  if [[ "${cur%% *}" == "$GROUP" && "${bits:4:1}" == r && ( "$want" == r || "${bits:5:1}" == x ) ]]; then
+    echo "ok: $path"
+    return 0
+  fi
+  run "chgrp $GROUP '$path'"
+  run "chmod $perm '$path'"
+}
+
 # Applied now, for the current boot.
 if [[ -d "$PSTORE" ]]; then
-  run "chgrp $GROUP '$PSTORE'"
-  run "chmod g+rx '$PSTORE'"
+  grant "$PSTORE" g+rx
   for f in "$PSTORE"/*; do
     [[ -f "$f" && ! -L "$f" ]] || continue
-    run "chgrp $GROUP '$f'"
-    run "chmod g+r '$f'"
+    grant "$f" g+r
   done
 else
   echo "no pstore directory at $PSTORE (nothing to grant now; the unit still installs)"
@@ -75,7 +89,7 @@ fi
 UNIT_BODY="[Unit]
 Description=Allow group $GROUP to read pstore crash records (hostwatch)
 After=sys-fs-pstore.mount
-Requires=sys-fs-pstore.mount
+ConditionPathIsDirectory=/sys/fs/pstore
 
 [Service]
 Type=oneshot

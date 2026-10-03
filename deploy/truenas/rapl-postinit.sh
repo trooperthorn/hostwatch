@@ -59,6 +59,7 @@ fi
 
 changed=0
 found=0
+failed=0
 for f in "$BASE"/intel-rapl:*/energy_uj "$BASE"/intel-rapl:*:*/energy_uj; do
   [ -e "$f" ] || continue
   found=1
@@ -81,12 +82,20 @@ if [ -d "$PSTORE" ]; then
     [ -L "$f" ] && continue
     if [ -d "$f" ]; then perm=g+rx; else perm=g+r; fi
     current="$(stat -c '%G %A' "$f" 2>/dev/null)"
-    if [ "${current%% *}" = "$GROUP" ] && [ "$(stat -c '%A' "$f" | cut -c5)" = "r" ]; then
+    bits="$(stat -c '%A' "$f" 2>/dev/null)"
+    have="$(printf '%s' "$bits" | cut -c5)"
+    if [ -d "$f" ]; then have="$have$(printf '%s' "$bits" | cut -c6)"; want=rx; else want=r; fi
+    if [ "${current%% *}" = "$GROUP" ] && [ "$have" = "$want" ]; then
       echo "ok: $f"
       continue
     fi
     if [ "$APPLY" -eq 1 ]; then
-      chgrp "$GROUP" "$f" && chmod "$perm" "$f" && echo "granted: $f"
+      if chgrp "$GROUP" "$f" && chmod "$perm" "$f"; then
+        echo "granted: $f"
+      else
+        echo "failed to grant: $f" >&2
+        failed=1
+      fi
     else
       echo "would grant: $f (now: ${current:-unreadable})"
     fi
@@ -101,4 +110,5 @@ fi
 if getent group "$GROUP" >/dev/null 2>&1; then
   echo "HOSTWATCH group id: $(getent group "$GROUP" | cut -d: -f3)"
 fi
+[ "$failed" -eq 0 ] || exit 1
 exit 0

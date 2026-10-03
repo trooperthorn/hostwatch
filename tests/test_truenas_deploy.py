@@ -198,6 +198,33 @@ def test_pstore_unit_orders_after_the_pstore_mount_and_never_grants_write():
     assert chr(0x2014) not in text
 
 
+def test_pstore_unit_is_skipped_not_failed_without_a_mount_unit():
+    text = PSTORE_SCRIPT.read_text(encoding="utf-8")
+    assert "Requires=sys-fs-pstore.mount" not in text
+    assert "ConditionPathIsDirectory=/sys/fs/pstore" in text
+
+
+def test_pstore_script_is_executable_in_git():
+    out = subprocess.run(["git", "ls-files", "-s", "scripts/pstore-access.sh"], cwd=ROOT,
+                         capture_output=True, text=True).stdout
+    assert out.startswith("100755"), out
+
+
+def test_truenas_postinit_pstore_section_plans_and_checks_modes(tmp_path):
+    pstore = tmp_path / "pstore"
+    pstore.mkdir()
+    (pstore / "dmesg-1").write_text("x")
+    sh = shutil.which("bash")
+    result = subprocess.run([sh, (ROOT / "deploy" / "truenas" / "rapl-postinit.sh").as_posix(), "--dry-run"],
+                            capture_output=True, text=True, timeout=30,
+                            env={**ENV, "RAPL_PSTORE_DIR": pstore.as_posix(),
+                                 "RAPL_POWERCAP_DIR": (tmp_path / "none").as_posix()})
+    assert result.returncode == 0, result.stderr
+    assert f"would grant: {pstore.as_posix()}" in result.stdout
+    assert f"would grant: {pstore.as_posix()}/dmesg-1" in result.stdout
+    assert "g+rx" in (ROOT / "deploy" / "truenas" / "rapl-postinit.sh").read_text(encoding="utf-8")
+
+
 def test_docs_reference_the_pstore_script():
     readme = (ROOT / "README.md").read_text(encoding="utf-8")
     assert "scripts/pstore-access.sh" in readme and "ls -ld /sys/fs/pstore" in readme
