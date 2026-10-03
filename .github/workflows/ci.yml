@@ -1,6 +1,10 @@
-# Runs the test suite on Linux, where the real target paths (including the
-# colon in intel-rapl:N) are valid, then publishes a multi-arch image to GHCR
-# from the default branch and from version tags so hosts can pull it directly.
+# Runs the test suite on Linux, where the real target paths (including the colon in
+# intel-rapl:N) are valid, builds the amd64 image once, scans it and writes an SBOM, runs a
+# smoke test against it, and then publishes a multi-arch image to GHCR from the default branch
+# and from version tags. A v* tag also creates a GitHub release that carries the SBOM.
+# Every action is pinned to a full commit SHA, with the release in a trailing comment, so a
+# moved tag cannot change what runs. Update a pin by reading the new commit SHA from the
+# action's release page, never from memory.
 name: ci
 
 on:
@@ -16,41 +20,186 @@ jobs:
   test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-python@v5
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: "3.12"
       - run: pip install -e '.[test]'
       - run: pytest -q
 
-  image:
+  build:
+    # Builds the amd64 image once and hands the same bytes to the scan and smoke jobs.
     needs: test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: .
+          platforms: linux/amd64
+          push: false
+          tags: hostwatch:ci
+          build-args: |
+            VERSION=ci-${{ github.sha }}
+            REVISION=${{ github.sha }}
+          outputs: type=docker,dest=${{ runner.temp }}/hostwatch-image.tar
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hostwatch-image
+          path: ${{ runner.temp }}/hostwatch-image.tar
+          retention-days: 1
+
+  scan:
+    # Writes the SPDX SBOM and scans the image. The gate fails the job on any CRITICAL
+    # vulnerability that has a fix available; unfixed ones cannot be acted on. This is the
+    # only job that may write security events (code scanning).
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      security-events: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hostwatch-image
+          path: ${{ runner.temp }}
+      - run: docker load --input "$RUNNER_TEMP/hostwatch-image.tar"
+      - uses: anchore/sbom-action@66cbf4bc1f1c0d2edc94016e65bc221b6bb0ad6c # v0.24.3
+        with:
+          image: hostwatch:ci
+          format: spdx-json
+          output-file: hostwatch.spdx.json
+          upload-artifact: false
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: hostwatch-sbom
+          path: hostwatch.spdx.json
+      - name: Scan the image with trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: hostwatch:ci
+          format: sarif
+          output: trivy.sarif
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"
+      - name: Upload the scan result to code scanning
+        # A pull request from a fork gets a read-only token, so the upload is skipped there.
+        if: always() && hashFiles('trivy.sarif') != '' && (github.event_name == 'push' || github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@2892aa5e19bbd11bc0cff5427e3b750a04d9e3c2 # v4.38.2
+        with:
+          sarif_file: trivy.sarif
+
+  smoke:
+    # Runs the built image the way an operator would, bound to 127.0.0.1 on the runner, and
+    # walks the first-run path: bootstrap an admin, log in, create a read:metrics key and read
+    # the Orion hosts list with it. Every secret is masked before it is stored and none is
+    # printed. The data directory is a tmpfs, so nothing outlives the container.
+    needs: build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hostwatch-image
+          path: ${{ runner.temp }}
+      - run: docker load --input "$RUNNER_TEMP/hostwatch-image.tar"
+      - name: Start the hub on 127.0.0.1
+        run: |
+          set -euo pipefail
+          ingest_token="$(openssl rand -hex 32)"
+          echo "::add-mask::$ingest_token"
+          printf 'HOSTWATCH_ROLE=hub\nHOSTWATCH_HUB_BIND=127.0.0.1\nHOSTWATCH_HUB_PORT=8090\nHOSTWATCH_INGEST_TOKEN=%s\n' \
+            "$ingest_token" > "$RUNNER_TEMP/smoke.env"
+          docker run --detach --name hostwatch-smoke --network host \
+            --read-only --cap-drop ALL --security-opt no-new-privileges:true \
+            --tmpfs /tmp --tmpfs /data:uid=10001,gid=10001,mode=0700 \
+            --env-file "$RUNNER_TEMP/smoke.env" hostwatch:ci > /dev/null
+          rm -f "$RUNNER_TEMP/smoke.env"
+          for _ in $(seq 1 30); do
+            if curl -fsS -o /dev/null http://127.0.0.1:8090/internal/v1/health; then exit 0; fi
+            sleep 2
+          done
+          echo "The hub did not answer its health endpoint within 60 seconds." >&2
+          docker logs hostwatch-smoke >&2 || true
+          exit 1
+      - name: Bootstrap an admin, log in and read the Orion hosts list
+        run: |
+          set -euo pipefail
+          base=http://127.0.0.1:8090
+          jar="$RUNNER_TEMP/jar.txt"
+          # The bootstrap password is the only line the command writes to stdout.
+          password="$(docker exec hostwatch-smoke python -m hostwatch bootstrap-admin 2>/dev/null)"
+          echo "::add-mask::$password"
+          body="$(PASSWORD="$password" jq -n '{username: "admin", password: env.PASSWORD}')"
+          login="$(printf '%s' "$body" | curl -fsS -c "$jar" -H 'Content-Type: application/json' \
+            --data @- "$base/api/v1/login")"
+          csrf="$(printf '%s' "$login" | jq -r .csrf_token)"
+          echo "::add-mask::$csrf"
+          printf 'X-CSRF-Token: %s\n' "$csrf" > "$RUNNER_TEMP/csrf.hdr"
+          created="$(curl -fsS -b "$jar" -H @"$RUNNER_TEMP/csrf.hdr" -H 'Content-Type: application/json' \
+            --data '{"scopes":["read:metrics"],"owner":"smoke"}' "$base/api/v1/admin/keys")"
+          secret="$(printf '%s' "$created" | jq -r .secret)"
+          echo "::add-mask::$secret"
+          printf 'Authorization: Bearer %s\n' "$secret" > "$RUNNER_TEMP/key.hdr"
+          status="$(curl -sS -o /dev/null -w '%{http_code}' -H @"$RUNNER_TEMP/key.hdr" \
+            "$base/api/v1/orion/hosts")"
+          echo "GET /api/v1/orion/hosts answered $status"
+          test "$status" = 200
+      - name: Tear down
+        if: always()
+        run: |
+          docker rm --force hostwatch-smoke > /dev/null 2>&1 || true
+          rm -f "$RUNNER_TEMP/jar.txt" "$RUNNER_TEMP/csrf.hdr" "$RUNNER_TEMP/key.hdr"
+
+  image:
+    needs: [test, scan, smoke]
     if: github.event_name == 'push'
     runs-on: ubuntu-latest
     permissions:
       contents: read
       packages: write
     steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-qemu-action@v3
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/login-action@v3
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
       - id: meta
-        uses: docker/metadata-action@v5
+        uses: docker/metadata-action@dc802804100637a589fabce1cb79ff13a1411302 # v6.2.0
         with:
           images: ghcr.io/${{ github.repository }}
           tags: |
             type=edge,branch=master
             type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
             type=sha
-      - uses: docker/build-push-action@v6
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
         with:
           context: .
           platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            VERSION=${{ steps.meta.outputs.version }}
+            REVISION=${{ github.sha }}
+
+  release:
+    # Only a v* tag creates a release. The SBOM describes the amd64 image the scan job checked.
+    needs: image
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: hostwatch-sbom
+      - uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          generate_release_notes: true
+          files: hostwatch.spdx.json

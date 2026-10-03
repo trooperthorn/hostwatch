@@ -821,6 +821,25 @@ exits 0 with a message. The Dockerfile `HEALTHCHECK` uses interval 30s, timeout 
 30s and 3 retries, and sets OCI labels from the build args `VERSION`, `REVISION` and `LICENSES`.
 `tests/test_healthcheck.py` covers the command with a mocked transport and checks the Dockerfile.
 
+## CI supply chain and releases
+
+`.github/workflows/ci.yml` has six jobs. `test` runs pytest. `build` produces one amd64 image tar
+that `scan` and `smoke` load, so both check the same bytes. `scan` generates an SPDX JSON SBOM with
+anchore/sbom-action and runs trivy at severity CRITICAL with `ignore-unfixed` and exit code 1, so a
+fixable critical vulnerability fails CI; unfixed ones are not gated because nothing can be done
+about them yet. It uploads SARIF to code scanning and is the only job granted `security-events:
+write`; the SARIF upload is skipped for pull requests from forks, which get a read-only token.
+`smoke` starts the image with `--network host`, `HOSTWATCH_HUB_BIND=127.0.0.1`, a read-only root,
+all capabilities dropped and a tmpfs `/data`, then drives the first-run path over HTTP. Passwords,
+the CSRF token and keys are masked with `::add-mask::` before use and travel in files or stdin,
+never in echoed output. `image` (push only, needs all three) publishes the multi-arch image with
+`edge`, `{{version}}`, `{{major}}.{{minor}}` and sha tags and passes `VERSION` and `REVISION` build
+args. `release` runs only for `refs/tags/v*`, is the only job with `contents: write`, and attaches
+the SBOM. Every action is pinned to a 40 character commit SHA with the release in a comment. The
+SBOM describes the amd64 image; the arm64 variant is not scanned. These are CI controls on the
+build, not runtime controls. `tests/test_release.py` reads the workflow text (PyYAML is not a
+dependency) and checks the pins, the trivy gate, the loopback bind and the tag gate.
+
 ## Web UI shell (Phase 5)
 
 The hub serves a static page from `hostwatch/web/`: `GET /` returns `index.html` and

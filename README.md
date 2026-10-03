@@ -367,6 +367,20 @@ with `--build-arg VERSION=...`, `--build-arg REVISION=...` and `--build-arg LICE
 licenses label defaults to `NOASSERTION` because the repository does not declare a license yet.
 The base image is pinned by digest; the Dockerfile comment explains how to update it.
 
+## CI, SBOM, scanning and releases
+
+The `ci` workflow runs the tests, builds the amd64 image once, and then runs two checks on that
+same image in parallel. The scan job writes an SPDX SBOM (`hostwatch.spdx.json`, kept as a
+workflow artifact) and scans the image with trivy. It fails on any CRITICAL vulnerability that has
+a fix available, and uploads the SARIF result to code scanning. The smoke job runs the image on
+the runner bound to 127.0.0.1 with a generated token and a tmpfs data directory, bootstraps an
+admin, logs in, creates a `read:metrics` key and reads `/api/v1/orion/hosts`; secrets are masked
+and never printed. The multi-arch image is published only after both pass. Every action is pinned
+to a full commit SHA. Pushing a tag that starts with `v` also publishes semver image tags
+(`1.2.3` and `1.2`), passes the version and revision to the image labels, and creates a GitHub
+release with the SBOM attached. The `edge` tag still follows `master`. The workflow has not run
+yet; see `UNVERIFIED.md`.
+
 ## Dependency lock
 
 The container image installs its runtime dependencies from `requirements.lock`, which pins every
