@@ -72,17 +72,45 @@ button { background: var(--accent); color: var(--accent-fg); border-color: var(-
 .views { display: flex; gap: 0.5rem; margin: 0.5rem 0; }
 .views button[aria-pressed="false"] { background: var(--bg); color: var(--fg); border-color: var(--border); }
 .views button[aria-pressed="true"] { text-decoration: underline; }
-.filters { grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); max-width: none; align-items: end; }
-.events { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
-.events caption { text-align: left; color: var(--muted); padding-bottom: 0.25rem; }
-.events th, .events td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
-/* Tables scroll inside their own box on narrow screens rather than widening the page. */
-.table-scroll { overflow-x: auto; max-width: 100%; }
+/* Filter forms: each field is a label stacked above its control, in an even responsive grid. The
+   controls share one height and one style, and the action button sits on the bottom edge of the row. */
+.filters { grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); max-width: none; align-items: end; gap: 0.75rem 1rem; }
+.filters .field { display: flex; flex-direction: column; gap: 0.25rem; min-width: 0; }
+.filters label { font-size: 0.9rem; font-weight: 600; }
+.filters input[type="text"], .filters select { width: 100%; height: 2.5rem; padding: 0 0.6rem; font: inherit;
+  border: 1px solid var(--border); border-radius: 4px; background: var(--bg); color: var(--fg); }
+.filters .form-action { height: 2.5rem; padding: 0 1.25rem; justify-self: start; }
+.form-note { margin: 0.5rem 0 0; min-height: 1.5em; }
+.empty-state { margin: 0.75rem 0; padding: 1rem; border: 1px dashed var(--border); border-radius: 4px;
+  color: var(--muted); text-align: center; }
+.more { display: block; margin: 0.75rem 0 0; }
+/* Tables: a distinct header row that stays visible while the box scrolls, comfortable padding,
+   subtle zebra shading and a hover highlight. Scroll boxes are capped so the sticky header has
+   something to stick to. */
+.table-scroll, .table-wrap { overflow: auto; max-width: 100%; max-height: 70vh; border: 1px solid var(--border);
+  border-radius: 4px; margin-top: 0.5rem; }
+.events, .expert-table { width: 100%; border-collapse: separate; border-spacing: 0; margin: 0; }
+.events caption, .expert-table caption { text-align: left; color: var(--muted); padding: 0.5rem 0.75rem; }
+.events th, .events td, .expert-table th, .expert-table td { text-align: left; padding: 0.55rem 0.75rem;
+  border-bottom: 1px solid var(--border); vertical-align: top; }
+.events thead th, .expert-table thead th { position: sticky; top: 0; z-index: 1; background: var(--surface);
+  border-bottom: 2px solid var(--border); font-weight: 700; white-space: nowrap; }
+.events tbody tr:nth-child(even), .expert-table tbody tr:nth-child(even) { background: var(--surface); }
+.events tbody tr:hover, .expert-table tbody tr:hover { background: color-mix(in srgb, var(--accent) 14%, var(--bg)); }
+.events .num, .expert-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+.events .mono, .expert-table .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.9em; }
 /* Short fixed-format columns stay on one line; the free-text columns take the rest of
    the width and wrap long values such as JSON details or paths. */
 .events .nowrap { white-space: nowrap; }
 .events .grow { width: 100%; min-width: 16rem; overflow-wrap: anywhere; word-break: break-word; }
 .events .path { overflow-wrap: anywhere; min-width: 10rem; }
+/* HTTP status: the code and a word, so colour is only reinforcement. */
+.http-badge { display: inline-flex; gap: 0.25rem; align-items: center; padding: 0 0.45rem; border: 1px solid currentColor;
+  border-radius: 999px; font-size: 0.85em; font-weight: 600; white-space: nowrap; }
+.http-2xx { color: var(--ok-text); }
+.http-4xx { color: var(--warn-text); }
+.http-5xx { color: var(--crit-text); }
+.http-other { color: var(--muted); }
 .sev-critical { color: var(--crit-text); font-weight: 700; }
 .sev-warning { color: var(--warn-text); font-weight: 700; }
 .chart svg { width: 100%; height: auto; max-height: 24rem; background: var(--surface); border: 1px solid var(--border); }
@@ -101,7 +129,7 @@ button { background: var(--accent); color: var(--accent-fg); border-color: var(-
 #secret-value { word-break: break-all; font-size: 1.05rem; }
 #keys-form fieldset { border: 1px solid var(--border); }
 #keys-form fieldset label { display: inline-block; margin-right: 1rem; }
-.events code { word-break: break-all; }
+.events code { word-break: break-all; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
 /* Icons are the vendored Tabler outline SVGs, drawn as masks so they take the text colour in both
    themes. The masks load from this origin only. */
 .icon { display: inline-block; flex: none; width: 1.25em; height: 1.25em; vertical-align: -0.25em;
@@ -175,13 +203,9 @@ button { background: var(--accent); color: var(--accent-fg); border-color: var(-
 .group-summary { margin: 0.25rem 0; }
 .readings { margin: 0.25rem 0 0; padding-left: 1.1rem; }
 .expert .groups { grid-template-columns: 1fr; }
-.table-wrap { overflow-x: auto; }
-.expert-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.expert-table { font-size: 0.9rem; }
 .expert-table .grow { overflow-wrap: anywhere; }
 .expert-table .nowrap { white-space: nowrap; }
-.expert-table th, .expert-table td { text-align: left; padding: 0.25rem 0.4rem; border-bottom: 1px solid var(--border);
-  vertical-align: top; }
-.expert-table caption { text-align: left; color: var(--muted); }
 #customise { border: 2px solid var(--border); border-radius: 6px; padding: 0.5rem 0.75rem; margin: 0.5rem 0;
   background: var(--surface); }
 #cust-list { list-style: none; margin: 0; padding: 0; display: grid; gap: 0.35rem; }

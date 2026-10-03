@@ -38,7 +38,7 @@ def test_static_assets_present_and_wired():
     for ident in ("tab-history", "history-panel", "h-series", "h-range", "history-chart", "history-table",
                   "history-gaps"):
         assert f'id="{ident}"' in html
-    assert re.search(r"<th scope=\"col\">Average</th>", html)
+    assert re.search(r"<th scope=\"col\"[^>]*>Average</th>", html)
     assert "<caption" in html
     assert "createElementNS" in js and "/history?" in js and "/internal/v1/gaps?" in js
 

@@ -63,24 +63,33 @@
     <div id="events-panel" hidden>
       <h3 id="events-title">Event timeline</h3>
       <form id="events-form" class="filters" aria-labelledby="events-title">
-        <label for="f-host">Host</label>
-        <input id="f-host" name="host" type="text" maxlength="128">
-        <label for="f-source">Source</label>
-        <input id="f-source" name="source" type="text" maxlength="64">
-        <label for="f-kind">Kind</label>
-        <input id="f-kind" name="kind" type="text" maxlength="128">
-        <label for="f-since">Time range</label>
-        <select id="f-since" name="since">
-          <option value="3600">Last hour</option>
-          <option value="86400" selected>Last 24 hours</option>
-          <option value="604800">Last 7 days</option>
-          <option value="2592000">Last 30 days</option>
-          <option value="0">All time</option>
-        </select>
-        <button type="submit">Apply filters</button>
+        <div class="field">
+          <label for="f-host">Host</label>
+          <input id="f-host" name="host" type="text" maxlength="128">
+        </div>
+        <div class="field">
+          <label for="f-source">Source</label>
+          <input id="f-source" name="source" type="text" maxlength="64">
+        </div>
+        <div class="field">
+          <label for="f-kind">Kind</label>
+          <input id="f-kind" name="kind" type="text" maxlength="128">
+        </div>
+        <div class="field">
+          <label for="f-since">Time range</label>
+          <select id="f-since" name="since">
+            <option value="3600">Last hour</option>
+            <option value="86400" selected>Last 24 hours</option>
+            <option value="604800">Last 7 days</option>
+            <option value="2592000">Last 30 days</option>
+            <option value="0">All time</option>
+          </select>
+        </div>
+        <button type="submit" class="form-action">Apply filters</button>
       </form>
-      <p id="events-note" role="status" aria-live="polite" class="muted"></p>
-      <div class="table-scroll">
+      <p id="events-note" role="status" aria-live="polite" class="muted form-note"></p>
+      <p id="events-empty" class="empty-state" hidden>No events match these filters.</p>
+      <div class="table-scroll" id="events-table-box">
       <table id="events-table" class="events">
         <caption>Events, newest first. Use the up and down arrow keys, Home and End to move between rows.</caption>
         <thead>
@@ -96,25 +105,29 @@
         <tbody id="events-body"></tbody>
       </table>
       </div>
-      <button type="button" id="events-more" hidden>Load older events</button>
+      <button type="button" id="events-more" class="more" hidden>Load older events</button>
     </div>
     <div id="history-panel" hidden>
       <h3 id="history-title">History</h3>
       <form id="history-form" class="filters" aria-labelledby="history-title">
-        <label for="h-series">Series</label>
-        <select id="h-series" name="series"></select>
-        <label for="h-range">Range</label>
-        <select id="h-range" name="range">
-          <option value="3600">Last hour (raw samples)</option>
-          <option value="21600">Last 6 hours (raw samples)</option>
-          <option value="86400" selected>Last 24 hours (raw samples)</option>
-          <option value="604800">Last 7 days</option>
-          <option value="2592000">Last 30 days (hourly rollups)</option>
-          <option value="7776000">Last 90 days (hourly rollups)</option>
-        </select>
-        <button type="submit">Show chart</button>
+        <div class="field">
+          <label for="h-series">Series</label>
+          <select id="h-series" name="series"></select>
+        </div>
+        <div class="field">
+          <label for="h-range">Range</label>
+          <select id="h-range" name="range">
+            <option value="3600">Last hour (raw samples)</option>
+            <option value="21600">Last 6 hours (raw samples)</option>
+            <option value="86400" selected>Last 24 hours (raw samples)</option>
+            <option value="604800">Last 7 days</option>
+            <option value="2592000">Last 30 days (hourly rollups)</option>
+            <option value="7776000">Last 90 days (hourly rollups)</option>
+          </select>
+        </div>
+        <button type="submit" class="form-action">Show chart</button>
       </form>
-      <p id="history-note" role="status" aria-live="polite" class="muted"></p>
+      <p id="history-note" role="status" aria-live="polite" class="muted form-note"></p>
       <div id="history-chart" class="chart"></div>
       <div class="table-scroll">
       <table id="history-table" class="events" hidden>
@@ -123,10 +136,10 @@
           <tr>
             <th scope="col">Time</th>
             <th scope="col">Series</th>
-            <th scope="col">Minimum</th>
-            <th scope="col">Average</th>
-            <th scope="col">Maximum</th>
-            <th scope="col">Samples</th>
+            <th scope="col" class="num">Minimum</th>
+            <th scope="col" class="num">Average</th>
+            <th scope="col" class="num">Maximum</th>
+            <th scope="col" class="num">Samples</th>
           </tr>
         </thead>
         <tbody id="history-body"></tbody>
@@ -138,8 +151,10 @@
     <div id="keys-panel" hidden>
       <h3 id="keys-title">API keys</h3>
       <form id="keys-form" class="filters" aria-labelledby="keys-title">
-        <label for="k-owner">Owner</label>
-        <input id="k-owner" name="owner" type="text" maxlength="64" required>
+        <div class="field">
+          <label for="k-owner">Owner</label>
+          <input id="k-owner" name="owner" type="text" maxlength="64" required>
+        </div>
         <fieldset>
           <legend>Scopes</legend>
           <label><input type="checkbox" name="scope" value="read:metrics"> read:metrics</label>
@@ -147,9 +162,9 @@
           <label><input type="checkbox" name="scope" value="ingest"> ingest</label>
           <label><input type="checkbox" name="scope" value="admin"> admin</label>
         </fieldset>
-        <button type="submit">Create key</button>
+        <button type="submit" class="form-action">Create key</button>
       </form>
-      <p id="keys-note" role="status" aria-live="polite" class="muted"></p>
+      <p id="keys-note" role="status" aria-live="polite" class="muted form-note"></p>
       <div id="secret-box" role="alert" hidden>
         <p>Copy this key now. It is shown once and cannot be retrieved later.</p>
         <p><code id="secret-value"></code></p>
@@ -177,21 +192,28 @@
     <div id="audit-panel" hidden>
       <h3 id="audit-title">Audit log</h3>
       <form id="audit-form" class="filters" aria-labelledby="audit-title">
-        <label for="a-kind">Kind</label>
-        <input id="a-kind" name="kind" type="text" maxlength="64">
-        <label for="a-actor">Actor</label>
-        <input id="a-actor" name="actor" type="text" maxlength="128">
-        <label for="a-since">Time range</label>
-        <select id="a-since" name="since">
-          <option value="3600">Last hour</option>
-          <option value="86400" selected>Last 24 hours</option>
-          <option value="604800">Last 7 days</option>
-          <option value="0">All time</option>
-        </select>
-        <button type="submit">Apply filters</button>
+        <div class="field">
+          <label for="a-kind">Kind</label>
+          <input id="a-kind" name="kind" type="text" maxlength="64">
+        </div>
+        <div class="field">
+          <label for="a-actor">Actor</label>
+          <input id="a-actor" name="actor" type="text" maxlength="128">
+        </div>
+        <div class="field">
+          <label for="a-since">Time range</label>
+          <select id="a-since" name="since">
+            <option value="3600">Last hour</option>
+            <option value="86400" selected>Last 24 hours</option>
+            <option value="604800">Last 7 days</option>
+            <option value="0">All time</option>
+          </select>
+        </div>
+        <button type="submit" class="form-action">Apply filters</button>
       </form>
-      <p id="audit-note" role="status" aria-live="polite" class="muted"></p>
-      <div class="table-scroll">
+      <p id="audit-note" role="status" aria-live="polite" class="muted form-note"></p>
+      <p id="audit-empty" class="empty-state" hidden>No audit rows match these filters.</p>
+      <div class="table-scroll" id="audit-table-box">
       <table id="audit-table" class="events">
         <caption>Audit log, newest first. This view is read only.</caption>
         <thead>
@@ -209,7 +231,7 @@
         <tbody id="audit-body"></tbody>
       </table>
       </div>
-      <button type="button" id="audit-more" hidden>Load older rows</button>
+      <button type="button" id="audit-more" class="more" hidden>Load older rows</button>
     </div>
   </section>
 </main>

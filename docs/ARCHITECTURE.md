@@ -1002,6 +1002,21 @@ has a caption, column headers with `scope="col"`, labelled filter fields, and ar
 End navigation between rows using a roving tabindex. Every cell is set with `textContent`, so a host
 name or title containing markup shows as text. Tests: `tests/test_ui_events.py`.
 
+### Filter forms and tables
+
+Every filter form (Events, History, Audit log, API keys) wraps each label and control in a `.field`
+block, so the label is stacked above the control. The forms use an auto-fit grid, the text inputs and
+selects share one height and style, and the submit button sits on the bottom edge of the row. The row
+count note sits under the form, and an empty result shows an `.empty-state` message in place of the
+table. All `.events` tables and the Expert readings table share one set of rules in `app.css`: a
+sticky header row with its own background and bottom border, zebra shading, a hover highlight, right
+aligned `.num` columns and `.mono` columns for paths, ids, prefixes and detail. The tables scroll
+inside their own box, capped at 70 percent of the viewport height, so the sticky header has a scroll
+container to stay in. In the Audit log the HTTP status is a badge with an icon, the code and a word
+(Success, Warning or Error), so colour is never the only signal, and the detail JSON is shown as
+`key: value` pairs separated by commas. Everything is set with `textContent`, and no style
+attributes are used. Tests: `tests/test_ui_tables_forms.py`.
+
 ### History charts
 
 The History view lists the series from `GET /internal/v1/latest` and, for the chosen series and range, reads `GET /api/v1/hosts/{host}/history` and `GET /internal/v1/gaps` (scope `read:metrics`, so the session login and the source allowlist apply). It adds no endpoint. The hub decides between raw samples and hourly rollups from the range length, so the range selector only chooses the span: up to 24 hours reads raw samples and longer ranges read rollups, and the response `resolution` field is shown to the reader. The chart is built in `app.js` with `createElementNS`: an average line and a minimum to maximum band per label set, axis labels, and a shaded, dashed rectangle for each interval the gaps endpoint reports, so missing data is visible and never interpolated. The gap threshold is twice the step, at least 120 seconds. The SVG has a title and description, and a table of the same buckets plus a list of the gaps give a text alternative. All labels are set with `textContent`, no style attributes are written, and no third-party origin is referenced. Tests: `tests/test_ui_history.py`.

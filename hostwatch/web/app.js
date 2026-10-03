@@ -90,7 +90,7 @@
     table.appendChild(el("caption", g.label + " readings on " + h.host + ". Raw values, units, labels, sources and times."));
     var head = el("tr");
     ["Reading", "Id", "Value", "Unit", "Labels", "Source", "Status", "Reason", "Timestamp"].forEach(function (t) {
-      var th = el("th", t);
+      var th = el("th", t, t === "Value" ? "num" : "");
       th.setAttribute("scope", "col");
       head.appendChild(th);
     });
@@ -101,10 +101,10 @@
     g.members.forEach(function (m) {
       var tr = el("tr");
       tr.appendChild(el("td", m.label));
-      tr.appendChild(el("td", m.id, "muted"));
-      tr.appendChild(el("td", m.value === null || m.value === undefined ? "unavailable" : m.value));
+      tr.appendChild(el("td", m.id, "muted mono"));
+      tr.appendChild(el("td", m.value === null || m.value === undefined ? "unavailable" : m.value, "num"));
       tr.appendChild(el("td", m.unit || "none"));
-      tr.appendChild(el("td", labelText(m.labels), "grow"));
+      tr.appendChild(el("td", labelText(m.labels), "grow mono"));
       tr.appendChild(el("td", m.source));
       var st = el("td");
       st.appendChild(statusMark(m.status, m.status_text));
@@ -495,8 +495,8 @@
     tr.setAttribute("data-severity", String(e.severity));
     tr.appendChild(el("td", new Date(e.ts * 1000).toLocaleString(), "nowrap"));
     tr.appendChild(el("td", e.host, "nowrap"));
-    tr.appendChild(el("td", e.source, "nowrap"));
-    tr.appendChild(el("td", e.kind, "nowrap"));
+    tr.appendChild(el("td", e.source, "nowrap mono"));
+    tr.appendChild(el("td", e.kind, "nowrap mono"));
     tr.appendChild(el("td", e.severity, "sev-" + String(e.severity).replace(/[^a-z]/g, "")));
     tr.appendChild(el("td", e.title, "grow"));
     return tr;
@@ -520,6 +520,8 @@
       if (body.firstChild && !append) { body.firstChild.tabIndex = 0; }
       byId("events-more").hidden = nextCursor === null;
       note.textContent = body.children.length ? body.children.length + " events shown." : "No events match these filters.";
+      byId("events-empty").hidden = body.children.length !== 0;
+      byId("events-table-box").hidden = body.children.length === 0;
     }).catch(function () { note.textContent = "The events could not be loaded."; });
   }
 
@@ -618,8 +620,8 @@
       var name = seriesName(s);
       s.points.forEach(function (p) {
         var tr = el("tr");
-        [new Date(p.ts * 1000).toLocaleString(), name, fmt(p.min), fmt(p.avg), fmt(p.max), p.n].forEach(function (v) {
-          tr.appendChild(el("td", v));
+        [new Date(p.ts * 1000).toLocaleString(), name, fmt(p.min), fmt(p.avg), fmt(p.max), p.n].forEach(function (v, i) {
+          tr.appendChild(el("td", v, i >= 2 ? "num" : (i === 1 ? "mono" : "")));
         });
         body.appendChild(tr);
       });
@@ -695,6 +697,29 @@
   // which sends the CSRF header.
   function apiGet(path) { return fetch(path, { credentials: "same-origin" }); }
 
+  // HTTP status as a small badge: an icon of a distinct shape, the code and a word, tinted by class.
+  function httpBadge(code) {
+    var first = String(code).charAt(0);
+    var kind = "other", word = "Other", ic = "circle-minus";
+    if (first === "2") { kind = "2xx"; word = "Success"; ic = "circle-check"; }
+    else if (first === "4") { kind = "4xx"; word = "Warning"; ic = "alert-triangle"; }
+    else if (first === "5") { kind = "5xx"; word = "Error"; ic = "circle-x"; }
+    var badge = el("span", null, "http-badge http-" + kind);
+    badge.appendChild(icon(ic));
+    badge.appendChild(document.createTextNode(String(code) + " " + word));
+    return badge;
+  }
+
+  // Detail JSON as key: value pairs separated by commas. Nested values are shown as compact text.
+  function detailText(detail) {
+    if (detail === null || detail === undefined) { return ""; }
+    if (typeof detail !== "object") { return String(detail); }
+    return Object.keys(detail).map(function (k) {
+      var v = detail[k];
+      return k + ": " + (v !== null && typeof v === "object" ? detailText(v) : String(v));
+    }).join(", ");
+  }
+
   function clear(node) { while (node.firstChild) { node.removeChild(node.firstChild); } }
 
   // The one-time secret lives in the DOM only while it is shown. Leaving the view, signing out,
@@ -715,8 +740,8 @@
 
   function keyRow(k) {
     var tr = el("tr");
-    tr.appendChild(el("td", k.id));
-    tr.appendChild(el("td", k.prefix));
+    tr.appendChild(el("td", k.id, "mono"));
+    tr.appendChild(el("td", k.prefix, "mono"));
     tr.appendChild(el("td", k.owner));
     tr.appendChild(el("td", k.scopes.join(", ")));
     tr.appendChild(el("td", new Date(k.created * 1000).toLocaleString()));
@@ -818,9 +843,13 @@
   function auditRow(r) {
     var tr = el("tr");
     // Fixed-format columns stay on one line; path and detail wrap and take the spare width.
-    [[new Date(r.ts * 1000).toLocaleString(), "nowrap"], [r.actor, "nowrap"], [r.kind, "nowrap"],
-     [r.method, "nowrap"], [r.path, "path"], [r.status, "nowrap"], [r.remote, "nowrap"],
-     [JSON.stringify(r.detail), "grow"]].forEach(function (c) { tr.appendChild(el("td", c[0], c[1])); });
+    [[new Date(r.ts * 1000).toLocaleString(), "nowrap"], [r.actor, "nowrap"], [r.kind, "nowrap mono"],
+     [r.method, "nowrap mono"], [r.path, "path mono"]].forEach(function (c) { tr.appendChild(el("td", c[0], c[1])); });
+    var st = el("td", null, "nowrap");
+    st.appendChild(httpBadge(r.status));
+    tr.appendChild(st);
+    tr.appendChild(el("td", r.remote, "nowrap mono"));
+    tr.appendChild(el("td", detailText(r.detail), "grow mono"));
     return tr;
   }
 
@@ -838,6 +867,8 @@
       auditCursor = doc.rows.length === EVENT_PAGE ? doc.rows[doc.rows.length - 1].id : null;
       byId("audit-more").hidden = auditCursor === null;
       note.textContent = body.children.length ? body.children.length + " rows shown." : "No audit rows match these filters.";
+      byId("audit-empty").hidden = body.children.length !== 0;
+      byId("audit-table-box").hidden = body.children.length === 0;
     }).catch(function () { note.textContent = "The audit log could not be loaded."; });
   }
 
