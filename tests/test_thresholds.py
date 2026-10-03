@@ -92,3 +92,43 @@ def test_agent_batch_includes_events_from_event_source_and_thresholds(tmp_path):
     assert "fake.thing" in got and "md.degraded" in got
     assert any(s.source == "fake" and s.available for s in batch.sources)
     assert "fake.thing" not in kinds(agent.collect_once().events)  # not resent
+
+
+def ups_flags(status):
+    present = status.split()
+    return [Sample(source="nut", metric="ups_status_flag", value=1 if f in present else 0,
+                   labels={"flag": f, "status": status}, ts=1.0) for f in ("OL", "OB", "LB")]
+
+
+def test_ups_on_battery_low_battery_and_back_on_line():
+    eng = ThresholdEngine()
+    assert eng.evaluate(ups_flags("OL"), [], now=1) == []
+    ev = eng.evaluate(ups_flags("OB DISCHRG"), [], now=2)
+    assert kinds(ev) == ["ups.on_battery"] and ev[0].severity == "warning"
+    ev = eng.evaluate(ups_flags("OB LB"), [], now=3)
+    assert kinds(ev) == ["ups.low_battery"] and ev[0].severity == "critical"
+    ev = eng.evaluate(ups_flags("OL CHRG"), [], now=4)
+    assert kinds(ev) == ["ups.on_line"] and ev[0].detail["state"] == "OL"
+
+
+def test_ups_steady_states_repeat_nothing_and_unknown_is_ignored():
+    eng = ThresholdEngine()
+    for t in (1, 2):
+        assert eng.evaluate(ups_flags("OL"), [], now=t) == []
+    assert kinds(eng.evaluate(ups_flags("OB"), [], now=3)) == ["ups.on_battery"]
+    for t in (4, 5):
+        assert eng.evaluate(ups_flags("OB"), [], now=t) == []
+    unknown = [Sample(source="nut", metric="ups_status_flag", value=None,
+                      labels={"flag": f, "status": ""}, ts=1.0) for f in ("OL", "OB", "LB")]
+    assert eng.evaluate(unknown, [], now=6) == []
+    assert eng.evaluate(ups_flags("OB"), [], now=7) == []
+
+
+def test_ups_open_condition_survives_restart_via_seed():
+    eng = ThresholdEngine()
+    eng.evaluate(ups_flags("OL"), [], now=1)
+    stored = [e.model_dump() for e in eng.evaluate(ups_flags("OB"), [], now=2)]
+    eng2 = ThresholdEngine()
+    eng2.seed(stored)
+    assert eng2.evaluate(ups_flags("OB"), [], now=3) == []
+    assert kinds(eng2.evaluate(ups_flags("OL"), [], now=4)) == ["ups.on_line"]

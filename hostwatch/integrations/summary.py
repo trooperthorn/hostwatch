@@ -44,7 +44,10 @@ STATUS_OK, STATUS_WARNING, STATUS_CRITICAL = 0, 1, 2
 # Expected component group -> the source that feeds it. A group whose source is unavailable,
 # stale or has never reported is unmeasured. Pools are left out: no pool source is collected.
 EXPECTED_GROUPS = {"cpu": "cpu", "memory": "memory", "power": "rapl", "temperatures": "hwmon",
-                   "raid": "mdraid", "disks": "scrutiny"}
+                   "raid": "mdraid", "disks": "scrutiny", "ups": "nut"}
+# Groups that are expected only when their source has a row at all. The nut source reports
+# not present when NUT is unconfigured, so a host with no nut row is treated as not using NUT.
+OPTIONAL_GROUPS = frozenset({"ups"})
 
 # (warning, critical) thresholds, in the unit of the value. These are defaults
 # chosen for desktop and server parts, not measured limits; see UNVERIFIED.md.
@@ -110,10 +113,12 @@ class HostSummary:
     disappeared: list[str] = field(default_factory=list)
     silent: str = ""
     crashes: list[dict] = field(default_factory=list)
+    ups: Component | None = None
 
     def components(self) -> list[Component]:
+        extra = [self.ups] if self.ups is not None else []
         return [self.cpu, self.memory, self.package_power, *self.temperatures, *self.md_arrays,
-                *self.disks, *self.sources.values()]
+                *self.disks, *extra, *self.sources.values()]
 
     @property
     def status(self) -> int | None:
@@ -275,6 +280,24 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
         lab = {k: r["labels"].get(k, "") for k in ("wwn", "device", "model")}
         temps.append(comp(f"disk_temp.{lab['wwn']}", "scrutiny", [r], "C", DISK_TEMP_C, lab))
 
+    # UPS power state from the ups.status flags: on battery is a warning, low battery is critical.
+    ups: Component | None = None
+    if "nut" in src_rows and "nut" not in absent:
+        flags = {r["labels"].get("flag"): r for r in pick("nut", "ups_status_flag")
+                 if r["labels"].get("flag") in ("OL", "OB", "LB")}
+        ups = comp("ups_status", "nut", [flags[f] for f in ("OL", "OB", "LB") if f in flags], "")
+        if ups.value is not None:
+            if any(flags[f]["value"] is None for f in ("OL", "OB", "LB") if f in flags):
+                ups = Component("ups_status", None, "", "unknown", "nut did not report ups.status")
+            elif flags.get("LB", {}).get("value"):
+                ups.state, ups.reason = "critical", "UPS reports low battery"
+            elif flags.get("OB", {}).get("value"):
+                ups.state, ups.reason = "warning", "UPS is on battery"
+            elif flags.get("OL", {}).get("value"):
+                ups.state = "ok"
+            else:
+                ups = Component("ups_status", None, "", "unknown", "ups.status has none of OL, OB or LB")
+
     # Open conditions: the newest threshold event per rule key, kept if its state is active.
     newest: dict[str, dict] = {}
     for e in events:
@@ -288,7 +311,8 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
         if ((key.startswith("md.degraded") and state is True)
                 or (key.startswith("scrutiny.") and isinstance(state, int) and not isinstance(state, bool)
                     and state > 0)
-                or (key.startswith("source|") and state is False)):
+                or (key.startswith("source|") and state is False)
+                or (key.startswith("ups.power") and state in ("OB", "LB"))):
             open_conditions.append(key)
 
     def flag(comps: list[Component], bad: tuple[str, ...]) -> bool | None:
@@ -306,10 +330,12 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     }
     last_seen = max((r["updated"] for r in src_rows.values()), default=None)
     group_comps = {"cpu": [cpu], "memory": [memory], "power": [power], "temperatures": temps,
-                   "raid": md, "disks": disks}
+                   "raid": md, "disks": disks, "ups": [ups] if ups is not None else []}
     unmeasured = []
     not_present = []
     for group, source in EXPECTED_GROUPS.items():
+        if group in OPTIONAL_GROUPS and source not in src_rows:
+            continue
         if source in absent:
             # Scrutiny disk temperatures can still populate temperatures when hwmon is absent.
             if group != "temperatures" or not temps:
@@ -340,4 +366,4 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     crash_rows = [{"id": e["id"], "kind": e["kind"].split(".", 1)[1], "ts": e["ts"]} for e in crashes]
     return HostSummary(host, now, cpu, memory, power, temps, md, disks, sources, problems,
                        sorted(open_conditions), last_seen, unmeasured, not_present, sorted(gone),
-                       silent, crash_rows)
+                       silent, crash_rows, ups)

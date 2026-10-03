@@ -40,7 +40,9 @@ and emits `ups_status_flag` (labels `flag` and `status`; `OL`, `OB` and `LB`
 always, other flags while present), `battery_charge_pct`, `battery_runtime_s`,
 `input_voltage_v` and `ups_load_pct`. A variable the server omits is stored as
 unavailable, and an unreachable server, a timeout or an `ERR` reply makes the
-source unavailable with the reason. Transition events come in a later slice.
+source unavailable with the reason. The threshold engine turns the `OL`, `OB` and
+`LB` flags into the events `ups.on_battery` (warning), `ups.low_battery` (critical)
+and `ups.on_line` (info); see Threshold events.
 
 ## Data flow
 
@@ -263,6 +265,18 @@ triggers a rule and never counts as a recovery, so an unreadable source cannot
 look like a recovered array. A source that is unavailable from the start is not a
 flip and gives no event. The first value seen for an array's sync state is a
 baseline, not a change.
+
+UPS events read the `nut` `ups_status_flag` samples. The state is `OL`, `OB` or
+`LB` (low battery wins), kept under rule key `ups.power|ups` and seeded like the
+other rules. A cycle in which any of the three flags is unknown changes nothing.
+A UPS first seen on line is a baseline; first seen on battery raises
+`ups.on_battery`. Low battery that clears while the UPS is still on battery
+updates the state without an event. The host summary gains a `ups` group: on
+battery is a warning, low battery is critical, and an unavailable or stale `nut`
+source makes the group unmeasured (overall status at least 1). When NUT is not
+configured the source is not present and the group adds no warning; a host with
+no `nut` row is treated the same way. The Orion and Home Assistant outputs do not
+yet publish this group, but its status counts toward the host's overall status.
 
 State is held in memory. When the agent starts it asks the hub for the host's
 stored events (`GET /internal/v1/events`) and seeds the state from the rule key

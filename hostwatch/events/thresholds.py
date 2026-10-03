@@ -20,6 +20,9 @@ Rules:
   source.returned         that source is present and available again
   scrutiny.status_raised  Scrutiny device_status grew above its previous value
   scrutiny.status_cleared device_status returned to 0
+  ups.on_battery          ups.status changed from on line to OB (warning)
+  ups.low_battery         ups.status shows LB (critical)
+  ups.on_line             ups.status is OL again after OB or LB
 """
 
 from __future__ import annotations
@@ -58,7 +61,8 @@ class ThresholdEngine:
                  now: float | None = None) -> list[Event]:
         now = time.time() if now is None else now
         out: list[Event] = []
-        for s in samples:
+        samples_list = list(samples)
+        for s in samples_list:
             if s.value is None:
                 continue  # unknown: neither a trigger nor a recovery
             if s.source == "mdraid" and s.metric == "degraded":
@@ -67,6 +71,7 @@ class ThresholdEngine:
                 self._sync(s, now, out)
             elif s.source == "scrutiny" and s.metric == "device_status":
                 self._scrutiny(s, now, out)
+        self._ups(samples_list, now, out)
         for st in statuses:
             self._source(st, now, out)
         return out
@@ -120,6 +125,37 @@ class ThresholdEngine:
                        previous=prev, current=0)
         else:
             self.state[key] = value
+
+    def _ups(self, samples: list[Sample], now: float, out: list[Event]) -> None:
+        """Edges of the ups.status flags. The state is "OL", "OB" or "LB" (LB wins over OB).
+
+        All three core flags must be known in the cycle; otherwise nothing changes. The first
+        sight of a UPS on line is a baseline; first sight on battery raises, like a degraded array.
+        """
+        flags: dict[str, Any] = {}
+        status = ""
+        for s in samples:
+            if s.source == "nut" and s.metric == "ups_status_flag" and s.labels.get("flag") in ("OL", "OB", "LB"):
+                flags[s.labels["flag"]] = s.value
+                status = s.labels.get("status", status)
+        if len(flags) < 3 or any(v is None for v in flags.values()):
+            return
+        new = "LB" if flags["LB"] else "OB" if flags["OB"] else "OL" if flags["OL"] else None
+        if new is None:
+            return
+        key = "ups.power|ups"
+        was = self.state.get(key)
+        if new == was:
+            return
+        if new == "LB":
+            self._emit(out, key, "ups.low_battery", "critical", now, "UPS battery is low", new, status=status)
+        elif new == "OB" and was in (None, "OL"):
+            self._emit(out, key, "ups.on_battery", "warning", now, "UPS is running on battery", new,
+                       status=status)
+        elif new == "OL" and was is not None:
+            self._emit(out, key, "ups.on_line", "info", now, "UPS is back on line power", new, status=status)
+        else:
+            self.state[key] = new  # first OL baseline, or LB recovered while still on battery
 
     def _presence(self, st: SourceStatus, now: float, out: list[Event]) -> None:
         key = f"source.presence|source={st.source}"

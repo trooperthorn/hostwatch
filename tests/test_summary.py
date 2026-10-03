@@ -133,3 +133,32 @@ def test_memory_unavailable_when_total_missing():
     rows = [r for r in healthy_rows() if r["metric"] != "mem_total"]
     s = build(rows)
     assert s.memory.value is None and s.memory.reason and s.problems["memory_low"] is None
+
+
+def ups_rows(status):
+    present = status.split()
+    return [row("nut", "ups_status_flag", 1 if f in present else 0, flag=f, status=status)
+            for f in ("OL", "OB", "LB")]
+
+
+def test_ups_group_status_levels():
+    sources = [src(n) for n in ALL] + [src("nut")]
+    ok = build(healthy_rows() + ups_rows("OL"), sources)
+    assert ok.ups.status == 0 and ok.overall_status == 0
+    warn = build(healthy_rows() + ups_rows("OB"), sources)
+    assert warn.ups.status == 1 and warn.overall_status == 1
+    crit = build(healthy_rows() + ups_rows("OB LB"), sources)
+    assert crit.ups.status == 2 and crit.overall_status == 2
+
+
+def test_ups_unavailable_is_unmeasured_only_when_configured():
+    down = [src(n) for n in ALL] + [src("nut", available=False, reason="cannot reach")]
+    s = build(healthy_rows(), down)
+    assert "ups" in s.unmeasured and s.ups.status is None and s.overall_status == 1
+    # Unconfigured NUT reports not present and adds no warning.
+    absent = [src(n) for n in ALL] + [{**src("nut", available=False), "present": 0}]
+    s = build(healthy_rows(), absent)
+    assert "ups" not in s.unmeasured and "ups" in s.not_present and s.overall_status == 0
+    # No nut row at all adds nothing either.
+    s = build(healthy_rows())
+    assert "ups" not in s.unmeasured and "ups" not in s.not_present and s.ups is None
