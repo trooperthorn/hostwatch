@@ -170,7 +170,7 @@ def test_grouped_endpoint_orders_worst_first_with_banner(tmp_path):
     assert doc["hosts"][0]["host"] == "bbb-bad" and doc["hosts"][0]["status_key"] == "critical"
     raid = [g for g in doc["hosts"][0]["groups"] if g["id"] == "raid"][0]
     assert raid["status"] == "critical" and raid["icon"] == "stack-2"
-    assert doc["banner"]["host"] == "bbb-bad" and "Critical" in doc["banner"]["text"]
+    assert doc["banner"]["host"] == "bbb-bad" and "is critical" in doc["banner"]["text"]
     assert doc["banner"]["counts"]["hosts"]["critical"] == 1
     assert doc["banner"]["counts"]["groups"]["critical"] >= 1
 

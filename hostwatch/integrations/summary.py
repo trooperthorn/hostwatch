@@ -27,6 +27,7 @@ Rules that follow the project contract:
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
@@ -414,6 +415,11 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     for arr in sorted({r["labels"].get("array", "") for r in rows if r["source"] == "mdraid"}):
         c = comp(f"md.{arr}", "mdraid", pick("mdraid", "degraded", array=arr), "count", labels={"array": arr})
         if c.value is not None:
+            for metric, key, out_key in (("degraded", "level", "level"), ("array_state", "state", "array_state"),
+                                         ("sync_action", "action", "sync_action")):
+                found = pick("mdraid", metric, array=arr)
+                if found:
+                    c.labels[out_key] = str(max(found, key=lambda x: x["ts"])["labels"].get(key, ""))
             syncing = any(r["labels"].get("action") not in (None, "idle") and r["value"] is not None
                           and now - r["ts"] <= STALE_AFTER_S for r in pick("mdraid", "sync_action", array=arr))
             c.state = "critical" if c.value > 0 else "warning" if syncing else "ok"
@@ -476,6 +482,7 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
                 pi = Component("pi_throttling", None, "", "unknown", "rpi could not decode the throttled bitmask")
             else:
                 on = {k for k, r in flags.items() if r["value"]}
+                pi.labels["flags"] = ",".join(sorted(on))
                 if "under_voltage_now" in on:
                     pi.value, pi.state, pi.reason = 2.0, "critical", "Raspberry Pi is under-voltage now"
                 elif on & {"freq_capped_now", "throttled_now", "soft_temp_limit_now"}:
@@ -645,13 +652,133 @@ def _member_label(c: Component) -> str:
     for key in ("pool", "array", "device"):
         if lab.get(key):
             return lab[key]
-    return c.name
+    if c.name.startswith("source."):
+        return c.name.split(".", 1)[1]
+    return _FIXED_LABELS.get(c.name) or _prefix_label(c.name)
+
+
+_FIXED_LABELS = {
+    "cpu_utilization": "CPU", "memory_used": "Memory", "package_power": "Package", "wall_power": "Wall power",
+    "pi_throttling": "Pi power supply", "ups_status": "UPS", "host_silent": "Host silent",
+    "boot.last": "Last boot", "truenas_pools": "TrueNAS pools", "pool": "Pools", "md": "RAID", "disk": "Disks",
+    "temp": "Temperatures",
+}
+_PREFIX_LABELS = {"truenas_alert": "TrueNAS alert", "crash": "Crash event", "condition": "Open condition",
+                  "event": "Event", "disk": "Disk", "pool": "Pool", "md": "RAID array"}
+_PI_FLAG_TEXT = {
+    "under_voltage_now": "Under-voltage now", "freq_capped_now": "Frequency capped now",
+    "throttled_now": "Throttled now", "soft_temp_limit_now": "Soft temperature limit active now",
+    "under_voltage_occurred": "Under-voltage has occurred since boot",
+    "freq_capped_occurred": "Frequency capping has occurred since boot",
+    "throttled_occurred": "Throttling has occurred since boot",
+    "soft_temp_limit_occurred": "The soft temperature limit has been reached since boot",
+}
+_ERRNO_TEXT = (("permission denied", "permission denied"), ("no such file", "not found"),
+               ("not a directory", "not a directory"), ("is a directory", "is a directory"))
+
+
+def _prefix_label(name: str) -> str:
+    return _PREFIX_LABELS.get(name.split(".", 1)[0], name)
+
+
+def _number(value: float, places: int) -> str:
+    return f"{round(value, places):g}"
+
+
+def _plain_error(text: str) -> str:
+    """Turn an OS error such as "[Errno 13] Permission denied: '/x'" into a short phrase."""
+    low = text.lower()
+    for needle, phrase in _ERRNO_TEXT:
+        if needle in low:
+            return phrase
+    return re.sub(r"^\[errno \d+\]\s*", "", low).split(": '", 1)[0].strip()
+
+
+def _plain_reason(reason: str) -> str:
+    """A reason with OS errors as short phrases, for example "cannot read /x (permission denied)"."""
+    m = re.match(r"cannot read (\S+?):\s+(.*)$", reason)
+    if m:
+        return f"cannot read {m.group(1)} ({_plain_error(m.group(2))})"
+    return reason
+
+
+def _source_text(c: Component) -> str:
+    name = c.name.split(".", 1)[1] if "." in c.name else c.name
+    if c.state == "ok":
+        return f"{name}: reporting"
+    m = re.match(rf"source {re.escape(name)} (unavailable|stale|disappeared|is not present):?\s*(.*)$", c.reason)
+    if not m:
+        return f"{name}: {_plain_reason(c.reason) or 'no reading'}"
+    kind, rest = m.group(1), m.group(2)
+    if kind == "unavailable":
+        return f"{name}: {_plain_reason(rest)}"
+    if kind == "stale":
+        return f"{name}: stale, {rest}"
+    if kind == "disappeared":
+        return f"{name}: disappeared, {rest}"
+    return f"{name}: not present on this host"
+
+
+def _md_text(c: Component, label: str) -> str:
+    head = f"{label} {c.labels.get('level', '').upper()}".strip()
+    if c.value is None:
+        return f"{head}: {c.reason or 'no reading'}"
+    state = "degraded" if c.value > 0 else c.labels.get("array_state", "")
+    parts = [p for p in (state, c.labels.get("sync_action", "")) if p and p != "unknown"]
+    return f"{head} {', '.join(parts)}".strip()
+
+
+def _pi_text(c: Component) -> str:
+    if c.value is None:
+        return f"Pi power supply: {c.reason or 'no reading'}"
+    flags = [f for f in c.labels.get("flags", "").split(",") if f]
+    if not flags:
+        return "Pi power supply is good"
+    order = list(_PI_FLAG_TEXT)
+    flags.sort(key=lambda f: order.index(f) if f in order else len(order))
+    now = [f for f in flags if f.endswith("_now")]
+    return _PI_FLAG_TEXT.get((now or flags)[0], (now or flags)[0])
+
+
+def _member_text(c: Component, label: str) -> str:
+    """One plain line for a member: no metric id, no source prefix and rounded numbers."""
+    name, v = c.name, c.value
+    if name.startswith("source."):
+        return _source_text(c)
+    if name.startswith("md.") or name == "md":
+        return _md_text(c, label)
+    if name == "pi_throttling":
+        return _pi_text(c)
+    if name == "ups_status":
+        return "UPS is on line power" if c.state == "ok" else f"UPS: {c.reason or 'no reading'}"
+    if v is None:
+        reason = _plain_reason(c.reason)
+        if name.startswith(("truenas_alert.", "boot.last", "crash.", "condition.", "event.", "host_silent")):
+            return re.sub(r"^informational:\s*", "", reason) or label
+        return f"{label}: {reason}" if reason else label
+    if name in ("cpu_utilization", "memory_used"):
+        return f"{label} {_number(v, 0)} {c.unit} used"
+    if c.unit == "W":
+        return f"{label} {_number(v, 1)} W"
+    if c.unit == "C":
+        return f"{label} {_number(v, 1)} C"
+    if c.unit == "RPM":
+        return f"{label} {_number(v, 0)} RPM"
+    if name.startswith(("pool.", "truenas_pool.")):
+        state = c.labels.get("state") or c.labels.get("status") or ""
+        text = f"Pool {label} {state.lower()}".rstrip()
+        return f"{text}: {c.reason}" if c.reason else text
+    if name.startswith("disk."):
+        return f"{label} {'healthy' if c.state == 'ok' else 'failing'}"
+    return f"{label} {_number(v, 1)} {c.unit}".rstrip()
 
 
 def _member(c: Component, default_source: str) -> dict[str, Any]:
     key = status_key(c.state)
-    return {"name": c.name, "label": _member_label(c), "value": c.value, "unit": c.unit,
-            "labels": dict(c.labels), "source": c.source or c.labels.get("source") or default_source,
+    label = _member_label(c)
+    return {"id": c.name, "name": c.name, "label": label, "text": _member_text(c, label), "value": c.value,
+            "unit": c.unit, "labels": dict(c.labels),
+            "source": c.source or c.labels.get("source") or default_source,
             "status": key, "status_text": _KEY_TEXT[key], "reason": c.reason, "ts": c.ts}
 
 
@@ -659,11 +786,7 @@ def _group_summary(members: list[dict], agg: str) -> str:
     if not members:
         return "No readings reported."
     if len(members) == 1:
-        m = members[0]
-        if m["value"] is not None:
-            text = f"{m['label']}: {m['value']:g} {m['unit']}".rstrip()
-            return f"{text}. {m['reason']}" if m["reason"] else text
-        return f"{m['label']}: {m['reason'] or m['status_text']}"
+        return members[0]["text"]
     counts = [f"{sum(1 for m in members if m['status'] == k)} {k}" for k in STATUS_KEYS
               if any(m["status"] == k for m in members)]
     text = ", ".join(counts)
@@ -672,10 +795,10 @@ def _group_summary(members: list[dict], agg: str) -> str:
         text += f" ({info} informational)"
     if agg in ("warning", "critical"):
         worst = next(m for m in members if m["status"] == agg)
-        text += f". {worst['label']}: {worst['reason'] or worst['status_text']}"
+        text += f". {worst['text']}"
     elif agg == "unknown":
         gaps = [m for m in members if m["status"] == "unknown"]
-        text += ". Not measured: " + "; ".join(f"{m['label']} ({m['reason'] or m['status_text']})" for m in gaps)
+        text += ". Not measured: " + "; ".join(m["text"] for m in gaps)
     return text
 
 
@@ -742,6 +865,19 @@ def grouped_host_document(s: HostSummary) -> dict[str, Any]:
             "last_seen": s.last_seen, "groups": group_documents(s)}
 
 
+def _worst_problem(host: dict[str, Any]) -> str:
+    """The one worst member of a host in plain words: critical before warning before unknown, with
+    the group order breaking ties. Group summaries are never repeated here."""
+    best, best_rank = None, -1
+    for g in host["groups"]:
+        for m in g["members"]:
+            if m["status"] != "good" and _KEY_RANK[m["status"]] > best_rank:
+                best, best_rank = m, _KEY_RANK[m["status"]]
+    if best is None:
+        return ""
+    return best["text"].rstrip(".")
+
+
 def grouped_document(summaries: list[HostSummary], now: float) -> dict[str, Any]:
     """All hosts worst first, then by name, with a banner naming the worst problem and counts."""
     hosts = sorted((grouped_host_document(s) for s in summaries), key=lambda h: (-h["status"], h["host"]))
@@ -755,15 +891,9 @@ def grouped_document(summaries: list[HostSummary], now: float) -> dict[str, Any]
         if worst["status"] == 0:
             text = "All hosts are good."
         else:
-            text = f"{worst['host']}: {worst['status_text']}"
-            problem = worst["reason"]
-            if not problem:
-                bad = [g for g in worst["groups"] if g["status"] in ("warning", "critical")]
-                if bad:
-                    g = max(bad, key=lambda g: _KEY_RANK[g["status"]])
-                    problem = f"{g['label']}: {g['summary']}"
-            if problem:
-                text += f". {problem}"
+            text = f"{worst['host']} is {worst['status_text'].lower()}"
+            problem = _worst_problem(worst)
+            text += f": {problem}." if problem else "."
         banner = {"status": worst["status"], "status_key": worst["status_key"],
                   "status_text": worst["status_text"], "host": worst["host"], "text": text}
     banner["counts"] = {"hosts": host_counts, "groups": group_counts}

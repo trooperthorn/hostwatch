@@ -401,10 +401,12 @@ worst first, with an ordered list of component groups: `cpu`, `memory`, `power`,
 `fans`, `pools`, `raid`, `disks`, `ups`, `pi_power`, `alerts` and `sources`. Each group carries its
 label, an icon name, an aggregate status of `good`, `warning`, `critical` or `unknown` (the worst
 warning or critical member; unknown when any member is unmeasured and none is worse, with the summary
-naming it), a one-line summary and its member readings with
-value, unit, labels, source, status, reason and timestamp. A group is left out on a host that has no
-members for it and no present source behind it. The `banner` names the worst problem and counts hosts
-and groups per status. Every group, hidden or not, counts toward the host status, so a host is Good
+naming it), a one-line plain-language summary and its member readings with
+id (the machine name), label and text (both built on the server in plain words, with rounded numbers),
+value, unit, labels, source, status, reason and timestamp. The page shows only the label and text; Expert
+view shows the id in a muted column. A group is left out on a host that has no
+members for it and no present source behind it. The `banner` is one short sentence naming the worst host, its status and its single worst
+problem, and counts hosts and groups per status; it never repeats a group summary. Every group, hidden or not, counts toward the host status, so a host is Good
 only when no group is warning, critical or unknown. The `alerts` group includes active and dismissed
 TrueNAS alerts, the last boot classification and warning or critical events from the last
 `HOSTWATCH_ALERT_WINDOW_S` seconds (default 86400).

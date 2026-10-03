@@ -448,7 +448,13 @@ HTTP 401 as a rejected token, distinct from an unreachable hub.
 `summary.py` also builds the grouped view that the dashboard draws. `group_documents` decides the
 membership of each group (`cpu`, `memory`, `power`, `temperatures`, `fans`, `pools`, `raid`, `disks`,
 `ups`, `pi_power`, `alerts`, `sources`, in that order) and its aggregate status once on the server, so
-the page never re-derives either. The aggregate is the worst member; it is unknown only when every
+the page never re-derives either.
+Every member also gets a plain-language `label` and `text` built on the server (for example "CPU 3 % used",
+"md127 RAID1 clean, idle" or "pstore: cannot read /host/pstore (permission denied)"), with percent rounded to
+whole numbers and watts and degrees to one decimal, and keeps its machine name in `id`. The group summary is
+built from those texts, so it carries no metric ids or `source.` prefixes, and the page never formats a value.
+The banner text is one sentence, "HOST is STATUS: worst member text.", chosen by `grouped_document` from the
+worst critical, then warning, then unknown member; the counts line sits under it. The aggregate is the worst member; it is unknown only when every
 member is unknown. A group with no members is omitted unless one of its sources is present on the host.
 The aggregate is the worst warning or critical member. When no member is warning or critical but at
 least one is unknown or unavailable, the group reads unknown and its summary names each unmeasured

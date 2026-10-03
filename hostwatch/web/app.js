@@ -65,11 +65,6 @@
   // Every state, order, text and aggregate below comes from /api/v1/hosts/summary/grouped. Nothing
   // here compares a value to a limit, groups components or decides what is healthy. The only
   // choices made here are presentation: which view to draw and which groups the user asked to see.
-  function readingValue(m) {
-    if (m.value === null || m.value === undefined) { return "no value"; }
-    return String(m.value) + (m.unit ? " " + m.unit : "");
-  }
-
   function labelText(labels) {
     var keys = Object.keys(labels || {});
     return keys.length ? keys.map(function (k) { return k + "=" + labels[k]; }).join(", ") : "none";
@@ -81,9 +76,8 @@
     var list = el("ul", null, "readings");
     g.members.forEach(function (m) {
       var li = el("li");
-      li.appendChild(el("span", m.label + ": " + readingValue(m) + " "));
+      li.appendChild(el("span", m.text + " "));
       li.appendChild(statusMark(m.status, m.status_text));
-      if (m.reason) { li.appendChild(el("span", " " + m.reason, "muted")); }
       list.appendChild(li);
     });
     if (!g.members.length) { list.appendChild(el("li", "No readings reported.")); }
@@ -95,7 +89,7 @@
     var table = el("table", null, "expert-table");
     table.appendChild(el("caption", g.label + " readings on " + h.host + ". Raw values, units, labels, sources and times."));
     var head = el("tr");
-    ["Reading", "Value", "Unit", "Labels", "Source", "Status", "Reason", "Timestamp"].forEach(function (t) {
+    ["Reading", "Id", "Value", "Unit", "Labels", "Source", "Status", "Reason", "Timestamp"].forEach(function (t) {
       var th = el("th", t);
       th.setAttribute("scope", "col");
       head.appendChild(th);
@@ -107,6 +101,7 @@
     g.members.forEach(function (m) {
       var tr = el("tr");
       tr.appendChild(el("td", m.label));
+      tr.appendChild(el("td", m.id, "muted"));
       tr.appendChild(el("td", m.value === null || m.value === undefined ? "unavailable" : m.value));
       tr.appendChild(el("td", m.unit || "none"));
       tr.appendChild(el("td", labelText(m.labels), "grow"));
