@@ -58,4 +58,4 @@ def test_installed_package_contains_web_assets():
     for name in ("index.html", "app.css", "app.js"):
         assert files("hostwatch").joinpath("web", name).is_file()
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
-    assert "COPY hostwatch ./hostwatch" in dockerfile and "pip install --no-cache-dir ." in dockerfile
+    assert "COPY hostwatch ./hostwatch" in dockerfile and "pip install --no-cache-dir --no-deps ." in dockerfile

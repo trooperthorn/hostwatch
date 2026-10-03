@@ -342,6 +342,18 @@ the node for some time, so an outage shorter than that is not witnessed. Such a 
 second entity where that matters. The detection time on the real controller is an owner check in
 `UNVERIFIED.md`.
 
+## Dependency lock
+
+The container image installs its runtime dependencies from `requirements.lock`, which pins every
+package with `==` and at least one SHA-256 hash. The Dockerfile runs
+`pip install --require-hashes --no-cache-dir -r requirements.lock` and then installs hostwatch
+itself with `--no-deps`, so a substituted package fails the build. Regenerate the lock after
+changing the dependencies in `pyproject.toml`:
+
+```
+uv pip compile pyproject.toml --generate-hashes --universal --python-version 3.12 -o requirements.lock
+```
+
 ## Tests
 
 ```

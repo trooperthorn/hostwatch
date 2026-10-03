@@ -788,6 +788,14 @@ and names both kinds (`session_cookie` and `bearer`). This is enforced in
 refused by `Config.validate`, because the hub routes any `hw_` bearer to the API
 key lookup and such a token could never match.
 
+## Image dependency install
+
+The Dockerfile copies `requirements.lock` and installs it with
+`pip install --require-hashes --no-cache-dir -r requirements.lock`, then installs the package with
+`--no-deps`. The base image is pinned by its multi-arch index digest. `tests/test_release.py`
+parses `pyproject.toml` and the lock and checks that every runtime dependency is pinned with `==`,
+that every lock entry carries a sha256 hash, and that the Dockerfile uses `--require-hashes`.
+
 ## Web UI shell (Phase 5)
 
 The hub serves a static page from `hostwatch/web/`: `GET /` returns `index.html` and
