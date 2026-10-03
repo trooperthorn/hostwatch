@@ -10,6 +10,7 @@ dependencies = [
   "pydantic>=2.6",
   "argon2-cffi>=23.1",
   "paho-mqtt>=2.0",
+  "websockets>=13",
 ]
 
 [project.optional-dependencies]
