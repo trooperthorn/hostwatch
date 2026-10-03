@@ -47,6 +47,9 @@ CREATE TABLE IF NOT EXISTS agents (
 # with IF NOT EXISTS so that running it twice changes nothing.
 SCHEMA_VERSION = 8
 
+# Longest history range served from raw samples. Longer ranges use the hourly rollups.
+HISTORY_RAW_MAX_S = 2 * 86400.0
+
 def _add_sources_present(db: sqlite3.Connection) -> None:
     """Add sources.present (default 1, so rows from older agents read as present) once."""
     cols = {r[1] for r in db.execute("PRAGMA table_info(sources)")}
@@ -592,6 +595,41 @@ class Store:
                 "SELECT DISTINCT ts FROM samples WHERE host=? AND source=? AND metric=? AND ts>=? "
                 "AND value IS NOT NULL ORDER BY ts", (host, source, metric, since))]
         return [(a, b) for a, b in zip(ts, ts[1:]) if b - a > max_gap_s]
+
+    def history(self, host: str, source: str, metric: str, since: float, until: float, step: float,
+                raw_max_s: float = HISTORY_RAW_MAX_S, limit: int = 100000) -> dict:
+        """Min, average and maximum per step bucket, one series per label set.
+
+        A range no longer than raw_max_s reads the samples table. A longer range reads
+        rollup_hourly, so it has hour resolution and the step is raised to a whole number
+        of hours. Unavailable samples (NULL value) never enter the math. All SQL is
+        parameterized. At most limit buckets are returned, oldest first."""
+        use_rollup = (until - since) > raw_max_s
+        if use_rollup:
+            step = max(3600.0, 3600.0 * round(step / 3600.0))
+            sql = ("SELECT labels, CAST(hour / ? AS INTEGER) AS b, MIN(vmin), SUM(vavg * n) / SUM(n), MAX(vmax), "
+                   "SUM(n), MAX(unit) FROM rollup_hourly "
+                   "WHERE host = ? AND source = ? AND metric = ? AND hour >= ? AND hour < ? AND n > 0 "
+                   "GROUP BY labels, b ORDER BY labels, b LIMIT ?")
+            # Whole hours only: a rollup hour that starts before since is partly outside the range.
+            lo = since - (since % 3600)
+        else:
+            sql = ("SELECT labels, CAST(ts / ? AS INTEGER) AS b, MIN(value), AVG(value), MAX(value), "
+                   "COUNT(value), MAX(unit) FROM samples "
+                   "WHERE host = ? AND source = ? AND metric = ? AND ts >= ? AND ts < ? AND value IS NOT NULL "
+                   "GROUP BY labels, b ORDER BY labels, b LIMIT ?")
+            lo = since
+        with self._lock:
+            rows = self._db.execute(sql, (step, host, source, metric, lo, until, limit)).fetchall()
+        series: dict[str, dict] = {}
+        unit = ""
+        for labels, b, vmin, vavg, vmax, n, u in rows:
+            unit = u or unit
+            entry = series.setdefault(labels, {"labels": json.loads(labels), "points": []})
+            entry["points"].append({"ts": b * step, "min": vmin, "avg": vavg, "max": vmax, "n": n})
+        return {"host": host, "source": source, "metric": metric, "unit": unit,
+                "resolution": "rollup" if use_rollup else "raw", "step": step,
+                "since": since, "until": until, "series": list(series.values())}
 
     def maintain(self, raw_days: int, rollup_days: int) -> None:
         cutoff = time.time() - raw_days * 86400

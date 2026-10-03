@@ -315,6 +315,20 @@ authentication apply unchanged. Routes: `GET /api/v1/orion/hosts`,
 is known if it has an agent row or a source row; otherwise the answer is 404, as
 it is for an unknown group.
 
+## History endpoint
+
+`GET /api/v1/hosts/{host}/history` (scope `read:metrics`) is served by
+`Store.history`. The store picks the table from the range alone: a range of
+`HISTORY_RAW_MAX_S` (two days) or less reads `samples`, a longer one reads
+`rollup_hourly`, which keeps hour resolution and averages weighted by the sample
+count. Buckets are `floor(ts / step) * step`, grouped per label set, and
+unavailable (NULL) samples never enter the math. The hub bounds the range to 366
+days and the result to 1000 points per series, and rejects violations with a 422
+whose body is the same `{"detail": ...}` shape as every other error. Because raw
+samples are pruned after the raw retention window, a short range older than that
+window is empty rather than served from rollups. All SQL is parameterized and no
+schema change was needed.
+
 Documents are one level deep. Keys are snake_case and stable: item keys are built
 from slugged labels (`temp_k10temp_tctl_c`, `md_md0_degraded_devices`,
 `disk_<wwn>_device_status`, `source_<name>_up`). Every group has

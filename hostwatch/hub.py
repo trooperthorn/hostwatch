@@ -387,6 +387,27 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
             raise HTTPException(status_code=404, detail="unknown host")
         return build_host_summary(store, host, time.time())
 
+    HISTORY_MAX_POINTS = 1000
+    HISTORY_MAX_RANGE_S = 366 * 86400.0
+
+    @app.get("/api/v1/hosts/{host}/history", dependencies=[Depends(require_scope("read:metrics"))])
+    def host_history(host: str, source: str = Query(min_length=1, max_length=64),
+                     metric: str = Query(min_length=1, max_length=64),
+                     since: float = Query(allow_inf_nan=False), until: float | None = Query(default=None, allow_inf_nan=False),
+                     step: float | None = Query(default=None, gt=0, allow_inf_nan=False)):
+        end = time.time() if until is None else until
+        span = end - since
+        if span <= 0:
+            raise HTTPException(status_code=422, detail="since must be earlier than until")
+        if span > HISTORY_MAX_RANGE_S:
+            raise HTTPException(status_code=422, detail="range is longer than 366 days")
+        if step is None:
+            step = max(60.0, span / 300.0)
+        if span / step > HISTORY_MAX_POINTS:
+            raise HTTPException(status_code=422,
+                                detail=f"range and step would return more than {HISTORY_MAX_POINTS} points per series")
+        return store.history(host, source, metric, since, end, step, limit=HISTORY_MAX_POINTS * 50)
+
     @app.get("/api/v1/orion/hosts", dependencies=[Depends(require_scope("read:metrics"))])
     def orion_hosts():
         names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
