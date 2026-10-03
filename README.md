@@ -248,6 +248,17 @@ Cross-check against the host: `sudo turbostat --quiet --show PkgWatt --interval 
 for `rapl`, `cat /proc/mdstat` for `mdraid`, `sensors` for `hwmon`, and the
 Scrutiny UI for `scrutiny`.
 
+## Web UI
+
+Open the hub address in a browser and sign in with a hub user. The page lists hosts with the worst
+status first, in colour and in text, with a banner at the top naming the worst host. Enforced: every
+data call needs the session login and the source allowlist, state-changing calls carry a CSRF token,
+and every response carries a strict Content Security Policy. The API keys and Audit log screens are
+for administrators only; the enforced check is on the server, and hiding the tabs is cosmetic. Grant
+or remove the role with `python -m hostwatch user grant-admin NAME` or `revoke-admin NAME`. Browser
+rendering, contrast and the 5-second criterion have not been verified in a real browser; see
+`UNVERIFIED.md`.
+
 ## MQTT settings (Phase 4, off by default)
 
 The Home Assistant publisher stays off until `HOSTWATCH_MQTT_HOST` is set. Related settings:

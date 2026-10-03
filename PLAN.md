@@ -84,6 +84,23 @@ reconnect, TLS), Home Assistant accepting the discovery payloads, an Orion API
 Poller alert on a forced warning, and a Prometheus scrape. The phase is not
 done until those pass on the listed hosts.
 
+## Phase 5 status
+
+Code complete and unit-tested; not yet verified in a real browser. The exit test is
+`tests/test_phase5_exit.py`: it checks that the data the page renders puts a degraded host first with
+a text label and a banner naming it, that the banner precedes the tiles, and that the installed
+package contains the web assets. Components and labels:
+
+| Component | Label |
+|---|---|
+| Session login and the source allowlist on every data call the page makes | Enforced, tested |
+| Strict Content Security Policy, `nosniff` and no-referrer headers on every response | Enforced, tested by header checks only; browser behaviour is unverified |
+| CSRF token on state-changing calls from the page | Enforced, tested |
+| Administrator role (`users.is_admin`) required for key management and the audit view | Enforced by `require_admin`, tested; hiding the tabs is cosmetic |
+| Colour contrast, keyboard use, screen reader output and the 5-second criterion | Owner checks, listed in `UNVERIFIED.md` |
+
+The phase is not done until the browser checks in `UNVERIFIED.md` pass on the listed hosts.
+
 ## Phase 0 detail
 
 Run on each host:

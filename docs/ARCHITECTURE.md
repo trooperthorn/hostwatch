@@ -640,7 +640,7 @@ and names both kinds (`session_cookie` and `bearer`). This is enforced in
 refused by `Config.validate`, because the hub routes any `hw_` bearer to the API
 key lookup and such a token could never match.
 
-## Web UI shell (Phase 5, first slice)
+## Web UI shell (Phase 5)
 
 The hub serves a static page from `hostwatch/web/`: `GET /` returns `index.html` and
 `/static/` serves `app.css` and `app.js`. There is no frontend build step. The files are
@@ -810,3 +810,12 @@ uniqueness conflict is ignored and any other constraint failure raises.
 ### Admin screens
 
 Two tabs, API keys and Audit log, are hidden until the page learns that the session belongs to an administrator. It learns this by calling `GET /api/v1/admin/keys` after sign in and revealing the tabs only when that call succeeds. Hiding the tabs is cosmetic. The enforced control is `require_admin` in `hub.py`, which answers 403 to every non-administrator on all four admin routes, and the tests assert that. The screens add no endpoint and use `GET /api/v1/admin/keys`, `POST /api/v1/admin/keys`, `POST /api/v1/admin/keys/{id}/revoke` and `GET /api/v1/admin/audit`. Every state-changing call goes through the single `apiPost` helper in `app.js`, which sends the `X-CSRF-Token` header, so the existing session CSRF check applies. The secret of a new key is placed in the page once, in an alert region, and is removed from the DOM when the reader dismisses it, switches view, creates another key, signs out or leaves the page. It is not stored anywhere else and the response is marked `Cache-Control: no-store`. Revoking asks for a second, in-place confirmation before the request is sent. The audit view only reads: the hub has no write or delete route for the audit log, and the page offers none. All values, including the audit detail JSON, are set with `textContent`. Tests: `tests/test_ui_admin.py`.
+
+### Phase 5 exit test
+
+`tests/test_phase5_exit.py` asserts what can be proved without a browser: for a hub with healthy,
+warning and degraded hosts, `GET /api/v1/ui/status` lists the degraded host first with the text
+label Critical and a banner naming it, the banner precedes the tiles in `index.html`, `app.js`
+renders the text label and a state class, and the package data in `pyproject.toml` plus the
+Dockerfile install step ship the web assets. Rendering, contrast and the 5-second criterion are
+owner checks recorded in `UNVERIFIED.md`.
