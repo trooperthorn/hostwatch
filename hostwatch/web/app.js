@@ -883,7 +883,7 @@
     byId("tab-keys").setAttribute("aria-pressed", String(name === "keys"));
     byId("tab-audit").setAttribute("aria-pressed", String(name === "audit"));
     clearSecret();
-    byId("tab-status").setAttribute("aria-pressed", String(!events && !history));
+    byId("tab-status").setAttribute("aria-pressed", String(name === "status"));
     byId("tab-events").setAttribute("aria-pressed", String(events));
     byId("tab-history").setAttribute("aria-pressed", String(history));
     if (events) { loadEvents(false); }

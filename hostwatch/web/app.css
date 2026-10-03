@@ -103,7 +103,7 @@ button { background: var(--accent); color: var(--accent-fg); border-color: var(-
    the width and wrap long values such as JSON details or paths. */
 .events .nowrap { white-space: nowrap; }
 .events .grow { width: 100%; min-width: 16rem; overflow-wrap: anywhere; word-break: break-word; }
-.events .path { overflow-wrap: anywhere; min-width: 10rem; }
+.events .path { overflow-wrap: anywhere; min-width: 20rem; }
 /* HTTP status: the code and a word, so colour is only reinforcement. */
 .http-badge { display: inline-flex; gap: 0.25rem; align-items: center; padding: 0 0.45rem; border: 1px solid currentColor;
   border-radius: 999px; font-size: 0.85em; font-weight: 600; white-space: nowrap; }

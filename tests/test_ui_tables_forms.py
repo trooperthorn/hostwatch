@@ -62,3 +62,14 @@ def test_no_inline_styles_in_shipped_html_or_script():
     html = text("index.html")
     assert not re.search(r"\sstyle\s*=", html)
     assert ".style." not in text("app.js") and "setAttribute(\"style\"" not in text("app.js")
+
+
+def test_only_the_open_tab_is_marked_pressed():
+    # The Status tab stayed highlighted while the API keys or Audit log tab was open.
+    js = files("hostwatch").joinpath("web", "app.js").read_text(encoding="utf-8")
+    assert 'byId("tab-status").setAttribute("aria-pressed", String(name === "status"))' in js
+
+
+def test_paths_get_room_before_wrapping():
+    css = files("hostwatch").joinpath("web", "app.css").read_text(encoding="utf-8")
+    assert re.search(r"\.events \.path \{[^}]*min-width: 20rem", css)
