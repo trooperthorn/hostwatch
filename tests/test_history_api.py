@@ -96,3 +96,34 @@ def test_requires_auth_and_scope(tmp_path):
     assert client.get(URL, params=params).status_code == 401
     secret, _ = store.create_api_key(["read:events"], "other")
     assert client.get(URL, params=params, headers={"Authorization": f"Bearer {secret}"}).status_code == 403
+
+
+def test_long_range_includes_recent_raw_and_gaps(tmp_path):
+    client, store, hdr = make(tmp_path)
+    now = time.time()
+    now -= now % 3600
+    old = now - 20 * 86400
+    for i in range(3):
+        store.ingest(batch(old + i, 10.0 * (i + 1)))
+    store.maintain(raw_days=7, rollup_days=400)
+    # Raw samples for the last 5 days, one per hour with value equal to the day index, minus a 10 hour hole.
+    hole = (now - 3 * 86400, now - 3 * 86400 + 10 * 3600)
+    expected = {}
+    for h in range(5 * 24, 0, -1):
+        t = now - h * 3600 + 5
+        if hole[0] <= t < hole[1]:
+            continue
+        store.ingest(batch(t, float(h)))
+        expected[t - (t % 3600)] = float(h)
+    r = client.get(URL, params={**Q, "since": now - 30 * 86400, "until": now, "step": 3600}, headers=hdr)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["resolution"] == "rollup"
+    pts = {p["ts"]: p for s in body["series"] for p in s["points"]}
+    assert len(pts) <= 1000
+    for ts, v in expected.items():
+        assert pts[ts]["avg"] == v
+    assert min(pts) < now - 19 * 86400
+    gaps = store.gaps("h1", "rapl", "watts", now - 30 * 86400, 3 * 3600, until=now)
+    assert any(abs(a - (hole[0] - 3600)) < 3601 and b - a > 3 * 3600 for a, b in gaps)
+    assert all(not (a >= old + 3600 and b <= hole[0] - 7200) for a, b in gaps if b < hole[0])

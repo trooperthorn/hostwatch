@@ -620,12 +620,39 @@ class Store:
             cur = self._db.execute("SELECT host, platform, agent_version, last_seen FROM agents ORDER BY host")
             return [dict(zip([c[0] for c in cur.description], r)) for r in cur.fetchall()]
 
-    def gaps(self, host: str, source: str, metric: str, since: float, max_gap_s: float) -> list[tuple[float, float]]:
-        """Return (start, end) intervals longer than max_gap_s with no non-NULL sample. Used by the Phase 1 exit test."""
+    def _hourly_sql(self, host: str, source: str, metric: str, lo: float, until: float) -> tuple[str, tuple]:
+        """SQL and parameters for hourly rows: stored rollups plus raw samples newer than the last rollup.
+
+        Raw samples are only read from the hour after the newest stored rollup hour, so an hour
+        is never counted twice. Call with the lock held."""
+        last = self._db.execute(
+            "SELECT MAX(hour) FROM rollup_hourly WHERE host = ? AND source = ? AND metric = ? "
+            "AND hour >= ? AND hour < ? AND n > 0", (host, source, metric, lo, until)).fetchone()[0]
+        raw_lo = lo if last is None else max(lo, last + 3600.0)
+        sql = ("SELECT hour, labels, n, vmin, vavg, vmax, unit FROM rollup_hourly "
+               "WHERE host = ? AND source = ? AND metric = ? AND hour >= ? AND hour < ? AND n > 0 "
+               "UNION ALL "
+               "SELECT ts - (ts % 3600), labels, COUNT(value), MIN(value), AVG(value), MAX(value), unit FROM samples "
+               "WHERE host = ? AND source = ? AND metric = ? AND ts >= ? AND ts < ? AND value IS NOT NULL "
+               "GROUP BY ts - (ts % 3600), labels")
+        return sql, (host, source, metric, lo, until, host, source, metric, raw_lo, until)
+
+    def gaps(self, host: str, source: str, metric: str, since: float, max_gap_s: float,
+             until: float | None = None, raw_max_s: float = HISTORY_RAW_MAX_S) -> list[tuple[float, float]]:
+        """Return (start, end) intervals longer than max_gap_s with no non-NULL sample. Used by the Phase 1 exit test.
+
+        A range longer than raw_max_s is computed from the same combined hourly series that
+        history shows, so its points are hour starts."""
+        end = time.time() + 1.0 if until is None else until
         with self._lock:
-            ts = [r[0] for r in self._db.execute(
-                "SELECT DISTINCT ts FROM samples WHERE host=? AND source=? AND metric=? AND ts>=? "
-                "AND value IS NOT NULL ORDER BY ts", (host, source, metric, since))]
+            if end - since > raw_max_s:
+                lo = since - (since % 3600)
+                sql, params = self._hourly_sql(host, source, metric, lo, end)
+                ts = [r[0] for r in self._db.execute(f"SELECT DISTINCT hour FROM ({sql}) ORDER BY hour", params)]
+            else:
+                ts = [r[0] for r in self._db.execute(
+                    "SELECT DISTINCT ts FROM samples WHERE host=? AND source=? AND metric=? AND ts>=? "
+                    "AND value IS NOT NULL ORDER BY ts", (host, source, metric, since))]
         return [(a, b) for a, b in zip(ts, ts[1:]) if b - a > max_gap_s]
 
     def history(self, host: str, source: str, metric: str, since: float, until: float, step: float,
@@ -633,16 +660,12 @@ class Store:
         """Min, average and maximum per step bucket, one series per label set.
 
         A range no longer than raw_max_s reads the samples table. A longer range reads
-        rollup_hourly, so it has hour resolution and the step is raised to a whole number
-        of hours. Unavailable samples (NULL value) never enter the math. All SQL is
+        rollup_hourly plus hourly aggregates of raw samples newer than the last
+        rollup, so it has hour resolution and the step is raised to a whole number of hours. Unavailable samples (NULL value) never enter the math. All SQL is
         parameterized. At most limit buckets are returned, oldest first."""
         use_rollup = (until - since) > raw_max_s
         if use_rollup:
             step = max(3600.0, 3600.0 * round(step / 3600.0))
-            sql = ("SELECT labels, CAST(hour / ? AS INTEGER) AS b, MIN(vmin), SUM(vavg * n) / SUM(n), MAX(vmax), "
-                   "SUM(n), MAX(unit) FROM rollup_hourly "
-                   "WHERE host = ? AND source = ? AND metric = ? AND hour >= ? AND hour < ? AND n > 0 "
-                   "GROUP BY labels, b ORDER BY labels, b LIMIT ?")
             # Whole hours only: a rollup hour that starts before since is partly outside the range.
             lo = since - (since % 3600)
         else:
@@ -652,7 +675,13 @@ class Store:
                    "GROUP BY labels, b ORDER BY labels, b LIMIT ?")
             lo = since
         with self._lock:
-            rows = self._db.execute(sql, (step, host, source, metric, lo, until, limit)).fetchall()
+            if use_rollup:
+                inner, iparams = self._hourly_sql(host, source, metric, lo, until)
+                sql = ("SELECT labels, CAST(hour / ? AS INTEGER) AS b, MIN(vmin), SUM(vavg * n) / SUM(n), MAX(vmax), "
+                       f"SUM(n), MAX(unit) FROM ({inner}) GROUP BY labels, b ORDER BY labels, b LIMIT ?")
+                rows = self._db.execute(sql, (step, *iparams, limit)).fetchall()
+            else:
+                rows = self._db.execute(sql, (step, host, source, metric, lo, until, limit)).fetchall()
         series: dict[str, dict] = {}
         unit = ""
         for labels, b, vmin, vavg, vmax, n, u in rows:

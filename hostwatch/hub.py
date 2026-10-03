@@ -449,7 +449,8 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
     @app.get("/internal/v1/gaps", dependencies=[Depends(require_scope("read:metrics"))])
     def gaps(host: str, source: str, metric: str, hours: float = 24, max_gap_s: float = 60):
         import time
-        found = store.gaps(host, source, metric, time.time() - hours * 3600, max_gap_s)
+        now = time.time()
+        found = store.gaps(host, source, metric, now - hours * 3600, max_gap_s, until=now + 1.0)
         return {"gap_count": len(found), "gaps": found}
 
     summary_opts = {"silent_after_s": cfg.silence_window_s, "crash_hold_s": cfg.crash_hold_s}

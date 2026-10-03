@@ -126,7 +126,7 @@ Each answers flat JSON with numeric values and a numeric status per group (0 ok,
 `GET /api/v1/hosts/{host}/history?source=&metric=&since=&until=&step=` returns min,
 average and maximum per step bucket, one series per label set, behind a
 `read:metrics` key. A range of two days or less reads raw samples; a longer range
-reads the hourly rollups, so its step is a whole number of hours. A range is at
+reads the hourly rollups plus hourly aggregates of the newest raw samples, so its step is a whole number of hours and recent data is never missing. A range is at
 most 366 days and at most 1000 points per series; a request outside those bounds
 answers 422 with the usual `detail` body. An unknown metric answers an empty
 series list.

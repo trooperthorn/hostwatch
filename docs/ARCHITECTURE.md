@@ -332,10 +332,15 @@ it is for an unknown group.
 `Store.history`. The store picks the table from the range alone: a range of
 `HISTORY_RAW_MAX_S` (two days) or less reads `samples`, a longer one reads
 `rollup_hourly`, which keeps hour resolution and averages weighted by the sample
-count. Buckets are `floor(ts / step) * step`, grouped per label set, and
+count. Rollups lag the raw data, so a long range also aggregates raw samples
+newer than the newest stored rollup hour into hourly rows on the fly and
+combines them with the stored rollups. The newest hours and days are therefore
+never missing, and no hour is counted twice. Buckets are `floor(ts / step) * step`, grouped per label set, and
 unavailable (NULL) samples never enter the math. The hub bounds the range to 366
 days and the result to 1000 points per series, and rejects violations with a 422
-whose body is the same `{"detail": ...}` shape as every other error. Because raw
+whose body is the same `{"detail": ...}` shape as every other error. The gaps endpoint (`GET /internal/v1/gaps`) uses the same rule: for a window
+longer than two days it finds holes in that combined hourly series (points are
+hour starts), otherwise in the raw samples. Because raw
 samples are pruned after the raw retention window, a short range older than that
 window is empty rather than served from rollups. All SQL is parameterized and no
 schema change was needed.
