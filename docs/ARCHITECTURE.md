@@ -1063,6 +1063,16 @@ only the group and mode of `energy_uj` files under the powercap tree (advisory c
 the PLATYPUS side channel for members of the group). The hub side uses the specific-address bind with
 `HOSTWATCH_ALLOWED_CLIENTS` and a per-agent ingest key. See `docs/deploy-truenas.md`.
 
+## Remote agent deployment
+
+`deploy/agent/docker-compose.yml` runs the agent role on the Raspberry Pi or any Debian host with
+the same limits as the other deployments: uid 10001, read-only root filesystem, all capabilities
+dropped, no privileged mode, host networking, read-only `/sys` and journal mounts, and the
+data volume as the only writable path. The hub URL and the per-agent ingest key come from an
+untracked `.env`. `docs/deploy-agents.md` describes the three-host layout and the hub settings
+(specific-address bind, `HOSTWATCH_ALLOWED_CLIENTS`, one ingest key per agent). `tests/test_agent_deploy.py`
+checks the compose file and the guide.
+
 ## Platforms
 
 Linux (Debian 13 amd64) first. The Raspberry Pi (arm64), TrueNAS SCALE, and a

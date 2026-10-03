@@ -30,6 +30,7 @@ Current phase: **7 (hardening and release)**, code and documents complete and no
 | `scripts/host-prep.sh` | Phase 0 host check and fixes |
 | `scripts/rapl-access.sh` | Grant RAPL read access to a dedicated group (see its header for the security trade-off) |
 | `deploy/` | Compose file and `.env.example` |
+| `deploy/agent/` | Remote agent compose file and `.env.example` for the Raspberry Pi and any Debian agent (see `docs/deploy-agents.md`) |
 
 The `rpi` source reads the Raspberry Pi firmware throttled bitmask (default the sysfs `get_throttled` file under `soc:firmware`, or the path in `HOSTWATCH_RPI_THROTTLED_PATH`) and the `cpu-thermal` zone. Under-voltage now is critical, capped or throttled now is a warning, and the has-occurred bits stay a warning until a reboot. On a Pi without the file it is unavailable with the `vcgencmd get_throttled` alternative named, and on any other host it is reported not present. The bit meanings and file location are unconfirmed; see `UNVERIFIED.md`.
 

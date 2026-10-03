@@ -17,8 +17,8 @@ it behind a login, with API access for Home Assistant and SolarWinds Orion.
 | Host | Arch | Role | Notable differences |
 |---|---|---|---|
 | MediaIn-SVR | amd64 | Primary target, hub | RAPL, mdadm RAID1, Scrutiny, UEFI pstore, iTCO watchdog |
-| ai-pi | arm64 | Second validation host, agent | No RAPL (vcgencmd throttle flags instead), no RAID, no UEFI pstore |
-| TrueNAS-SVR | amd64 | Agent after Debian passes | ZFS instead of md (pool state from `/proc/spl/kstat/zfs`, per-disk errors and alerts from the TrueNAS JSON-RPC API with a READONLY_ADMIN key), no rasdaemon, watchdog not armed, deploy as a TrueNAS custom app with a Post Init script for RAPL |
+| ai-pi | arm64 | Second validation host, agent | No RAPL (vcgencmd throttle flags instead), no RAID, no UEFI pstore. Status: `rpi` collector and `deploy/agent/docker-compose.yml` are code complete and unit-tested; Phase 0 never ran there and the owner checks are in `UNVERIFIED.md` |
+| TrueNAS-SVR | amd64 | Agent after Debian passes. Status: ZFS, API collector, custom app and Post Init script are code complete and unit-tested, not yet run on the host; see `docs/deploy-truenas.md` | ZFS instead of md (pool state from `/proc/spl/kstat/zfs`, per-disk errors and alerts from the TrueNAS JSON-RPC API with a READONLY_ADMIN key), no rasdaemon, watchdog not armed, deploy as a TrueNAS custom app with a Post Init script for RAPL |
 
 ## Phases
 

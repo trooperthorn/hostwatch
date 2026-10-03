@@ -1,0 +1,39 @@
+# hostwatch remote agent for the Raspberry Pi (ai-pi) and any other Debian host.
+#
+# The agent role collects on this host and pushes to the hub. The hub URL and the
+# per-agent ingest key come from deploy/agent/.env (copy .env.example, mode 0600);
+# no secret value is stored in this file. See docs/deploy-agents.md.
+#
+# Host networking lets the agent reach a local Scrutiny and the hub without
+# published ports. The host /proc is deliberately not mounted. Every host mount
+# is read-only; the only writable path is the named data volume.
+services:
+  hostwatch-agent:
+    build: ../..
+    # Pulls the CI-built multi-arch image; "docker compose build" still builds locally.
+    image: ghcr.io/trooperthorn/hostwatch:edge
+    container_name: hostwatch-agent
+    restart: unless-stopped
+    network_mode: host
+    user: "10001:10001"
+    env_file: .env
+    environment:
+      HOSTWATCH_ROLE: agent
+    read_only: true
+    privileged: false
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    group_add:
+      - "${HOSTWATCH_JOURNAL_GID:?set HOSTWATCH_JOURNAL_GID in .env from: getent group systemd-journal | cut -d: -f3}"
+    volumes:
+      - /sys:/host/sys:ro
+      - /var/log/journal:/host/journal:ro
+      - /run/log/journal:/host/journal-volatile:ro
+      - hostwatch-agent-data:/data
+
+volumes:
+  hostwatch-agent-data:

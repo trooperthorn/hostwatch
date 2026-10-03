@@ -46,6 +46,9 @@ SolarWinds Orion (API Poller). One image, three roles (`HOSTWATCH_ROLE=all|hub|a
   versioned release workflow, `docs/THREAT-MODEL.md` and a README quick start checked by
   `tests/test_docs.py`. **The CI workflow has never run, and the 15-minute fresh-host exit check
   has not been done**; see `UNVERIFIED.md`.
+- Platform support: the `zfs`, `truenas` and `rpi` sources, the TrueNAS custom app and the remote agent
+  compose file (`deploy/agent/`) are code complete and unit-tested. The three-host layout is in
+  `docs/deploy-agents.md`. **None of it is verified on TrueNAS-SVR or ai-pi**; see `UNVERIFIED.md`.
 - Next: deploy on MediaIn-SVR, confirm all six sources, run the 24h gap test,
   then run the four Phase 2 exit scenarios and the open Phase 3 checks.
 
@@ -94,5 +97,5 @@ cd deploy && sudo docker compose up -d --build         # deploy
 | Host | Facts confirmed on hardware |
 |---|---|
 | MediaIn-SVR | Debian 13, kernel 6.12 amd64; ASUS P8Z77-V LE PLUS, i5-3570K (Ivy Bridge); NCT6779D Super I/O via `nct6775` (loaded from `/etc/modules-load.d/hostwatch.conf`); iTCO_wdt watchdog, systemd `RuntimeWatchdogSec=30s`; efi_pstore backend; rasdaemon active; md127 RAID1 (sda + sdc, WD Red 1TB); boot SSD sdb (Patriot Blaze); Scrutiny v0.9.5-omnibus on host port 8081; Docker 29.8; kernel cmdline adds `pcie_aspm=off consoleblank=0 acpi_enforce_resources=lax` via `/etc/default/grub.d/hostwatch.cfg` |
-| ai-pi | Raspberry Pi 5, Debian, arm64. Phase 0 not run. Deferred. |
+| ai-pi | Raspberry Pi 5, Debian, arm64. Phase 0 not run. The `rpi` collector and the agent deploy in `deploy/agent/` exist but are unverified on the Pi; owner checks are in `UNVERIFIED.md`. |
 | TrueNAS-SVR | TrueNAS 26.0.0-BETA.3, kernel 6.18 amd64; AMD Ryzen 5 3600, MSI MS-7C02, no ECC; ZFS pools Apps, Stash, Vault, boot-pool (no md); hwmon nvme, k10temp, drivetemp; RAPL zones present but `energy_uj` root-only; SP5100 TCO watchdog present but not armed (`RuntimeWatchdogUSec=0`); pstore empty; no rasdaemon; journal group `systemd-journal` gid 102; Docker 29.0.4; Scrutiny v0.9.5-omnibus on host port 31054; TrueNAS JSON-RPC API available (`pool.query`, `disk.query`, `disk.temperatures`, `alert.list`, `system.info`). The Phase 1 image ran `collect-once` read-only there on 2026-10-02. Support follows the Debian exit tests. |
