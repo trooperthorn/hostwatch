@@ -38,6 +38,9 @@ services:
       HOSTWATCH_TRUENAS_URL: wss://127.0.0.1/api/current
       HOSTWATCH_TRUENAS_API_KEY_FILE: /secrets/truenas-api-key
       HOSTWATCH_TRUENAS_INSECURE: "1"
+      # Scrutiny runs as the ix-scrutiny app on host port 31054 on TrueNAS-SVR
+      # (docs/hosts/truenas-svr.md). Change the port if your Scrutiny app differs.
+      HOSTWATCH_SCRUTINY_URL: http://127.0.0.1:31054
     volumes:
       - /sys:/host/sys:ro
       - /var/log/journal:/host/journal:ro
