@@ -122,8 +122,9 @@ class GroupPref(BaseModel):
 
 
 class PreferencesIn(BaseModel):
-    view: str
-    groups: list[GroupPref] = Field(default_factory=list, max_length=64)
+    view: str | None = None
+    groups: list[GroupPref] | None = Field(default=None, max_length=64)
+    reset: bool = False
 
 
 WITNESS_RETRY_TICK_S = 60.0
@@ -628,13 +629,28 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
     @app.put("/api/v1/me/preferences")
     def put_preferences(request: Request, body: PreferencesIn, principal: Principal = Depends(authenticate)):
         uid = own_user_id(request, principal)
-        if body.view not in VIEWS:
+        if body.view is None and body.groups is None and not body.reset:
+            raise HTTPException(status_code=422, detail="send a view, a groups list or reset")
+        if body.view is not None and body.view not in VIEWS:
             raise HTTPException(status_code=422, detail="view must be simple, expanded or expert")
-        unknown = [g.id for g in body.groups if g.id not in GROUP_IDS]
-        if unknown:
-            raise HTTPException(status_code=422, detail="unknown group id")
-        groups = normalized_groups([{"id": g.id, "visible": g.visible} for g in body.groups])
-        store.set_preferences(uid, body.view, groups)
+        if body.groups is not None:
+            if body.reset:
+                raise HTTPException(status_code=422, detail="send either groups or reset, not both")
+            if not body.groups:
+                raise HTTPException(status_code=422, detail="groups must not be empty, send reset to restore the default")
+            if any(g.id not in GROUP_IDS for g in body.groups):
+                raise HTTPException(status_code=422, detail="unknown group id")
+        # A field the request leaves out keeps its stored value, so a page that never loaded
+        # the preferences cannot overwrite them by saving only what it knows.
+        current = preferences_doc(store.get_preferences(uid))
+        view = body.view if body.view is not None else current["view"]
+        if body.reset:
+            groups = normalized_groups([])
+        elif body.groups is not None:
+            groups = normalized_groups([{"id": g.id, "visible": g.visible} for g in body.groups])
+        else:
+            groups = [{"id": g["id"], "visible": g["visible"]} for g in current["groups"]]
+        store.set_preferences(uid, view, groups)
         return preferences_doc(store.get_preferences(uid))
 
     @app.get("/api/v1/orion/hosts")

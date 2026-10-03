@@ -17,6 +17,8 @@
   var refreshTimer = null;
   var lastDoc = null;
   var prefs = { view: "expanded", groups: [] };
+  var prefsLoaded = false;
+  var prefsRetry = null;
   var hostOpen = {};
   var groupOpen = {};
   var idCounter = 0;
@@ -388,8 +390,11 @@
     savePrefs();
   }
 
-  function savePrefs() {
-    var body = { view: prefs.view, groups: prefs.groups.map(function (g) { return { id: g.id, visible: g.visible }; }) };
+  function savePrefs(extra) {
+    // Groups are sent only after a successful load, so a failed load can never overwrite the saved order.
+    var body = { view: prefs.view };
+    if (extra && extra.reset) { body.reset = true; }
+    else if (prefsLoaded) { body.groups = prefs.groups.map(function (g) { return { id: g.id, visible: g.visible }; }); }
     var note = byId("cust-note");
     saveChain = saveChain.then(function () {
       return apiSend("PUT", "/api/v1/me/preferences", body).then(function (resp) {
@@ -399,14 +404,33 @@
     }).catch(function () { note.textContent = "Your choices could not be saved."; });
   }
 
+  function prefsNotice(text) {
+    var el = byId("prefs-notice");
+    if (el) { el.textContent = text; el.hidden = !text; }
+  }
+
   function loadPrefs() {
     return fetch("/api/v1/me/preferences", { credentials: "same-origin" }).then(function (resp) {
       return resp.ok ? resp.json() : null;
     }).then(function (doc) {
-      if (doc) { prefs = { view: doc.view, groups: doc.groups, defaults: doc.default_groups }; }
+      if (doc) {
+        prefs = { view: doc.view, groups: doc.groups, defaults: doc.default_groups };
+        prefsLoaded = true;
+        prefsNotice("");
+      } else { prefsLoadFailed(); }
       applyView();
       renderCustomise();
-    }).catch(function () { applyView(); });
+    }).catch(function () { prefsLoadFailed(); applyView(); });
+  }
+
+  function prefsLoadFailed() {
+    prefsNotice("Your saved dashboard layout could not be loaded. Changes to the group order are paused. Retrying.");
+    if (!prefsRetry) {
+      prefsRetry = setTimeout(function () {
+        prefsRetry = null;
+        if (!byId("app-view").hidden && !prefsLoaded) { loadPrefs().then(renderCurrent); }
+      }, 15000);
+    }
   }
 
   function resetPrefs() {
@@ -414,7 +438,7 @@
     var byGroup = {};
     prefs.groups.forEach(function (g) { byGroup[g.id] = g; });
     prefs.groups = ids.map(function (id) { var g = byGroup[id]; g.visible = true; return g; });
-    savePrefs();
+    savePrefs({ reset: true });
     renderCurrent();
     renderCustomise();
     byId("cust-note").textContent = "Default order restored and all groups shown.";
@@ -841,7 +865,7 @@
   }
 
   function show(signedIn, username) {
-    if (!signedIn) { stopRefresh(); clearSecret(); setAdmin(false); }
+    if (!signedIn) { prefsLoaded = false; prefsNotice(""); stopRefresh(); clearSecret(); setAdmin(false); }
     byId("login-view").hidden = signedIn;
     byId("app-view").hidden = !signedIn;
     byId("logout").hidden = !signedIn;

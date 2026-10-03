@@ -83,7 +83,7 @@ def test_session_renders_grouped_data_the_page_consumes(tmp_path):
 def test_view_choice_is_saved_through_preferences(tmp_path):
     client, _ = build(tmp_path)
     csrf = login(client)
-    body = {"view": "simple", "groups": []}
+    body = {"view": "simple"}
     assert client.put("/api/v1/me/preferences", json=body).status_code == 403
     assert client.put("/api/v1/me/preferences", json=body, headers=csrf).status_code == 200
     got = client.get("/api/v1/me/preferences").json()

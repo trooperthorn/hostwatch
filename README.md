@@ -409,7 +409,7 @@ only when no group is warning, critical or unknown. The `alerts` group includes 
 TrueNAS alerts, the last boot classification and warning or critical events from the last
 `HOSTWATCH_ALERT_WINDOW_S` seconds (default 86400).
 
-`GET /api/v1/me/preferences` and `PUT /api/v1/me/preferences` (login session only, the PUT needs the CSRF token) read and save the signed-in user's dashboard view (`simple`, `expanded` or `expert`) and the order and visibility of the component groups. Each user has one row and cannot reach another's; API keys are refused.
+`GET /api/v1/me/preferences` and `PUT /api/v1/me/preferences` (login session only, the PUT needs the CSRF token) read and save the signed-in user's dashboard view (`simple`, `expanded` or `expert`) and the order and visibility of the component groups. The PUT body may carry only `view`, only `groups`, or `{"reset": true}`; a field left out keeps its stored value, an empty `groups` list gives 422, and `reset` restores the default group order with every group shown. The page sends groups only after the preferences loaded, shows a notice and retries when they did not, so a failed load cannot overwrite the saved order. Each user has one row and cannot reach another's; API keys are refused.
 
 Fans come from the hwmon `fan` readings. A fan at 0 RPM is informational (an unused header reads 0),
 so it never raises an alarm unless you list it in `HOSTWATCH_HWMON_REQUIRED_FANS` on the hub as

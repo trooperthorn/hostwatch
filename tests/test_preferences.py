@@ -80,7 +80,7 @@ def test_users_only_see_and_change_their_own_row(ctx):
     bob, b_csrf = login(app, "bob")
     assert alice.put(URL, json={"view": "simple", "groups": [{"id": "disks"}]}, headers=a_csrf).status_code == 200
     assert bob.get(URL).json()["view"] == "expanded"
-    assert bob.put(URL, json={"view": "expert", "groups": []}, headers=b_csrf).status_code == 200
+    assert bob.put(URL, json={"view": "expert"}, headers=b_csrf).status_code == 200
     assert alice.get(URL).json()["view"] == "simple"
     assert alice.get(URL).json()["groups"][0]["id"] == "disks"
 
@@ -92,3 +92,63 @@ def test_api_keys_cannot_use_the_endpoint(ctx):
     client = TestClient(app)
     assert client.get(URL, headers=bearer).status_code == 403
     assert client.put(URL, json={"view": "simple", "groups": []}, headers=bearer).status_code == 403
+
+
+def test_put_with_only_view_keeps_stored_groups(ctx):
+    app, _ = ctx
+    client, csrf = login(app, "alice")
+    body = {"view": "expanded", "groups": [{"id": "fans", "visible": False}, {"id": "cpu", "visible": True}]}
+    assert client.put(URL, json=body, headers=csrf).status_code == 200
+    before = client.get(URL).json()["groups"]
+    r = client.put(URL, json={"view": "simple"}, headers=csrf)
+    assert r.status_code == 200
+    got = client.get(URL).json()
+    assert got["view"] == "simple"
+    assert got["groups"] == before
+    assert got["groups"][0]["id"] == "fans" and got["groups"][0]["visible"] is False
+
+
+def test_put_with_only_groups_keeps_stored_view(ctx):
+    app, _ = ctx
+    client, csrf = login(app, "alice")
+    assert client.put(URL, json={"view": "expert"}, headers=csrf).status_code == 200
+    assert client.put(URL, json={"groups": [{"id": "fans", "visible": False}]}, headers=csrf).status_code == 200
+    got = client.get(URL).json()
+    assert got["view"] == "expert"
+    assert got["groups"][0]["id"] == "fans" and got["groups"][0]["visible"] is False
+
+
+def test_put_with_empty_groups_is_422_and_changes_nothing(ctx):
+    app, _ = ctx
+    client, csrf = login(app, "alice")
+    body = {"view": "expert", "groups": [{"id": "fans", "visible": False}]}
+    assert client.put(URL, json=body, headers=csrf).status_code == 200
+    before = client.get(URL).json()
+    assert client.put(URL, json={"view": "simple", "groups": []}, headers=csrf).status_code == 422
+    assert client.put(URL, json={"groups": []}, headers=csrf).status_code == 422
+    assert client.put(URL, json={}, headers=csrf).status_code == 422
+    assert client.get(URL).json() == before
+
+
+def test_explicit_reset_restores_default_order_and_visibility(ctx):
+    app, _ = ctx
+    client, csrf = login(app, "alice")
+    body = {"view": "expert", "groups": [{"id": "fans", "visible": False}, {"id": "cpu", "visible": False}]}
+    assert client.put(URL, json=body, headers=csrf).status_code == 200
+    r = client.put(URL, json={"reset": True}, headers=csrf)
+    assert r.status_code == 200
+    got = client.get(URL).json()
+    assert [g["id"] for g in got["groups"]] == list(GROUP_IDS)
+    assert all(g["visible"] for g in got["groups"])
+    assert got["view"] == "expert"
+    assert client.put(URL, json={"reset": True, "groups": [{"id": "fans"}]}, headers=csrf).status_code == 422
+
+
+def test_app_js_gates_group_saves_on_loaded_flag():
+    from pathlib import Path
+    import hostwatch
+    js = (Path(hostwatch.__file__).parent / "web" / "app.js").read_text(encoding="utf-8")
+    assert "var prefsLoaded = false;" in js
+    assert "prefsLoaded = true;" in js
+    assert "else if (prefsLoaded) { body.groups" in js
+    assert "prefs-notice" in js
