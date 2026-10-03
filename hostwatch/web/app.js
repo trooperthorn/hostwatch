@@ -157,11 +157,36 @@
     return card;
   }
 
+  // Groups the user hid that are warning or critical on this host. The server already counted them in the
+  // host status and banner; this only names them so a hidden problem is never silent.
+  function hiddenAttention(h) {
+    var hidden = {};
+    prefs.groups.forEach(function (p) { if (!p.visible) { hidden[p.id] = true; } });
+    return h.groups.filter(function (g) {
+      var k = statusKey(g.status);
+      return hidden[g.id] && (k === "warning" || k === "critical");
+    });
+  }
+
+  function attentionMarker(h) {
+    var bad = hiddenAttention(h);
+    if (!bad.length) { return null; }
+    var m = el("span", null, "hidden-attention");
+    m.setAttribute("role", "note");
+    m.appendChild(icon("alert-triangle"));
+    m.appendChild(el("span", "Hidden group needs attention: " + bad.map(function (g) {
+      return g.label + " (" + g.status_text + ")";
+    }).join(", ")));
+    return m;
+  }
+
   function hostHead(h) {
     var head = el("span", null, "host-head");
     head.appendChild(icon("server"));
     head.appendChild(el("span", h.host));
     head.appendChild(statusMark(h.status_key, h.status_text));
+    var note = attentionMarker(h);
+    if (note) { head.appendChild(note); }
     return head;
   }
 
@@ -186,6 +211,8 @@
     title.appendChild(el("span", h.host));
     head.appendChild(title);
     head.appendChild(statusMark(h.status_key, h.status_text));
+    var note = attentionMarker(h);
+    if (note) { head.appendChild(note); }
     var chips = el("span", null, "chips");
     visibleGroups(h).forEach(function (g) {
       var chip = el("span", null, "chip");

@@ -181,3 +181,5 @@ button { background: var(--accent); color: var(--accent-fg); border-color: var(-
 .cust-row label { flex: 1; display: inline-flex; gap: 0.4rem; align-items: center; }
 .cust-row button:disabled { opacity: 0.4; cursor: not-allowed; }
 [hidden] { display: none !important; }
+
+.hidden-attention { display: inline-flex; align-items: center; gap: .3rem; font-weight: 600; border: 1px solid currentColor; border-radius: 4px; padding: 0 .4rem; }

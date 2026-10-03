@@ -957,7 +957,12 @@ table of value, unit, labels, source, status, reason and timestamp, with unavail
 such. The Customise panel lists every group with a visibility checkbox, a drag handle, and Move up
 and Move down buttons that work from the keyboard; each change is saved at once with `PUT
 /api/v1/me/preferences` and the CSRF header, and the saved view, visibility and order are loaded
-after sign in. The preference document also carries each group's label and icon.
+after sign in. The preference document also carries each group's label and icon. A Reset to default
+button restores the default order with every group shown. Hiding a group only changes what the page
+draws: the host status and the banner come from the server and still count the hidden group. When a
+hidden group is warning or critical on a host, the host header shows a marker reading "Hidden group
+needs attention" followed by the group name and its status text, with an icon so it is not conveyed by
+colour alone.
 
 Icons are the vendored Tabler outline SVGs in `hostwatch/web/icons/` (MIT, `LICENSE` shipped),
 listed as package data and served from `/static/icons/`. `app.css` draws them as CSS masks from
