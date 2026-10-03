@@ -1,0 +1,47 @@
+# hostwatch agent as a TrueNAS custom app (Apps > Discover Apps > Custom App > Install via YAML).
+#
+# The agent role collects on this host and pushes to the hub. The hub URL and the
+# ingest key are not in this file: both live in agent.env on the data dataset (see
+# docs/deploy-truenas.md), so no secret value is stored in the app definition.
+# The TrueNAS API key is a file mounted read-only and named by an environment
+# variable; its value is never placed in the environment.
+#
+# Host networking lets the agent reach the hub and Scrutiny without published ports.
+# The host /proc is deliberately not mounted: ZFS pool state is read from the
+# container's own /proc/spl/kstat. Adjust /mnt/Apps/hostwatch to your dataset path.
+services:
+  hostwatch:
+    image: ghcr.io/trooperthorn/hostwatch:edge
+    container_name: hostwatch
+    restart: unless-stopped
+    network_mode: host
+    user: "10001:10001"
+    read_only: true
+    privileged: false
+    tmpfs:
+      - /tmp
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    group_add:
+      # systemd-journal on TrueNAS-SVR (docs/hosts/truenas-svr.md).
+      - "102"
+      # The hostwatch-rapl group created by rapl-postinit.sh. Replace 950 with the
+      # gid that script prints. Without it the rapl source stays unavailable.
+      - "950"
+    env_file:
+      - /mnt/Apps/hostwatch/agent.env
+    environment:
+      HOSTWATCH_ROLE: agent
+      HOSTWATCH_HOST_NAME: TrueNAS-SVR
+      HOSTWATCH_TRUENAS_URL: wss://127.0.0.1/api/current
+      HOSTWATCH_TRUENAS_API_KEY_FILE: /secrets/truenas-api-key
+      HOSTWATCH_TRUENAS_INSECURE: "1"
+    volumes:
+      - /sys:/host/sys:ro
+      - /var/log/journal:/host/journal:ro
+      - /run/log/journal:/host/journal-volatile:ro
+      - /sys/fs/pstore:/host/pstore:ro
+      - /mnt/Apps/hostwatch/truenas-api-key:/secrets/truenas-api-key:ro
+      - /mnt/Apps/hostwatch/data:/data
