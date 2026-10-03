@@ -195,6 +195,11 @@ sudo docker exec hostwatch python -m hostwatch key list
 sudo docker exec hostwatch python -m hostwatch key revoke 2
 ```
 
+An administrator can do the same over HTTP: `GET` and `POST /api/v1/admin/keys`,
+`POST /api/v1/admin/keys/ID/revoke` and the read-only `GET /api/v1/admin/audit`
+(filters `kind`, `actor`, `since`, `until`, `before_id`, `limit`). A new secret is
+returned once with `Cache-Control: no-store`, and both changes are audited.
+
 These commands are advisory-protected only: anyone who can run `docker exec` or
 write the data volume can use them. Every command is written to the audit log.
 For access from other hosts, serve TLS by setting `HOSTWATCH_TLS_CERT` and

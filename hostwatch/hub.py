@@ -44,6 +44,11 @@ SAFE_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
 SESSION_SCOPES = frozenset({"read:metrics", "read:events"})
 
 
+class KeyCreate(BaseModel):
+    scopes: list[str] = Field(min_length=1, max_length=8)
+    owner: str = Field(min_length=1, max_length=64)
+
+
 class LoginBody(BaseModel):
     username: str = Field(min_length=1, max_length=128)
     password: str = Field(min_length=1, max_length=1024)
@@ -342,6 +347,43 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
         resp.delete_cookie(SESSION_COOKIE, path="/", httponly=True, secure=cfg.tls_active, samesite="strict")
         resp.delete_cookie(CSRF_COOKIE, path="/", secure=cfg.tls_active, samesite="strict")
         return resp
+
+    @app.get("/api/v1/admin/keys")
+    def admin_list_keys(principal: Principal = Depends(require_admin)):
+        """Every key without its secret or hash."""
+        return {"keys": store.list_api_keys()}
+
+    @app.post("/api/v1/admin/keys", status_code=201)
+    def admin_create_key(body: KeyCreate, request: Request, principal: Principal = Depends(require_admin)):
+        """Create a key. The secret appears in this response only and the response must not be cached."""
+        try:
+            secret, row = auth.generate_api_key(store, body.scopes, body.owner)
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc))
+        request.state.audit = {"actor": principal.actor, "kind": "api_key_create",
+                               "detail": {"key_id": row["id"], "prefix": row["prefix"],
+                                          "scopes": row["scopes"], "owner": row["owner"]}}
+        return JSONResponse(status_code=201, content={"key": row, "secret": secret},
+                            headers={"Cache-Control": "no-store"})
+
+    @app.post("/api/v1/admin/keys/{key_id}/revoke")
+    def admin_revoke_key(key_id: int, request: Request, principal: Principal = Depends(require_admin)):
+        if not store.revoke_api_key(key_id):
+            raise HTTPException(status_code=404, detail="no active key with that id")
+        request.state.audit = {"actor": principal.actor, "kind": "api_key_revoke",
+                               "detail": {"key_id": key_id}}
+        return JSONResponse(content={"status": "revoked", "key_id": key_id}, headers={"Cache-Control": "no-store"})
+
+    @app.get("/api/v1/admin/audit")
+    def admin_audit(kind: str | None = Query(default=None, max_length=64),
+                    actor: str | None = Query(default=None, max_length=128),
+                    since: float | None = None, until: float | None = None,
+                    before_id: int | None = Query(default=None, ge=1),
+                    limit: int = Query(default=100, ge=1, le=500),
+                    principal: Principal = Depends(require_admin)):
+        """Read-only view of the audit log, newest first. There is no write or delete route."""
+        return {"rows": store.audit_rows(limit=limit, kind=kind, actor=actor, before_id=before_id,
+                                         since=since, until=until)}
 
     @app.get("/internal/v1/health")
     def health():

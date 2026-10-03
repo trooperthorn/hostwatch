@@ -404,9 +404,16 @@ class Store:
             return int(cur.lastrowid)
 
     def audit_rows(self, limit: int = 100, kind: str | None = None, actor: str | None = None,
-                   before_id: int | None = None) -> list[dict]:
-        """Newest first."""
+                   before_id: int | None = None, since: float | None = None,
+                   until: float | None = None) -> list[dict]:
+        """Newest first. `since` is inclusive and `until` is exclusive, both in epoch seconds."""
         where, params = [], []
+        if since is not None:
+            where.append("ts >= ?")
+            params.append(since)
+        if until is not None:
+            where.append("ts < ?")
+            params.append(until)
         for col, val in (("kind", kind), ("actor", actor)):
             if val is not None:
                 where.append(f"{col} = ?")

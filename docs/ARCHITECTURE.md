@@ -564,6 +564,15 @@ mTLS identity (see below). A
 carry both read scopes and never `ingest`. `admin` satisfies every scope except
 `ingest`. Missing or invalid credentials give 401, a missing scope gives 403.
 
+Admin endpoints sit behind `require_admin` (an administrator session or a key with the `admin` scope).
+`GET /api/v1/admin/keys` lists keys without secrets or hashes. `POST /api/v1/admin/keys` takes
+`scopes` and `owner`, returns the secret once with `Cache-Control: no-store`, and writes an
+`api_key_create` audit row that holds the key id, prefix, scopes and owner but never the secret.
+`POST /api/v1/admin/keys/{id}/revoke` writes an `api_key_revoke` row and takes effect on the key's
+next request. `GET /api/v1/admin/audit` is read-only and filters by `kind`, `actor`, `since`,
+`until` and `before_id`, with `limit` from 1 to 500. State changes made with a session need the CSRF
+header like every other POST. These endpoints are enforced by the same checks as the rest of the API.
+
 An HTTP middleware appends one `audit_log` row for each authenticated request
 and each 401 or 403, with actor, method, path, status and remote address.
 Secrets are never written; a failed attempt is recorded under the actor
