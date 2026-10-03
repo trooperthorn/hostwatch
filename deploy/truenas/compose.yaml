@@ -12,6 +12,8 @@
 services:
   hostwatch:
     image: ghcr.io/trooperthorn/hostwatch:edge
+    # Fetch the newest :edge on every deploy, so an app redeploy never reuses a stale copy.
+    pull_policy: always
     container_name: hostwatch
     restart: unless-stopped
     network_mode: host
