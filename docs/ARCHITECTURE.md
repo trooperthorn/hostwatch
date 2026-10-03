@@ -26,6 +26,22 @@ zero. Collectors read from roots given in config (`HOSTWATCH_SYSFS`,
 `HOSTWATCH_PROCFS`) so tests can point them at fake trees built in
 `tests/conftest.py`.
 
+### NUT client (`nut`)
+
+The `nut` collector asks a Network UPS Tools server for UPS state so a UPS can
+witness a power loss. It is off unless `HOSTWATCH_NUT_HOST` and
+`HOSTWATCH_NUT_UPS` are both set; unconfigured it is reported not present, not
+unavailable. `HOSTWATCH_NUT_PORT` (default 3493), `HOSTWATCH_NUT_USER` and
+`HOSTWATCH_NUT_PASSWORD_FILE` are optional, and the password is read from the
+file and never logged or placed in an error reason. Enforced in code: the client
+sends only `USERNAME`, `PASSWORD`, `LIST`, `GET` and `LOGOUT`, so it cannot
+switch the UPS off or run an instant command. Each cycle sends one `LIST VAR`
+and emits `ups_status_flag` (labels `flag` and `status`; `OL`, `OB` and `LB`
+always, other flags while present), `battery_charge_pct`, `battery_runtime_s`,
+`input_voltage_v` and `ups_load_pct`. A variable the server omits is stored as
+unavailable, and an unreachable server, a timeout or an `ERR` reply makes the
+source unavailable with the reason. Transition events come in a later slice.
+
 ## Data flow
 
 ```

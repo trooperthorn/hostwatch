@@ -8,6 +8,7 @@ from .cpu import CpuCollector
 from .hwmon import HwmonCollector
 from .mdraid import MdRaidCollector
 from .memory import MemoryCollector
+from .nut import NutCollector
 from .rapl import RaplCollector
 from .scrutiny import ScrutinyCollector
 
@@ -21,4 +22,5 @@ def build_collectors(cfg: Config) -> list[Collector]:
         HwmonCollector(s, p),
         MdRaidCollector(s, p),
         ScrutinyCollector(s, p, cfg.scrutiny_url),
+        NutCollector(s, p, cfg.nut_host, cfg.nut_ups, cfg.nut_user, cfg.nut_password_file, cfg.nut_port),
     ]
