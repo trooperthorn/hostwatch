@@ -41,7 +41,7 @@ def test_degraded_host_is_first_and_labelled_in_text(tmp_path):
 
 def test_page_shows_banner_before_tiles_and_renders_text_and_class():
     html = web("index.html")
-    assert html.index('id="banner"') < html.index('id="tiles"')
+    assert html.index('id="banner"') < html.index('id="hosts"')
     js = web("app.js")
     assert "h.status_text" in js and "textContent" in js
     assert "classList" in js or "className" in js

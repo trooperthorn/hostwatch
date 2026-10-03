@@ -106,8 +106,8 @@ def test_script_is_text_only_sends_csrf_and_clears_secret():
     js = text("app.js")
     assert "innerHTML" not in js and "outerHTML" not in js and "document.write" not in js
     assert "/api/v1/admin/keys" in js and "/api/v1/admin/audit?" in js and "/revoke" in js
-    # Every non-GET admin request goes through apiPost, which sets the CSRF header.
-    assert 'method: "POST"' in js and js.count('method: "POST"') == 1
+    # Every non-GET admin request goes through apiSend, which sets the CSRF header.
+    assert 'return apiSend("POST", path, body)' in js and js.count('method: method') == 1
     assert '"X-CSRF-Token"' in js
     assert not re.search(r'fetch\("/api/v1/admin[^)]*method', js)
     # The secret is cleared on view change, sign out and page hide, and revoking asks twice.

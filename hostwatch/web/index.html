@@ -12,7 +12,16 @@
 <a class="skip" href="#main">Skip to content</a>
 <header class="bar">
   <h1>hostwatch</h1>
-  <button type="button" id="logout" hidden>Sign out</button>
+  <div class="bar-tools" id="viewbar" hidden>
+    <div class="viewswitch" role="group" aria-label="Dashboard view">
+      <button type="button" id="view-simple" data-view="simple" aria-pressed="false">Simple</button>
+      <button type="button" id="view-expanded" data-view="expanded" aria-pressed="true">Expanded</button>
+      <button type="button" id="view-expert" data-view="expert" aria-pressed="false">Expert</button>
+    </div>
+    <button type="button" id="customise-btn" aria-expanded="false" aria-controls="customise"><span class="icon ic-adjustments" aria-hidden="true"></span>Customise</button>
+    <button type="button" id="logout" hidden>Sign out</button>
+  </div>
+  <button type="button" id="logout-fallback" hidden>Sign out</button>
 </header>
 <main id="main" tabindex="-1">
   <noscript><p>This page needs JavaScript to sign in and show host status.</p></noscript>
@@ -38,9 +47,17 @@
       <button type="button" id="tab-audit" aria-pressed="false" hidden>Audit log</button>
     </nav>
     <div id="status-panel">
-    <div id="banner" role="status" aria-live="polite" class="banner"><span id="banner-badge" class="badge"></span> <span id="banner-text"></span></div>
+    <div id="banner" role="status" aria-live="polite" class="banner"><span id="banner-icon" class="icon ic-circle-minus" aria-hidden="true"></span><span id="banner-badge" class="badge"></span> <span id="banner-text"></span></div>
+    <p id="banner-counts" class="banner-counts muted"></p>
     <p id="refresh-note" class="muted"></p>
-    <div id="tiles" class="tiles"></div>
+    <section id="customise" aria-labelledby="customise-title" hidden>
+      <h3 id="customise-title">Customise groups</h3>
+      <p class="muted">Choose which groups are shown and set their order. Drag a row, or use the Move up and Move down buttons. Changes are saved to your account.</p>
+      <ul id="cust-list"></ul>
+      <p><button type="button" id="cust-reset">Restore default order and show all groups</button></p>
+      <p id="cust-note" role="status" aria-live="polite" class="muted"></p>
+    </section>
+    <div id="hosts" class="hosts"></div>
     </div>
     <div id="events-panel" hidden>
       <h3 id="events-title">Event timeline</h3>

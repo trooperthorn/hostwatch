@@ -33,7 +33,7 @@ from .config import Config, normalize_ip, parse_allowed_clients, parse_sensor_pa
 from .integrations import orion as orion_doc
 from .integrations import ui_status as ui_status_doc
 from .integrations import prometheus as prom
-from .integrations.summary import GROUP_IDS, build_host_summary, grouped_document
+from .integrations.summary import GROUP_IDS, GROUPS, build_host_summary, grouped_document
 from .schema import Batch
 from .store import Store
 
@@ -614,8 +614,11 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
         return out
 
     def preferences_doc(row: dict | None) -> dict:
+        names = {g[0]: (g[1], g[2]) for g in GROUPS}
+        groups = [{**g, "label": names[g["id"]][0], "icon": names[g["id"]][1]}
+                  for g in normalized_groups(row["groups"] if row else [])]
         return {"view": row["view"] if row and row["view"] in VIEWS else "expanded",
-                "groups": normalized_groups(row["groups"] if row else []),
+                "groups": groups,
                 "default_groups": list(GROUP_IDS)}
 
     @app.get("/api/v1/me/preferences")

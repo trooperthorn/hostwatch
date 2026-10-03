@@ -942,6 +942,30 @@ given, polls at `refresh_s` without a page reload, and holds no threshold logic.
 colour, a text badge and the text of each line, so it does not rely on colour alone. Tests:
 `tests/test_ui_status.py`.
 
+### Dashboard views
+
+The status screen is drawn from `GET /api/v1/hosts/summary/grouped`, which holds the banner with
+host and group counts, the hosts worst first, and for each host its groups with an aggregate status,
+a one-line summary and the member readings. Grouping, aggregate status and membership are computed
+once on the server; `app.js` does not group, compare or sort anything and sets all data with
+`textContent`. The header has a three-button view switcher. Simple draws one line per host with the
+overall status and one small icon per visible group, each with an accessible name such as "Fans:
+Good". Expanded draws group cards with the one-line summary; a host whose status is good starts
+collapsed to one line, hosts with a problem start open, and the host and group headers are buttons
+with `aria-expanded`, so a click opens the readings. Expert opens every host and group and shows a
+table of value, unit, labels, source, status, reason and timestamp, with unavailable values stated as
+such. The Customise panel lists every group with a visibility checkbox, a drag handle, and Move up
+and Move down buttons that work from the keyboard; each change is saved at once with `PUT
+/api/v1/me/preferences` and the CSRF header, and the saved view, visibility and order are loaded
+after sign in. The preference document also carries each group's label and icon.
+
+Icons are the vendored Tabler outline SVGs in `hostwatch/web/icons/` (MIT, `LICENSE` shipped),
+listed as package data and served from `/static/icons/`. `app.css` draws them as CSS masks from
+relative same-origin URLs so they take the text colour in light and dark schemes, which keeps the
+strict content security policy and loads nothing from another origin. Status is shown as one of
+four icon shapes (check, triangle, cross, minus) together with the text label and a colour, never by
+colour alone. Tests: `tests/test_ui_views.py`.
+
 ### Event timeline
 
 The Events view reads `GET /internal/v1/events` (scope `read:events`, so the session login and the
@@ -1137,7 +1161,7 @@ Two tabs, API keys and Audit log, are hidden until the page learns that the sess
 
 `tests/test_phase5_exit.py` asserts what can be proved without a browser: for a hub with healthy,
 warning and degraded hosts, `GET /api/v1/ui/status` lists the degraded host first with the text
-label Critical and a banner naming it, the banner precedes the tiles in `index.html`, `app.js`
+label Critical and a banner naming it, the banner precedes the host panels in `index.html`, `app.js`
 renders the text label and a state class, and the package data in `pyproject.toml` plus the
 Dockerfile install step ship the web assets. Rendering, contrast and the 5-second criterion are
 owner checks recorded in `UNVERIFIED.md`.

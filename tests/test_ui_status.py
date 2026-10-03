@@ -98,7 +98,7 @@ def js():
 
 def test_app_js_renders_with_textcontent_only():
     src = js()
-    assert "/api/v1/ui/status" in src and "textContent" in src
+    assert "/api/v1/hosts/summary/grouped" in src and "textContent" in src
     assert "innerHTML" not in src and "insertAdjacentHTML" not in src
     assert "setTimeout(refresh" in src
 
@@ -111,9 +111,9 @@ def test_app_js_holds_no_threshold_logic():
     assert ".sort(" not in src
     for word in ("threshold", "critical_at", "warn_at"):
         assert word not in src
-    assert "h.status_text" in src and "c.state_text" in src
+    assert "h.status_text" in src and "g.status_text" in src and "m.status_text" in src
 
 
-def test_index_has_banner_and_tiles():
+def test_index_has_banner_and_hosts():
     html = files("hostwatch").joinpath("web", "index.html").read_text(encoding="utf-8")
-    assert 'id="banner"' in html and 'id="tiles"' in html and 'aria-live="polite"' in html
+    assert 'id="banner"' in html and 'id="hosts"' in html and 'aria-live="polite"' in html

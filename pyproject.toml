@@ -24,7 +24,7 @@ build-backend = "setuptools.build_meta"
 include = ["hostwatch*"]
 
 [tool.setuptools.package-data]
-hostwatch = ["web/*.html", "web/*.css", "web/*.js"]
+hostwatch = ["web/*.html", "web/*.css", "web/*.js", "web/icons/*.svg", "web/icons/LICENSE", "web/icons/README", "web/icons/VERSION"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

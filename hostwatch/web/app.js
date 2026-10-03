@@ -15,6 +15,16 @@
   }
 
   var refreshTimer = null;
+  var lastDoc = null;
+  var prefs = { view: "expanded", groups: [] };
+  var hostOpen = {};
+  var groupOpen = {};
+  var idCounter = 0;
+  var saveChain = Promise.resolve();
+  var dragFrom = -1;
+
+  // Status key to the vendored icon. The shapes differ, so status never rests on colour alone.
+  var STATUS_ICON = { good: "circle-check", warning: "alert-triangle", critical: "circle-x", unknown: "circle-minus" };
 
   function el(tag, text, cls) {
     var node = document.createElement(tag);
@@ -23,56 +33,372 @@
     return node;
   }
 
-  // Every state, order and text below comes from /api/v1/ui/status. Nothing here compares a
-  // value to a limit or decides what is healthy.
-  function describe(c) {
-    var text = c.name + ": ";
-    if (c.value !== null && c.value !== undefined) { text += c.value + " " + c.unit + " "; }
-    return text + "(" + c.state_text + ")" + (c.reason ? " " + c.reason : "");
+  function icon(name) {
+    var node = el("span", null, "icon ic-" + String(name || "").replace(/[^a-z0-9-]/g, ""));
+    node.setAttribute("aria-hidden", "true");
+    return node;
   }
 
-  function addList(tile, title, items) {
-    tile.appendChild(el("h4", title));
-    var list = el("ul");
-    items.forEach(function (c) {
-      list.appendChild(el("li", describe(c), "st-" + c.state));
+  function statusKey(key) { return STATUS_ICON[key] ? key : "unknown"; }
+
+  // An icon plus the text label the server supplied, in a class that tints both.
+  function statusMark(key, text) {
+    var k = statusKey(key);
+    var mark = el("span", null, "status stat-" + k);
+    mark.appendChild(icon(STATUS_ICON[k]));
+    mark.appendChild(el("span", text));
+    return mark;
+  }
+
+  function keyed(node, key) { node.setAttribute("data-key", key); return node; }
+
+  function focusKey(key) {
+    var nodes = document.querySelectorAll("[data-key]");
+    for (var i = 0; i < nodes.length; i++) {
+      if (nodes[i].getAttribute("data-key") === key && !nodes[i].disabled) { nodes[i].focus(); return true; }
+    }
+    return false;
+  }
+
+  // Every state, order, text and aggregate below comes from /api/v1/hosts/summary/grouped. Nothing
+  // here compares a value to a limit, groups components or decides what is healthy. The only
+  // choices made here are presentation: which view to draw and which groups the user asked to see.
+  function readingValue(m) {
+    if (m.value === null || m.value === undefined) { return "no value"; }
+    return String(m.value) + (m.unit ? " " + m.unit : "");
+  }
+
+  function labelText(labels) {
+    var keys = Object.keys(labels || {});
+    return keys.length ? keys.map(function (k) { return k + "=" + labels[k]; }).join(", ") : "none";
+  }
+
+  function stamp(ts) { return ts === null || ts === undefined ? "none" : new Date(ts * 1000).toLocaleString(); }
+
+  function readingList(g) {
+    var list = el("ul", null, "readings");
+    g.members.forEach(function (m) {
+      var li = el("li");
+      li.appendChild(el("span", m.label + ": " + readingValue(m) + " "));
+      li.appendChild(statusMark(m.status, m.status_text));
+      if (m.reason) { li.appendChild(el("span", " " + m.reason, "muted")); }
+      list.appendChild(li);
     });
-    tile.appendChild(list);
+    if (!g.members.length) { list.appendChild(el("li", "No readings reported.")); }
+    return list;
   }
 
-  function renderTile(h) {
-    var tile = el("article", null, "tile");
-    tile.setAttribute("data-status", String(h.status));
-    var head = el("h3");
-    head.appendChild(el("span", h.host));
-    head.appendChild(el("span", h.status_text, "badge badge-head"));
-    tile.appendChild(head);
-    if (h.reason) { tile.appendChild(el("p", h.reason)); }
-    if (h.disappeared.length) { tile.appendChild(el("p", "Disappeared: " + h.disappeared.join(", "), "st-critical")); }
-    if (h.not_present.length) { tile.appendChild(el("p", "Not present: " + h.not_present.join(", "), "st-not_present")); }
-    if (h.last_seen !== null) { tile.appendChild(el("p", "Last seen " + new Date(h.last_seen * 1000).toLocaleString(), "muted")); }
-    addList(tile, "CPU", [h.cpu]);
-    addList(tile, "Memory", [h.memory]);
-    addList(tile, "Power", h.wall_power ? [h.power, h.wall_power] : [h.power]);
-    addList(tile, "Temperatures", h.temperatures);
-    addList(tile, "RAID", h.raid);
-    addList(tile, "Pools", h.pools);
-    addList(tile, "Disks", h.disks);
-    addList(tile, "Sources", h.sources);
-    return tile;
+  function expertTable(h, g) {
+    var wrap = el("div", null, "table-wrap");
+    var table = el("table", null, "expert-table");
+    table.appendChild(el("caption", g.label + " readings on " + h.host + ". Raw values, units, labels, sources and times."));
+    var head = el("tr");
+    ["Reading", "Value", "Unit", "Labels", "Source", "Status", "Reason", "Timestamp"].forEach(function (t) {
+      var th = el("th", t);
+      th.setAttribute("scope", "col");
+      head.appendChild(th);
+    });
+    var thead = el("thead");
+    thead.appendChild(head);
+    table.appendChild(thead);
+    var body = el("tbody");
+    g.members.forEach(function (m) {
+      var tr = el("tr");
+      tr.appendChild(el("td", m.label));
+      tr.appendChild(el("td", m.value === null || m.value === undefined ? "unavailable" : m.value));
+      tr.appendChild(el("td", m.unit || "none"));
+      tr.appendChild(el("td", labelText(m.labels)));
+      tr.appendChild(el("td", m.source));
+      var st = el("td");
+      st.appendChild(statusMark(m.status, m.status_text));
+      tr.appendChild(st);
+      tr.appendChild(el("td", m.reason || "none"));
+      tr.appendChild(el("td", stamp(m.ts)));
+      body.appendChild(tr);
+    });
+    table.appendChild(body);
+    wrap.appendChild(table);
+    return wrap;
   }
+
+  function groupCard(h, g, view) {
+    var card = el("section", null, "group-card");
+    card.setAttribute("data-status-key", statusKey(g.status));
+    var id = "grp-" + (idCounter++);
+    var title = el("span", null, "group-title");
+    title.appendChild(icon(g.icon));
+    title.appendChild(el("span", g.label));
+    title.appendChild(statusMark(g.status, g.status_text));
+    var summary = el("p", g.summary, "group-summary");
+    if (view === "expert") {
+      var heading = el("h4", null, "group-title");
+      while (title.firstChild) { heading.appendChild(title.firstChild); }
+      card.appendChild(heading);
+      card.appendChild(summary);
+      card.appendChild(expertTable(h, g));
+      return card;
+    }
+    var key = h.host + "|" + g.id;
+    var open = groupOpen[key] === true;
+    var btn = el("button", null, "group-toggle");
+    btn.type = "button";
+    btn.setAttribute("aria-expanded", String(open));
+    btn.setAttribute("aria-controls", id);
+    keyed(btn, "g:" + key);
+    btn.appendChild(title);
+    btn.addEventListener("click", function () { groupOpen[key] = !open; renderCurrent(); });
+    card.appendChild(btn);
+    card.appendChild(summary);
+    var body = el("div");
+    body.id = id;
+    body.hidden = !open;
+    if (open) { body.appendChild(readingList(g)); }
+    card.appendChild(body);
+    return card;
+  }
+
+  function hostHead(h) {
+    var head = el("span", null, "host-head");
+    head.appendChild(icon("server"));
+    head.appendChild(el("span", h.host));
+    head.appendChild(statusMark(h.status_key, h.status_text));
+    return head;
+  }
+
+  // The groups this user chose to see, in the order they chose, from the groups the host has.
+  function visibleGroups(h) {
+    if (!prefs.groups.length) { return h.groups; }
+    var byGroup = {};
+    h.groups.forEach(function (g) { byGroup[g.id] = g; });
+    var out = [];
+    prefs.groups.forEach(function (p) {
+      if (p.visible && byGroup[p.id]) { out.push(byGroup[p.id]); }
+    });
+    return out;
+  }
+
+  function simpleHost(h) {
+    var box = el("article", null, "host");
+    box.setAttribute("data-status-key", statusKey(h.status_key));
+    var head = el("div", null, "host-head");
+    var title = el("h3");
+    title.appendChild(icon("server"));
+    title.appendChild(el("span", h.host));
+    head.appendChild(title);
+    head.appendChild(statusMark(h.status_key, h.status_text));
+    var chips = el("span", null, "chips");
+    visibleGroups(h).forEach(function (g) {
+      var chip = el("span", null, "chip");
+      var name = g.label + ": " + g.status_text;
+      chip.setAttribute("role", "img");
+      chip.setAttribute("aria-label", name);
+      chip.title = name;
+      chip.appendChild(icon(g.icon));
+      var k = statusKey(g.status);
+      var mark = icon(STATUS_ICON[k]);
+      mark.className += " stat-" + k;
+      chip.appendChild(mark);
+      chips.appendChild(chip);
+    });
+    head.appendChild(chips);
+    box.appendChild(head);
+    if (h.reason) { box.appendChild(el("p", h.reason, "muted")); }
+    return box;
+  }
+
+  function cardsHost(h, view) {
+    var box = el("article", null, "host");
+    box.setAttribute("data-status-key", statusKey(h.status_key));
+    var expert = view === "expert";
+    var open = expert ? true : (hostOpen[h.host] === undefined ? h.status_key !== "good" : hostOpen[h.host]);
+    var id = "host-" + (idCounter++);
+    var heading = el("h3");
+    if (expert) {
+      heading.appendChild(hostHead(h));
+    } else {
+      var btn = el("button", null, "host-toggle");
+      btn.type = "button";
+      btn.setAttribute("aria-expanded", String(open));
+      btn.setAttribute("aria-controls", id);
+      keyed(btn, "h:" + h.host);
+      btn.appendChild(hostHead(h));
+      btn.addEventListener("click", function () { hostOpen[h.host] = !open; renderCurrent(); });
+      heading.appendChild(btn);
+    }
+    box.appendChild(heading);
+    var body = el("div");
+    body.id = id;
+    body.hidden = !open;
+    if (open) {
+      if (h.reason) { body.appendChild(el("p", h.reason, "muted")); }
+      if (h.last_seen !== null && h.last_seen !== undefined) {
+        body.appendChild(el("p", "Last seen " + stamp(h.last_seen), "muted"));
+      }
+      var groups = el("div", null, "groups");
+      visibleGroups(h).forEach(function (g) { groups.appendChild(groupCard(h, g, view)); });
+      body.appendChild(groups);
+    }
+    box.appendChild(body);
+    return box;
+  }
+
+  function countText(counts) {
+    return Object.keys(counts).map(function (k) {
+      return k.charAt(0).toUpperCase() + k.slice(1) + " " + counts[k];
+    }).join(", ");
+  }
+
+  function renderBanner(b) {
+    byId("banner").setAttribute("data-status", String(b.status));
+    byId("banner-icon").className = "icon ic-" + STATUS_ICON[statusKey(b.status_key)];
+    byId("banner-badge").textContent = b.status_text;
+    byId("banner-text").textContent = b.text;
+    byId("banner-counts").textContent = "Hosts: " + countText(b.counts.hosts) + ". Groups: " + countText(b.counts.groups) + ".";
+  }
+
+  function renderCurrent() { if (lastDoc) { render(lastDoc); } }
 
   function render(doc) {
-    var banner = byId("banner");
-    banner.setAttribute("data-status", String(doc.banner.status));
-    byId("banner-badge").textContent = doc.banner.status_text;
-    byId("banner-text").textContent = doc.banner.text;
-    var tiles = byId("tiles");
-    while (tiles.firstChild) { tiles.removeChild(tiles.firstChild); }
-    doc.hosts.forEach(function (h) { tiles.appendChild(renderTile(h)); });
+    lastDoc = doc;
+    var active = document.activeElement ? document.activeElement.getAttribute("data-key") : null;
+    renderBanner(doc.banner);
+    var hosts = byId("hosts");
+    hosts.className = "hosts " + prefs.view;
+    clear(hosts);
+    idCounter = 0;
+    doc.hosts.forEach(function (h) {
+      hosts.appendChild(prefs.view === "simple" ? simpleHost(h) : cardsHost(h, prefs.view));
+    });
+    renderCustomise();
+    if (active) { focusKey(active); }
     byId("refresh-note").textContent = "Updated " + new Date(doc.generated * 1000).toLocaleTimeString() +
-      ". Refreshes every " + doc.refresh_s + " seconds.";
-    return doc.refresh_s;
+      ". Refreshes every " + doc_refresh_default() + " seconds.";
+  }
+
+  // Customise panel. The list is the user's saved order; moving or hiding a group saves it at once.
+  function groupLabel(g) { return g.label || g.id; }
+
+  function moveGroup(from, to) {
+    var item = prefs.groups.splice(from, 1)[0];
+    prefs.groups.splice(to, 0, item);
+    savePrefs();
+    renderCurrent();
+  }
+
+  function renderCustomise() {
+    var list = byId("cust-list");
+    var active = document.activeElement ? document.activeElement.getAttribute("data-key") : null;
+    clear(list);
+    var last = prefs.groups.length - 1;
+    prefs.groups.forEach(function (g, i) {
+      var li = el("li", null, "cust-row");
+      li.draggable = true;
+      li.addEventListener("dragstart", function (e) {
+        dragFrom = i;
+        li.classList.add("dragging");
+        if (e.dataTransfer) { e.dataTransfer.effectAllowed = "move"; e.dataTransfer.setData("text/plain", g.id); }
+      });
+      li.addEventListener("dragend", function () { dragFrom = -1; li.classList.remove("dragging"); });
+      li.addEventListener("dragover", function (e) { if (dragFrom !== -1) { e.preventDefault(); } });
+      li.addEventListener("drop", function (e) {
+        e.preventDefault();
+        if (dragFrom !== -1 && dragFrom !== i) {
+          var from = dragFrom;
+          dragFrom = -1;
+          moveGroup(from, i);
+          byId("cust-note").textContent = groupLabel(g) + " order changed.";
+        }
+      });
+      li.appendChild(icon("grip-vertical"));
+      var box = el("input");
+      box.type = "checkbox";
+      box.id = "cv-" + g.id;
+      box.checked = g.visible;
+      keyed(box, "cv:" + g.id);
+      box.addEventListener("change", function () {
+        g.visible = box.checked;
+        savePrefs();
+        renderCurrent();
+        byId("cust-note").textContent = groupLabel(g) + (g.visible ? " is shown." : " is hidden.");
+      });
+      var label = el("label");
+      label.setAttribute("for", box.id);
+      label.appendChild(icon(g.icon));
+      label.appendChild(el("span", groupLabel(g)));
+      li.appendChild(box);
+      li.appendChild(label);
+      [["up", "Move up", "arrow-up", i - 1], ["down", "Move down", "arrow-down", i + 1]].forEach(function (d) {
+        var btn = el("button");
+        btn.type = "button";
+        btn.setAttribute("aria-label", d[1] + ": " + groupLabel(g));
+        btn.title = d[1];
+        btn.appendChild(icon(d[2]));
+        btn.disabled = d[3] < 0 || d[3] > last;
+        keyed(btn, d[0] + ":" + g.id);
+        btn.addEventListener("click", function () {
+          moveGroup(i, d[3]);
+          byId("cust-note").textContent = groupLabel(g) + " moved to position " + (d[3] + 1) + " of " + prefs.groups.length + ".";
+          if (!focusKey(d[0] + ":" + g.id)) { focusKey((d[0] === "up" ? "down" : "up") + ":" + g.id); }
+        });
+        li.appendChild(btn);
+      });
+      list.appendChild(li);
+    });
+    if (active) { focusKey(active); }
+  }
+
+  function applyView() {
+    ["simple", "expanded", "expert"].forEach(function (v) {
+      byId("view-" + v).setAttribute("aria-pressed", String(prefs.view === v));
+    });
+  }
+
+  function setView(name) {
+    prefs.view = name;
+    applyView();
+    selectView("status");
+    renderCurrent();
+    savePrefs();
+  }
+
+  function savePrefs() {
+    var body = { view: prefs.view, groups: prefs.groups.map(function (g) { return { id: g.id, visible: g.visible }; }) };
+    var note = byId("cust-note");
+    saveChain = saveChain.then(function () {
+      return apiSend("PUT", "/api/v1/me/preferences", body).then(function (resp) {
+        if (resp.status === 401) { show(false, ""); return; }
+        if (!resp.ok) { note.textContent = "Your choices could not be saved."; }
+      });
+    }).catch(function () { note.textContent = "Your choices could not be saved."; });
+  }
+
+  function loadPrefs() {
+    return fetch("/api/v1/me/preferences", { credentials: "same-origin" }).then(function (resp) {
+      return resp.ok ? resp.json() : null;
+    }).then(function (doc) {
+      if (doc) { prefs = { view: doc.view, groups: doc.groups, defaults: doc.default_groups }; }
+      applyView();
+      renderCustomise();
+    }).catch(function () { applyView(); });
+  }
+
+  function resetPrefs() {
+    var ids = prefs.defaults || prefs.groups.map(function (g) { return g.id; });
+    var byGroup = {};
+    prefs.groups.forEach(function (g) { byGroup[g.id] = g; });
+    prefs.groups = ids.map(function (id) { var g = byGroup[id]; g.visible = true; return g; });
+    savePrefs();
+    renderCurrent();
+    renderCustomise();
+    byId("cust-note").textContent = "Default order restored and all groups shown.";
+  }
+
+  function toggleCustomise() {
+    var btn = byId("customise-btn");
+    var open = btn.getAttribute("aria-expanded") !== "true";
+    btn.setAttribute("aria-expanded", String(open));
+    byId("customise").hidden = !open;
+    if (open) { selectView("status"); }
   }
 
   function stopRefresh() {
@@ -82,16 +408,17 @@
   function refresh() {
     stopRefresh();
     var wait = doc_refresh_default();
-    fetch("/api/v1/ui/status", { credentials: "same-origin" }).then(function (resp) {
+    fetch("/api/v1/hosts/summary/grouped", { credentials: "same-origin" }).then(function (resp) {
       if (resp.status === 401) { show(false, ""); return null; }
       if (!resp.ok) { throw new Error("status " + resp.status); }
       return resp.json();
     }).then(function (doc) {
-      if (doc) { wait = render(doc); refreshTimer = setTimeout(refresh, wait * 1000); }
+      if (doc) { render(doc); refreshTimer = setTimeout(refresh, wait * 1000); }
     }).catch(function () {
       byId("banner").setAttribute("data-status", "2");
+      byId("banner-icon").className = "icon ic-circle-x";
       byId("banner-badge").textContent = "Unreachable";
-      byId("banner-text").textContent = "The hub could not be reached. The tiles below may be out of date.";
+      byId("banner-text").textContent = "The hub could not be reached. The status below may be out of date.";
       refreshTimer = setTimeout(refresh, wait * 1000);
     });
   }
@@ -491,18 +818,21 @@
     byId("login-view").hidden = signedIn;
     byId("app-view").hidden = !signedIn;
     byId("logout").hidden = !signedIn;
+    byId("viewbar").hidden = !signedIn;
     byId("app-user").textContent = signedIn ? "Signed in as " + username + "." : "";
     byId(signedIn ? "main" : "username").focus();
-    if (signedIn) { refresh(); probeAdmin(); }
+    if (signedIn) { loadPrefs().then(refresh); probeAdmin(); }
   }
 
   // State-changing requests carry the CSRF token in a header. The session cookie is HttpOnly
   // and never read here.
-  function apiPost(path, body) {
+  function apiSend(method, path, body) {
     var headers = { "Content-Type": "application/json", "X-CSRF-Token": csrfToken || readCookie(CSRF_COOKIE) };
-    return fetch(path, { method: "POST", headers: headers, credentials: "same-origin",
+    return fetch(path, { method: method, headers: headers, credentials: "same-origin",
                          body: body === undefined ? undefined : JSON.stringify(body) });
   }
+
+  function apiPost(path, body) { return apiSend("POST", path, body); }
 
   function onLogin(event) {
     event.preventDefault();
@@ -529,6 +859,11 @@
   function start() {
     byId("login-form").addEventListener("submit", onLogin);
     byId("logout").addEventListener("click", onLogout);
+    ["simple", "expanded", "expert"].forEach(function (v) {
+      byId("view-" + v).addEventListener("click", function () { setView(v); });
+    });
+    byId("customise-btn").addEventListener("click", toggleCustomise);
+    byId("cust-reset").addEventListener("click", resetPrefs);
     byId("tab-status").addEventListener("click", function () { selectView("status"); });
     byId("tab-events").addEventListener("click", function () { selectView("events"); });
     byId("tab-history").addEventListener("click", function () { selectView("history"); });
