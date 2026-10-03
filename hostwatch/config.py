@@ -103,6 +103,7 @@ class Config:
     power_witness: str = field(default_factory=lambda: _env("HOSTWATCH_POWER_WITNESS", "").strip())
     raw_retention_days: int = field(default_factory=lambda: int(_env("HOSTWATCH_RAW_RETENTION_DAYS", "7")))
     rollup_retention_days: int = field(default_factory=lambda: int(_env("HOSTWATCH_ROLLUP_RETENTION_DAYS", "400")))
+    audit_retention_days: int = field(default_factory=lambda: int(_env("HOSTWATCH_AUDIT_RETENTION_DAYS", "400")))
     mqtt_host: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_HOST", "").strip())
     mqtt_port: int = field(default_factory=lambda: int(_env("HOSTWATCH_MQTT_PORT", "1883")))
     mqtt_username: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_USERNAME", ""))
@@ -127,6 +128,8 @@ class Config:
 
     def validate(self) -> None:
         self._validate_nut()
+        if self.audit_retention_days < 0:
+            raise ValueError("HOSTWATCH_AUDIT_RETENTION_DAYS must be 0 (keep forever) or a positive number of days")
         if self.role not in {"all", "hub", "agent"}:
             raise ValueError(f"HOSTWATCH_ROLE must be all, hub, or agent (got {self.role!r})")
         if self.mtls_mode not in {"off", "uvicorn", "proxy"}:

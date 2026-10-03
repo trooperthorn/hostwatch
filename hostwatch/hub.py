@@ -129,6 +129,7 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
             await asyncio.sleep(3600)
             try:
                 await asyncio.to_thread(store.maintain, cfg.raw_retention_days, cfg.rollup_retention_days)
+                await asyncio.to_thread(store.prune_audit, cfg.audit_retention_days)
             except Exception as exc:
                 log.warning("maintenance failed: %s", exc)
 

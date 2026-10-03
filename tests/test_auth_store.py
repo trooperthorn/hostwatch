@@ -89,3 +89,76 @@ def test_audit_update_and_delete_are_aborted(store):
     with pytest.raises(sqlite3.DatabaseError, match="append-only"):
         store._db.execute("DELETE FROM audit_log")
     assert store.audit_rows()[0]["status"] == 200
+
+
+# ---- Audit retention ----
+
+DAY = 86400.0
+
+
+def _seed_audit(store, now):
+    store.append_audit("a", "request", "GET", "/old1", 200, "x", now=now - 500 * DAY)
+    store.append_audit("a", "request", "GET", "/old2", 200, "x", now=now - 401 * DAY)
+    store.append_audit("a", "request", "GET", "/new", 200, "x", now=now - 10 * DAY)
+
+
+def test_prune_removes_old_rows_and_records_it(store):
+    now = 1_000_000_000.0
+    _seed_audit(store, now)
+    assert store.prune_audit(400, now=now) == 2
+    rows = store.audit_rows(limit=10)
+    assert sorted(r["path"] for r in rows) == ["/new", "audit_log"]
+    rec = next(r for r in rows if r["kind"] == "audit_prune")
+    detail = rec["detail"] if isinstance(rec["detail"], dict) else __import__("json").loads(rec["detail"])
+    assert detail["pruned"] == 2 and detail["cutoff"] == now - 400 * DAY
+    assert store.prune_audit(400, now=now) == 0
+    assert len(store.audit_rows(limit=10)) == 2  # no second record when nothing is old enough
+
+
+def test_prune_zero_keeps_everything(store):
+    now = 1_000_000_000.0
+    _seed_audit(store, now)
+    assert store.prune_audit(0, now=now) == 0
+    assert len(store.audit_rows(limit=10)) == 3
+
+
+def test_update_and_delete_still_fail_after_prune(store):
+    now = 1_000_000_000.0
+    _seed_audit(store, now)
+    store.prune_audit(400, now=now)
+    for stmt in ("UPDATE audit_log SET actor = 'z'", "DELETE FROM audit_log"):
+        with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+            store._db.execute(stmt)
+    assert not hasattr(store, "delete_audit")
+
+
+class _FailingDb:
+    """Wraps the connection and raises when a statement starting with the marker runs."""
+
+    def __init__(self, db, marker):
+        self._db, self._marker = db, marker
+
+    def execute(self, sql, *args):
+        if sql.lstrip().startswith(self._marker):
+            raise RuntimeError("injected failure")
+        return self._db.execute(sql, *args)
+
+    def __getattr__(self, name):
+        return getattr(self._db, name)
+
+
+@pytest.mark.parametrize("marker", ["CREATE TRIGGER", "INSERT INTO audit_log"])
+def test_failure_mid_prune_rolls_back_and_restores_trigger(store, marker):
+    now = 1_000_000_000.0
+    _seed_audit(store, now)
+    real = store._db
+    store._db = _FailingDb(real, marker)
+    with pytest.raises(RuntimeError):
+        store.prune_audit(400, now=now)
+    store._db = real
+    assert not real.in_transaction
+    assert len(store.audit_rows(limit=10)) == 3
+    with pytest.raises(sqlite3.DatabaseError, match="append-only"):
+        real.execute("DELETE FROM audit_log")
+    real.rollback()  # the refused DELETE opened an implicit transaction on this raw connection
+    assert store.prune_audit(400, now=now) == 2  # the store is still usable

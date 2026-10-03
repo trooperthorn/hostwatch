@@ -342,6 +342,15 @@ the node for some time, so an outage shorter than that is not witnessed. Such a 
 second entity where that matters. The detection time on the real controller is an owner check in
 `UNVERIFIED.md`.
 
+## Audit log retention
+
+The hourly maintenance task prunes audit rows older than
+`HOSTWATCH_AUDIT_RETENTION_DAYS` (default 400; 0 keeps rows forever). Each prune
+that removes rows appends one `audit_prune` row with the count and the cutoff.
+Pruning is the only deletion the audit log allows, and history beyond the window
+is not recoverable, so export rows first if you need a longer record. This is an
+application-layer control, not tamper-proofing.
+
 ## Dependency lock
 
 The container image installs its runtime dependencies from `requirements.lock`, which pins every

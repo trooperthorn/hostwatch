@@ -634,7 +634,9 @@ restart. It uses fakes only; the matching hardware checks are open in `UNVERIFIE
 
 SQLite in `/data`. Raw samples are kept for `HOSTWATCH_RAW_RETENTION_DAYS`,
 rollups for `HOSTWATCH_ROLLUP_RETENTION_DAYS`, pruned by an hourly maintenance
-task in the hub. Schema changes must be additive, versioned, and migrated with
+task in the hub. The audit log is pruned by the same task after
+`HOSTWATCH_AUDIT_RETENTION_DAYS` (default 400, 0 keeps rows forever); see the audit
+retention paragraph in the authentication section. Schema changes must be additive, versioned, and migrated with
 guards, with a test that upgrades a database built by the previous version.
 
 The schema version is stored in `PRAGMA user_version`. Phase 1 databases never
@@ -653,7 +655,17 @@ are stored; a full API key is returned once at creation. Revoking a key or
 session takes effect on the next lookup. The audit log has no update or delete
 method, and SQLite triggers abort UPDATE and DELETE on it. This is an
 application-layer control: anyone who can write the database file directly can
-drop the triggers or edit rows, so it is not tamper-proofing. The tables exist
+drop the triggers or edit rows, so it is not tamper-proofing. The one exception to
+"no delete" is `Store.prune_audit`, called by the hourly maintenance task. Inside a single
+transaction it drops the delete trigger, deletes rows older than
+`HOSTWATCH_AUDIT_RETENTION_DAYS` (default 400, 0 keeps everything), recreates the trigger and
+appends one `audit_prune` row (actor `system`) whose detail holds the pruned count, the cutoff
+and the window. SQLite DDL is transactional, so a failure rolls back both the deletion and the
+trigger change. Nothing is recorded when no row is old enough. The trade-off is that history
+beyond the window is gone for good, so an operator who needs a longer record should raise the
+window or export rows first. The update trigger is never lifted, so no path edits audit rows.
+This remains an application-layer control, and the prune record itself is the only trace of
+what was removed. The tables exist
 and the hub now enforces them as described under Hub authentication below. The
 hub is still bound to 127.0.0.1.
 

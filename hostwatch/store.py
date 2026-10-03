@@ -66,6 +66,11 @@ def _add_users_is_admin(db: sqlite3.Connection) -> None:
         db.execute("UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users)")
 
 
+AUDIT_NO_UPDATE_SQL = """CREATE TRIGGER IF NOT EXISTS audit_log_no_update BEFORE UPDATE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END"""
+AUDIT_NO_DELETE_SQL = """CREATE TRIGGER IF NOT EXISTS audit_log_no_delete BEFORE DELETE ON audit_log
+BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END"""
+
 MIGRATIONS: dict[int, tuple] = {
     2: (
         """CREATE TABLE IF NOT EXISTS events (
@@ -112,10 +117,8 @@ MIGRATIONS: dict[int, tuple] = {
         "CREATE INDEX IF NOT EXISTS audit_log_ts ON audit_log(ts)",
         # Application-layer protection only. Anyone who can open the database file
         # directly can drop these triggers or edit the file, so this is not tamper-proofing.
-        """CREATE TRIGGER IF NOT EXISTS audit_log_no_update BEFORE UPDATE ON audit_log
-BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END""",
-        """CREATE TRIGGER IF NOT EXISTS audit_log_no_delete BEFORE DELETE ON audit_log
-BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END""",
+        AUDIT_NO_UPDATE_SQL,
+        AUDIT_NO_DELETE_SQL,
     ),
     5: (
         # Publish progress per consumer: the last events.id already sent. Additive, no existing row changes.
@@ -409,6 +412,40 @@ class Store:
                 (time.time() if now is None else now, actor, kind, method, path, status, remote,
                  json.dumps(detail or {}, sort_keys=True)))
             return int(cur.lastrowid)
+
+    def prune_audit(self, retention_days: int, now: float | None = None) -> int:
+        """Delete audit rows older than the retention window and record the prune.
+
+        This is the only code path that deletes audit rows. It drops the delete trigger,
+        deletes, recreates the trigger and appends one audit row (kind audit_prune) stating
+        the count and cutoff, all in one transaction, so a failure rolls everything back and
+        the trigger stays in place. SQLite DDL is transactional. A window of 0 keeps every
+        row. Returns the number of rows pruned. Nothing is recorded when no row is old enough."""
+        if retention_days <= 0:
+            return 0
+        now = time.time() if now is None else now
+        cutoff = now - retention_days * 86400
+        with self._lock:
+            self._db.execute("BEGIN")
+            try:
+                if not self._db.execute("SELECT 1 FROM audit_log WHERE ts < ? LIMIT 1", (cutoff,)).fetchone():
+                    self._db.execute("ROLLBACK")
+                    return 0
+                self._db.execute("DROP TRIGGER audit_log_no_delete")
+                pruned = self._db.execute("DELETE FROM audit_log WHERE ts < ?", (cutoff,)).rowcount
+                self._db.execute(AUDIT_NO_DELETE_SQL)
+                self._db.execute(
+                    "INSERT INTO audit_log (ts, actor, kind, method, path, status, remote, detail) "
+                    "VALUES (?,?,?,?,?,?,?,?)",
+                    (now, "system", "audit_prune", "PRUNE", "audit_log", 200, "local",
+                     json.dumps({"pruned": pruned, "cutoff": cutoff, "retention_days": retention_days},
+                                sort_keys=True)))
+                self._db.execute("COMMIT")
+                return pruned
+            except BaseException:
+                if self._db.in_transaction:
+                    self._db.execute("ROLLBACK")
+                raise
 
     def audit_rows(self, limit: int = 100, kind: str | None = None, actor: str | None = None,
                    before_id: int | None = None, since: float | None = None,
