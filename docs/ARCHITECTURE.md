@@ -1002,6 +1002,27 @@ and the database lives in a pytest temporary directory. The program is only
 exercised through the test suite on development machines; real-hardware checks
 happen when the owner deploys the container on MediaIn-SVR.
 
+## TrueNAS API client
+
+`hostwatch/truenas/client.py` is a read-only JSON-RPC 2.0 client over WebSocket (the `websockets`
+library). The URL comes from `HOSTWATCH_TRUENAS_URL` and the API key from the file named by
+`HOSTWATCH_TRUENAS_API_KEY_FILE`, read at connect time. Controls, all enforced in code:
+
+- Method allowlist: `auth.login_with_api_key`, `system.info`, `system.boot_id`, `pool.query`,
+  `disk.query`, `disk.temperatures`, `alert.list` and `pool.scrub.query`. The check runs in the one
+  function that writes a frame, so any other method raises `MethodNotAllowed` before anything is
+  sent. The key given to it should still be a READONLY_ADMIN key, so the server refuses changes too.
+- TLS verification is on for `wss://`; `HOSTWATCH_TRUENAS_CA` adds a private CA bundle and
+  `HOSTWATCH_TRUENAS_INSECURE` turns verification off explicitly. A plain `ws://` URL is refused
+  unless the host is loopback or the insecure flag is set, because the login frame carries the key.
+- A timeout (`HOSTWATCH_TRUENAS_TIMEOUT_S`, default 10 seconds) covers connect, login and the call.
+  A dropped connection is retried once on a fresh connection with a new login. Every failure
+  returns a `Result` with `available` false and a reason built from class names, never a guessed
+  value. The key is held in a `Secret` and does not appear in logs, reasons or reprs.
+- `{"$date": ms}` values are converted to epoch seconds.
+
+The client is not yet called by a collector; the TrueNAS collector slices build on it.
+
 ## Platforms
 
 Linux (Debian 13 amd64) first. The Raspberry Pi (arm64), TrueNAS SCALE, and a
