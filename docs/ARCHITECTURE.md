@@ -954,7 +954,7 @@ bound. Every audit writer stores the request path with control characters replac
 capped at 256 characters (`sanitize_audit_path` in `store.py`). Scoped IPv6 entries (a `%zone`)
 are refused in the list and in `HOSTWATCH_HUB_BIND`, the list must contain at least one unicast
 address that is not loopback, unspecified, multicast or broadcast, and multicast or broadcast bind
-addresses are refused. The audit log itself has no retention yet (PLAN.md lists this as open). The allowlist is exposure control, not authentication: allowed
+addresses are refused. Audit retention is described in the README. The allowlist is exposure control, not authentication: allowed
 clients still need a session or key. It depends on `network_mode: host` so the hub
 sees real client addresses; behind NAT or a proxy, list the proxy's address, which then
 admits everything that proxy forwards. `HOSTWATCH_TLS=1` does not start
@@ -983,6 +983,15 @@ operating system user as actor. The audit log is append-only at the
 application layer only, as described above; it is not tamper-proof against
 someone with write access to the file, which is the same person who can run
 the CLI.
+
+## Threat model and quick start documents
+
+`docs/THREAT-MODEL.md` lists assets, trust boundaries, threats and controls, and each control line
+carries one of three labels: enforced, advisory or planned. The README quick start is a numbered
+list for a fresh Debian 13 host. `tests/test_docs.py` checks that the threat model exists, that
+every control line has exactly one label, that the quick start steps are numbered in order, and that
+the quick start names only CLI commands the parser defines and `HOSTWATCH_` variables that appear
+in the code, the compose file or `deploy/.env.example`. It does not run any command.
 
 ## Isolation for tests and agents
 

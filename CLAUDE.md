@@ -41,6 +41,11 @@ SolarWinds Orion (API Poller). One image, three roles (`HOSTWATCH_ROLE=all|hub|a
   history (token from a file) to classify a witnessed outage as `boot.power_loss`.
   **Not yet verified against a real UPS, NUT server or Home Assistant**; see
   `UNVERIFIED.md`.
+- Phase 7 (hardening and release): code and documents complete and unit-tested. Hash-locked
+  dependency install, SBOM and image scan in CI, container healthcheck, audit log retention,
+  versioned release workflow, `docs/THREAT-MODEL.md` and a README quick start checked by
+  `tests/test_docs.py`. **The CI workflow has never run, and the 15-minute fresh-host exit check
+  has not been done**; see `UNVERIFIED.md`.
 - Next: deploy on MediaIn-SVR, confirm all six sources, run the 24h gap test,
   then run the four Phase 2 exit scenarios and the open Phase 3 checks.
 

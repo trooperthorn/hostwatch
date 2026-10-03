@@ -58,10 +58,9 @@ row per request). Controls and their labels:
 
 Open items for Phase 3:
 
-- The audit log has no retention. It is append-only by trigger, so pruning needs a
-  deliberate design (for example archiving then rotating the file). Source denials are
-  aggregated per peer per minute, which bounds that one source of growth but not the
-  log as a whole.
+- Audit log retention was added in Phase 7: an hourly prune removes rows older than
+  `HOSTWATCH_AUDIT_RETENTION_DAYS` and records itself. Source denials are also aggregated per
+  peer per minute.
 
 ## Phase 4 status
 
@@ -108,6 +107,15 @@ Code complete and unit-tested; not yet verified on hardware. The exit test is
 plug witness evidence is classified `power_loss` through the hub, while a boot without a witness
 stays `unknown_unclean`. The owner checks (a real UPS on battery and a real plug pull) are in
 `UNVERIFIED.md`.
+
+## Phase 7 status
+
+Code and documents complete and unit-tested; not yet verified on hardware or in CI. Done: the
+hash-locked dependency install, the SBOM and image scan in CI, the container `HEALTHCHECK`, audit
+log retention, the versioned release workflow, `docs/THREAT-MODEL.md` and the quick start in
+`README.md`. The docs test is `tests/test_docs.py`. The exit test is owner-run: a fresh Debian 13
+host reaches a logged-in dashboard in under 15 minutes by following the README quick start only.
+The procedure is in `UNVERIFIED.md`.
 
 ## Phase 0 detail
 

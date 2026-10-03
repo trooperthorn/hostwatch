@@ -4,7 +4,7 @@ Host health, power, and crash monitoring with authenticated API access for
 Home Assistant and SolarWinds Orion. See `PLAN.md` for the phased plan and
 `UNVERIFIED.md` for assumptions not yet confirmed on real hardware.
 
-Current phase: **2 (event engine)**, code complete and not yet deployed. Phase 0 is complete on MediaIn-SVR.
+Current phase: **7 (hardening and release)**, code and documents complete and not yet deployed or verified on real hardware. Phase 0 is complete on MediaIn-SVR. The security design is in `docs/THREAT-MODEL.md`.
 
 ## Layout
 
@@ -155,19 +155,131 @@ Not yet present (later slices and phases): the remaining Home Assistant work.
 The read examples below that use the shared token answer 403; use a key with
 the matching scope, created with `key create`.
 
-## Deploy on MediaIn-SVR
+## Quick start
 
-```
-sudo ./scripts/rapl-access.sh --dry-run
-sudo ./scripts/rapl-access.sh              # prints HOSTWATCH_RAPL_GID
-cp deploy/.env.example deploy/.env
-openssl rand -hex 32                       # optional legacy HOSTWATCH_INGEST_TOKEN; the all role mints its own ingest key.
-                                           # A remote agent should use HOSTWATCH_INGEST_KEY (scoped key) instead.
-                                           # Once agents use keys, set HOSTWATCH_LEGACY_TOKEN_DISABLED=1.
-nano deploy/.env                           # also set HOSTWATCH_RAPL_GID and HOSTWATCH_JOURNAL_GID
-                                           # (journal gid: getent group systemd-journal | cut -d: -f3)
-cd deploy && sudo docker compose up -d --build
-```
+This takes a fresh Debian 13 host to a working, logged-in dashboard. The target is under 15
+minutes, with the image pull being the longest wait. It assumes Docker Engine and the Compose
+plugin are already installed (installing Docker is out of scope), that you have `sudo`, and that
+the host has `git`, `curl` and `openssl`. The 15-minute claim is an owner check that has not been
+done yet; see `UNVERIFIED.md`. The expected output below is taken from what the code prints, not
+from a recorded run, so treat small differences in wording as normal and report them.
+
+1. **Get the code.** The compose file, the scripts and the example settings live in the repository.
+
+   ```
+   git clone https://github.com/trooperthorn/hostwatch.git ~/repos/hostwatch
+   cd ~/repos/hostwatch
+   ```
+
+   Expected: a `hostwatch` directory containing `deploy/` and `scripts/`.
+
+2. **Check the host.** This is read-only and changes nothing.
+
+   ```
+   ./scripts/host-prep.sh
+   ```
+
+   Expected: one line per item marked PASS, FAIL, WARN, SKIP or MANUAL, ending with `FAIL: 0`.
+   If a FAIL appears, run `sudo ./scripts/host-prep.sh --apply --dry-run` to see what would be
+   changed before you apply anything.
+
+3. **Allow the container to read CPU power (RAPL).** Since kernel 5.10 the energy counters are
+   root-only because of the PLATYPUS side channel, and this step trades that protection for power
+   readings. Read the header of the script and `docs/THREAT-MODEL.md` first, and keep interactive
+   accounts out of the new group. Preview, then apply:
+
+   ```
+   sudo ./scripts/rapl-access.sh --dry-run
+   sudo ./scripts/rapl-access.sh
+   ```
+
+   Expected: the last lines read `Set this in deploy/.env:` followed by `HOSTWATCH_RAPL_GID=` and a
+   number. Note the number.
+
+4. **Create the settings file.** Copy the example, then set the two group ids.
+
+   ```
+   cp deploy/.env.example deploy/.env
+   getent group systemd-journal | cut -d: -f3
+   nano deploy/.env
+   ```
+
+   Expected: the `getent` command prints one number. In `deploy/.env` set `HOSTWATCH_RAPL_GID` to
+   the number from step 3 and `HOSTWATCH_JOURNAL_GID` to the number just printed. Leave
+   `HOSTWATCH_ROLE=all`. Leave `HOSTWATCH_HUB_BIND` at its default of `127.0.0.1`. If Scrutiny is
+   not on `http://127.0.0.1:8081`, set `HOSTWATCH_SCRUTINY_URL`. Do not commit this file.
+
+5. **Pull the image and start it.**
+
+   ```
+   cd deploy
+   sudo docker compose pull
+   sudo docker compose up -d
+   ```
+
+   Expected: `pull` downloads `ghcr.io/trooperthorn/hostwatch:edge`, and `up -d` reports the
+   `hostwatch` container as started. Compose refuses to start with a message naming
+   `HOSTWATCH_RAPL_GID` or `HOSTWATCH_JOURNAL_GID` if either is empty.
+
+6. **Wait for the container to be healthy.**
+
+   ```
+   sudo docker inspect --format '{{.State.Health.Status}}' hostwatch
+   curl -s http://127.0.0.1:8090/internal/v1/health
+   ```
+
+   Expected: `starting` for the first seconds, then `healthy`. The `curl` answer reports status
+   `ok` and the version. This endpoint is a liveness probe and not an authentication check.
+
+7. **Create the first administrator.** This works only while no user exists.
+
+   ```
+   sudo docker exec hostwatch python -m hostwatch bootstrap-admin
+   ```
+
+   Expected: the line `Created user 'admin'. The password below is shown once and is not stored:`
+   and then the password on its own line. Copy it now, because it cannot be shown again. Create
+   named users later with `python -m hostwatch user create NAME`.
+
+8. **Create keys for Home Assistant and Orion.** Each consumer gets its own key with only the
+   scopes it needs, so either can be revoked alone.
+
+   ```
+   sudo docker exec hostwatch python -m hostwatch key create --scopes read:metrics,read:events --owner homeassistant
+   sudo docker exec hostwatch python -m hostwatch key create --scopes read:metrics --owner orion
+   sudo docker exec hostwatch python -m hostwatch key list
+   ```
+
+   Expected: each `create` prints `Created key id N with scopes ... The secret below is shown
+   once:` and then the secret. Store each secret in the consumer that will use it. `key list`
+   shows both keys with their owners. To remove one later, run
+   `sudo docker exec hostwatch python -m hostwatch key revoke ID`. To turn on the optional
+   Home Assistant MQTT publisher, set `HOSTWATCH_MQTT_HOST` in `deploy/.env` and run
+   `sudo docker compose up -d` again.
+
+9. **Open the dashboard.** On the host, browse to `http://127.0.0.1:8090/` and sign in as `admin`
+   with the password from step 7. To reach it from another computer without exposing the plain
+   HTTP port, use an SSH tunnel such as `ssh -L 8090:127.0.0.1:8090 user@host`, or set up TLS with
+   `HOSTWATCH_TLS_CERT` and `HOSTWATCH_TLS_KEY` as described below.
+
+   Expected: a sign-in form, then a page listing this host with the worst status first. Within a
+   few collection intervals (`HOSTWATCH_INTERVAL`, default 15 seconds) the sources show values or
+   an "unavailable" reason; they never show a made-up zero.
+
+### Troubleshooting
+
+| Symptom | Likely cause | What to do |
+|---|---|---|
+| `docker compose` stops with a message naming `HOSTWATCH_RAPL_GID` or `HOSTWATCH_JOURNAL_GID` | The group id is empty in `deploy/.env` | Repeat steps 3 and 4, then run `sudo docker compose up -d` again |
+| The health status stays `starting` or becomes `unhealthy` | The hub did not start or the port is taken | Run `sudo docker logs hostwatch` and look for a startup error; check `sudo ss -ltnp` for port 8090 |
+| The container exits at startup with a message about the bind | `HOSTWATCH_HUB_BIND` is not loopback and neither TLS nor an allowlist is set | Set it back to `127.0.0.1`, or configure TLS or `HOSTWATCH_ALLOWED_CLIENTS` |
+| `bootstrap-admin` says users already exist | An administrator was already created | Use the saved password, or reset it with `python -m hostwatch user passwd admin` |
+| The sign-in fails and then locks | Too many wrong passwords (`HOSTWATCH_LOGIN_MAX_FAILURES`) | Run `python -m hostwatch user unlock admin` inside the container |
+| The power source shows unavailable | The container group cannot read the RAPL counters, for example after a reboot before the service ran | Check `HOSTWATCH_RAPL_GID`, run `sudo systemctl status hostwatch-rapl.service`, then restart the container |
+| The journal or boot events show unavailable | `HOSTWATCH_JOURNAL_GID` is wrong or the journal is not persistent | Re-check the group id from step 4; see `UNVERIFIED.md` |
+| The RAID source shows absent on a host with no md arrays | This is expected, not a fault | Nothing to do |
+| The Scrutiny source shows unavailable | `HOSTWATCH_SCRUTINY_URL` does not point at your Scrutiny | Fix the URL in `deploy/.env` and run `sudo docker compose up -d` |
+| `curl` from another computer is refused | The hub listens on loopback only, by design | Use the SSH tunnel in step 9, or configure TLS or an allowlist |
 
 Boolean settings (`HOSTWATCH_TLS`, `HOSTWATCH_LEGACY_TOKEN_DISABLED`,
 `HOSTWATCH_ALLOW_INSECURE_BIND`) accept `1`, `true`, `yes`, `on` as true and `0`,
