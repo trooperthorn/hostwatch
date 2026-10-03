@@ -11,6 +11,7 @@ from .memory import MemoryCollector
 from .nut import NutCollector
 from .rapl import RaplCollector
 from .scrutiny import ScrutinyCollector
+from .zfs import ZfsCollector
 
 
 def build_collectors(cfg: Config) -> list[Collector]:
@@ -21,6 +22,7 @@ def build_collectors(cfg: Config) -> list[Collector]:
         RaplCollector(s, p),
         HwmonCollector(s, p),
         MdRaidCollector(s, p),
+        ZfsCollector(s, p),
         ScrutinyCollector(s, p, cfg.scrutiny_url),
         NutCollector(s, p, cfg.nut_host, cfg.nut_ups, cfg.nut_user, cfg.nut_password_file, cfg.nut_port),
     ]

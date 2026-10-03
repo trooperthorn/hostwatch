@@ -123,6 +123,9 @@ def build_entities(summary: HostSummary) -> list[Entity]:
     for c in summary.md_arrays:
         arr = c.labels.get("array", "")
         out.append(_sensor("md_" + slug(arr), f"RAID array {arr} degraded devices", c, diagnostic=True))
+    for c in summary.pools:
+        pool = c.labels.get("pool", "")
+        out.append(_sensor("pool_" + slug(pool), f"ZFS pool {pool} health (0 online, 2 critical)", c, diagnostic=True))
     for c in summary.disks:
         who = c.labels.get("device") or c.labels.get("wwn", "")
         out.append(_sensor("disk_" + slug(c.labels.get("wwn", "") or who), f"Disk {who} health status", c,

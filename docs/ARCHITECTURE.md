@@ -483,8 +483,9 @@ from slugged labels (`temp_k10temp_tctl_c`, `md_md0_degraded_devices`,
 `<group>_status` (0, 1 or 2) and `<group>_available` (1 or 0). When nothing in a
 group is known, the value keys are omitted, `<group>_available` is 0, the group
 status is 1 (the same warning the summary gives an unavailable source) and
-`<group>_reason` says why. The `pools` group reports unavailable until a pool
-collector exists. Nothing is stored by this layer, so a restart or a recreated
+`<group>_reason` says why. The `pools` group is fed by the `zfs` collector, one item per pool
+(`pool_<slug>_health` is 0 online or 2 critical); it reports unavailable while no pool has been
+reported and is not expected at all on a host whose agent never sent a `zfs` row. Nothing is stored by this layer, so a restart or a recreated
 app on the same database gives the same answers.
 
 The overall status is not the worst known component alone. The expected groups
@@ -504,7 +505,8 @@ collector sets it false only when the place where the source would live was read
 nothing there: `mdraid` when `/proc/mdstat` is readable and lists no arrays (or does not exist
 while `/proc` is readable, which is the case on a ZFS host such as TrueNAS-SVR where the md module
 is not loaded), `rapl` when the powercap directory is readable and has no `intel-rapl` zone,
-`hwmon` when `/sys/class/hwmon` is readable and empty, and `scrutiny` when no URL is configured.
+`zfs` when `/proc/spl/kstat/zfs` is readable and holds no pools (or does not exist while `/proc` is
+readable, the zfs module not being loaded), `hwmon` when `/sys/class/hwmon` is readable and empty, and `scrutiny` when no URL is configured.
 An unreadable path stays present and unavailable, which is unmeasured and keeps the warning. The
 group of an absent source is listed in `HostSummary.not_present`, contributes no warning, and is
 reported as not present by each consumer: Orion writes `<group>_present` 0, `<group>_available` 0,
@@ -603,7 +605,7 @@ Discovery is republished when the connection epoch changes (first connect, recon
 restart), when a `online` birth message arrives (the listener only sets a flag; the next tick
 publishes), when an entity definition changes, and after any failed publish. A new hub process
 starts with nothing marked as published, so a restart on the same database republishes
-everything. Pool health has no collector yet.
+everything. ZFS pools publish as diagnostic sensors named `pool_<slug>`.
 
 ### Events topic
 
@@ -867,8 +869,7 @@ returns one document built by `hostwatch/integrations/ui_status.py` from `build_
 same summary the Home Assistant, Orion and Prometheus outputs use. It holds the banner (worst host,
 its state and reason), `refresh_s`, and the hosts sorted worst overall status first, then by name.
 Each host carries its 0/1/2 status and a text label, and for CPU, memory, power, temperatures, RAID,
-pools, disks and sources each component's value, state, state text and reason. Pools always read
-unknown because no pool source exists. Unknown and not present are shown as such, and a disappeared
+pools, disks and sources each component's value, state, state text and reason. Pools list each ZFS pool, or read unknown while the zfs source has not reported. Unknown and not present are shown as such, and a disappeared
 source is critical. `app.js` only renders this document with `textContent`, keeps the order it is
 given, polls at `refresh_s` without a page reload, and holds no threshold logic. State is shown by
 colour, a text badge and the text of each line, so it does not rely on colour alone. Tests:
@@ -1038,3 +1039,14 @@ that shows an overlapping outage, and asserts a critical `boot.power_loss` event
 `boot.unknown_unclean`, with the plug intervals and the UPS event in `detail.power_witness`. A boot
 with no witness configured stays `unknown_unclean`. The real UPS and plug pulls are owner checks in
 `UNVERIFIED.md`.
+
+### ZFS pool state
+
+The `zfs` collector reads `<procfs>/spl/kstat/zfs/<pool>/state` for every directory that holds a
+`state` entry. The file is readable without privilege on TrueNAS-SVR. Each pool yields a
+`pool_state` sample with labels `pool` and `state`. The hub maps the text: ONLINE is ok;
+DEGRADED, FAULTED, UNAVAIL and SUSPENDED are critical; any other text is unknown and never ok.
+A state file that cannot be read gives a sample with no value, which is unmeasured. The source is
+reported not present only when the zfs kstat directory is readable and empty, or is missing while
+`/proc` is readable. The pool list is a separate group from `raid`, so a host with both md and
+ZFS shows both. Pool state events and the TrueNAS API detail are not part of this slice.

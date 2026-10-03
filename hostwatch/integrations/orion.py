@@ -128,10 +128,13 @@ def raid(s: HostSummary) -> dict[str, Any]:
 
 
 def pools(s: HostSummary) -> dict[str, Any]:
-    # No storage pool source exists yet (ZFS collection is not built), so this
-    # group is honestly unavailable rather than reporting an empty healthy set.
     doc: dict[str, Any] = {"host": s.host}
-    _group(doc, "pools", [Component("pools", None, "", "unknown", "no pool source is collected on this build")])
+    comps = s.pools or [Component("pools", None, "", "unknown", "no pool has been reported by the zfs source")]
+    if not _group(doc, "pools", comps, s):
+        return doc
+    for c in s.pools:
+        key = "pool_" + slug(c.labels.get("pool", ""))
+        _item(doc, key, c, f"{key}_health")
     return doc
 
 

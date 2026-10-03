@@ -26,7 +26,8 @@ def _component(c: Component, label: str | None = None) -> dict[str, Any]:
 
 def host_document(s: HostSummary) -> dict[str, Any]:
     status = s.overall_status
-    pools = Component("pools", None, "", "unknown", "no pool source is collected on this build")
+    pools = s.pools or ([] if "pools" in s.not_present else
+                        [Component("pools", None, "", "unknown", "no pool has been reported by the zfs source")])
     return {
         "host": s.host,
         "status": status,
@@ -43,7 +44,7 @@ def host_document(s: HostSummary) -> dict[str, Any]:
         "wall_power": _component(s.wall_power, "Wall power") if s.wall_power is not None else None,
         "temperatures": [_component(c) for c in s.temperatures],
         "raid": [_component(c) for c in s.md_arrays],
-        "pools": [_component(pools, "Pools")],
+        "pools": [_component(c, c.name if c.labels else "Pools") for c in pools],
         "disks": [_component(c) for c in s.disks],
         "sources": [_component(c, name) for name, c in sorted(s.sources.items())],
     }

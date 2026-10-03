@@ -42,13 +42,17 @@ CRASH_KINDS = frozenset({"boot.kernel_panic", "boot.watchdog_reset", "boot.unkno
 
 STATUS_OK, STATUS_WARNING, STATUS_CRITICAL = 0, 1, 2
 
+# ZFS pool states (zpool-status(8)) that mean the pool has lost redundancy or cannot serve I/O.
+POOL_CRITICAL_STATES = frozenset({"DEGRADED", "FAULTED", "UNAVAIL", "SUSPENDED"})
+
 # Expected component group -> the source that feeds it. A group whose source is unavailable,
-# stale or has never reported is unmeasured. Pools are left out: no pool source is collected.
+# stale or has never reported is unmeasured. Pools are optional: they are expected only once the zfs source has a row.
 EXPECTED_GROUPS = {"cpu": "cpu", "memory": "memory", "power": "rapl", "temperatures": "hwmon",
-                   "raid": "mdraid", "disks": "scrutiny", "ups": "nut"}
+                   "raid": "mdraid", "pools": "zfs", "disks": "scrutiny", "ups": "nut"}
 # Groups that are expected only when their source has a row at all. The nut source reports
 # not present when NUT is unconfigured, so a host with no nut row is treated as not using NUT.
-OPTIONAL_GROUPS = frozenset({"ups"})
+# A host that never reported zfs is likewise not expected to have pools.
+OPTIONAL_GROUPS = frozenset({"ups", "pools"})
 
 # (warning, critical) thresholds, in the unit of the value. These are defaults
 # chosen for desktop and server parts, not measured limits; see UNVERIFIED.md.
@@ -116,11 +120,12 @@ class HostSummary:
     crashes: list[dict] = field(default_factory=list)
     ups: Component | None = None
     wall_power: Component | None = None
+    pools: list[Component] = field(default_factory=list)
 
     def components(self) -> list[Component]:
         extra = [c for c in (self.ups, self.wall_power) if c is not None]
         return [self.cpu, self.memory, self.package_power, *self.temperatures, *self.md_arrays,
-                *self.disks, *extra, *self.sources.values()]
+                *self.pools, *self.disks, *extra, *self.sources.values()]
 
     @property
     def status(self) -> int | None:
@@ -285,6 +290,24 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     if "mdraid" in gone and not md:
         md.append(comp("md", "mdraid", [], "count", labels={"array": "unknown"}))
 
+    # ZFS pool health from the kstat state text. Unknown text stays unknown, never ok.
+    pools: list[Component] = []
+    for pool in sorted({r["labels"].get("pool", "") for r in rows if r["source"] == "zfs"}):
+        c = comp(f"pool.{pool}", "zfs", pick("zfs", "pool_state", pool=pool), "", labels={"pool": pool})
+        if c.value is not None:
+            text = next((r["labels"].get("state", "") for r in pick("zfs", "pool_state", pool=pool)
+                         if r["ts"] == max(x["ts"] for x in pick("zfs", "pool_state", pool=pool))), "")
+            c.labels["state"] = text
+            if text == "ONLINE":
+                c.value, c.state = 0.0, "ok"
+            elif text in POOL_CRITICAL_STATES:
+                c.value, c.state, c.reason = 2.0, "critical", f"pool {pool} is {text}"
+            else:
+                c.value, c.state, c.reason = None, "unknown", f"pool {pool} has unrecognised state {text!r}"
+        pools.append(c)
+    if "zfs" in gone and not pools:
+        pools.append(comp("pool", "zfs", [], ""))
+
     disks: list[Component] = []
     for r in pick("scrutiny", "device_status"):
         lab = {k: r["labels"].get(k, "") for k in ("wwn", "device", "model")}
@@ -348,7 +371,7 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     }
     last_seen = max((r["updated"] for r in src_rows.values()), default=None)
     group_comps = {"cpu": [cpu], "memory": [memory], "power": [power], "temperatures": temps,
-                   "raid": md, "disks": disks, "ups": [ups] if ups is not None else []}
+                   "raid": md, "pools": pools, "disks": disks, "ups": [ups] if ups is not None else []}
     unmeasured = []
     not_present = []
     for group, source in EXPECTED_GROUPS.items():
@@ -389,4 +412,4 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     crash_rows = [{"id": e["id"], "kind": e["kind"].split(".", 1)[1], "ts": e["ts"]} for e in crashes]
     return HostSummary(host, now, cpu, memory, power, temps, md, disks, sources, problems,
                        sorted(open_conditions), last_seen, unmeasured, not_present, sorted(gone),
-                       silent, crash_rows, ups, wall)
+                       silent, crash_rows, ups, wall, pools)

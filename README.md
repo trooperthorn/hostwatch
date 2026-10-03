@@ -11,7 +11,7 @@ Current phase: **7 (hardening and release)**, code and documents complete and no
 | Path | Purpose |
 |---|---|
 | `hostwatch/schema.py` | Agent-to-hub wire schema, version 1, with an optional events list |
-| `hostwatch/collectors/` | One module per source: `cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `scrutiny`, `nut` |
+| `hostwatch/collectors/` | One module per source: `cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `zfs`, `scrutiny`, `nut` |
 | `hostwatch/agent.py` | Detect, collect, push to hub; durable outbox while the hub is down; writes the boot heartbeat |
 | `hostwatch/outbox.py` | Durable agent outbox (`outbox.db` in the data directory): batches stay until the hub answers 2xx, 400 and 422 dead-letter the batch, a 5xx never dead-letters and the batch waits with capped backoff, an undecodable row is dead-lettered with its error, a corrupt `outbox.db` is renamed to `outbox.db.corrupt-<timestamp>` and a fresh outbox started, overflow drops the oldest samples first and keeps events, and source progress markers commit in the same transaction as the batch |
 | `hostwatch/events/boot.py` | Heartbeat writer and boot classifier (clean shutdown, agent stopped, watchdog reset from journal messages or the watchdog bootstatus, kernel panic using only pstore records from the configured `HOSTWATCH_PSTORE` root that are newer than the previous boot's start and not already counted in an earlier boot event; shutdown hints come from the journal of the heartbeat's own boot id, unknown_unclean for an abrupt end without a witness, unknown; evidence is ranked by an explicit precedence table and contradictions are reported in the event detail) |
@@ -397,8 +397,8 @@ nor drops them, including events stored while the broker was unreachable at firs
 first tick starts at the newest existing event. Entities that are no longer produced have their
 retained discovery config cleared after being marked unavailable, using a list of published
 entities kept in the data directory. Host names that differ only in case or punctuation get a
-short hash suffix on their device identifier and topics, with a warning in the log. Pool health arrives in a
-later release.
+short hash suffix on their device identifier and topics, with a warning in the log. Each ZFS pool read from kstat becomes a
+diagnostic sensor, 0 when the pool is ONLINE and 2 when it is not.
 
 ## Power witnesses (Phase 6, off by default)
 
