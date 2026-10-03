@@ -1082,8 +1082,10 @@ journal mounts, host networking and the host `/proc` not mounted. The hub URL an
 `env_file` on the data dataset and the TrueNAS API key from a mounted file, so the app definition holds no
 secret. `deploy/truenas/rapl-postinit.sh` is registered as a Post Init script because TrueNAS host changes do
 not survive updates. It is a dry run unless given `--apply`, needs root to apply, is idempotent, and changes
-only the group and mode of `energy_uj` files under the powercap tree (advisory control; it widens access to
-the PLATYPUS side channel for members of the group). The hub side uses the specific-address bind with
+only the group and mode of `energy_uj` files under the powercap tree and, read-only, of `/sys/fs/pstore` and
+its files (advisory control; it widens access to the PLATYPUS side channel and to crash dumps that can
+contain kernel memory fragments for members of the group). On Debian `scripts/pstore-access.sh` does the
+pstore part with a unit ordered after `sys-fs-pstore.mount`. The hub side uses the specific-address bind with
 `HOSTWATCH_ALLOWED_CLIENTS` and a per-agent ingest key. See `docs/deploy-truenas.md`.
 
 ## Remote agent deployment

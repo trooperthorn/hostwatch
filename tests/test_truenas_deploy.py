@@ -161,3 +161,46 @@ def test_guide_names_only_real_settings_commands_and_files():
         assert (ROOT / rel).is_file(), rel
     for needle in ("10.10.11.98", "HOSTWATCH_ALLOWED_CLIENTS", "READONLY_ADMIN", "HOSTWATCH_HUB_BIND"):
         assert needle in text, needle
+
+
+PSTORE_SCRIPT = ROOT / "scripts" / "pstore-access.sh"
+
+
+def test_pstore_access_dry_run_plans_only_pstore_chgrp_and_chmod(tmp_path):
+    pstore = tmp_path / "fake-root" / "sys" / "fs" / "pstore"
+    pstore.mkdir(parents=True)
+    (pstore / "dmesg-efi_pstore-1").write_text("Panic#1 Part1\n")
+    bash = shutil.which("bash")
+    assert bash
+    result = subprocess.run([bash, PSTORE_SCRIPT.as_posix(), "--dry-run"], capture_output=True, text=True,
+                            timeout=30, env={**ENV, "HOSTWATCH_PSTORE_DIR": pstore.as_posix()})
+    assert result.returncode == 0, result.stderr
+    planned = [ln[len("would run: "):] for ln in result.stdout.splitlines() if ln.startswith("would run: ")]
+    file_changes = [c for c in planned if c.startswith(("chgrp", "chmod"))]
+    assert any(c.startswith("chgrp hostwatch-rapl") for c in file_changes)
+    assert any(c.startswith("chmod g+rx") for c in file_changes)
+    assert any(c.startswith("chmod g+r ") and "dmesg-efi_pstore-1" in c for c in file_changes)
+    for c in file_changes:
+        assert pstore.as_posix() in c, c
+        assert c.split()[0] == "chgrp" or c.split()[1] in ("g+r", "g+rx"), c
+    others = [c for c in planned if c not in file_changes]
+    for c in others:
+        assert c.startswith(("getent group", "systemctl daemon-reload")), c
+    assert not any(w in result.stdout for w in ("rm -", "chown", "0777", "o+r", "g+w"))
+    assert (pstore / "dmesg-efi_pstore-1").read_text() == "Panic#1 Part1\n"
+
+
+def test_pstore_unit_orders_after_the_pstore_mount_and_never_grants_write():
+    text = PSTORE_SCRIPT.read_text(encoding="utf-8")
+    assert "After=sys-fs-pstore.mount" in text
+    assert "chmod g+rx /sys/fs/pstore" in text and "chmod g+r " in text
+    assert "g+w" not in text and "chmod 0777" not in text
+    assert chr(0x2014) not in text
+
+
+def test_docs_reference_the_pstore_script():
+    readme = (ROOT / "README.md").read_text(encoding="utf-8")
+    assert "scripts/pstore-access.sh" in readme and "ls -ld /sys/fs/pstore" in readme
+    assert "pstore-access.sh" in (ROOT / "docs" / "ARCHITECTURE.md").read_text(encoding="utf-8")
+    assert "pstore-access.sh" in (ROOT / "UNVERIFIED.md").read_text(encoding="utf-8")
+    assert "pstore" in (ROOT / "deploy" / "truenas" / "rapl-postinit.sh").read_text(encoding="utf-8")

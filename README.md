@@ -28,6 +28,7 @@ Current phase: **7 (hardening and release)**, code and documents complete and no
 | `hostwatch/auth.py` | Auth building blocks (the hub uses the key and session lookups and the login endpoint calls `check_login`): argon2id password hashing with cost from config, login lockout with a dummy verify for unknown users, scope validation, and API key and session token generation that stores only digests |
 | `hostwatch/store.py` | SQLite: raw samples, hourly rollups, source availability, versioned schema with additive events, batch id and auth tables (users, sessions, API keys, audit log) |
 | `scripts/host-prep.sh` | Phase 0 host check and fixes |
+| `scripts/pstore-access.sh` | Grant read-only pstore access to the same dedicated group, with a boot-time unit ordered after `sys-fs-pstore.mount` (see its header: crash dumps can hold kernel memory fragments) |
 | `scripts/rapl-access.sh` | Grant RAPL read access to a dedicated group (see its header for the security trade-off) |
 | `deploy/` | Compose file and `.env.example` |
 | `deploy/agent/` | Remote agent compose file and `.env.example` for the Raspberry Pi and any Debian agent (see `docs/deploy-agents.md`) |
@@ -201,6 +202,19 @@ from a recorded run, so treat small differences in wording as normal and report 
    Expected: the last lines read `Set this in deploy/.env:` followed by `HOSTWATCH_RAPL_GID=` and a
    number. Note the number.
 
+   Then allow the same group to read the kernel crash records in `/sys/fs/pstore`. Crash dumps can
+   contain fragments of kernel memory, which is why the directory is root-only, so the grant is
+   limited to that one group, which only the container uses, and it is read-only:
+
+   ```
+   ./scripts/pstore-access.sh --dry-run
+   sudo ./scripts/pstore-access.sh
+   ```
+
+   Expected: the dry run lists only `chgrp` and `chmod g+r` lines for `/sys/fs/pstore` paths plus the
+   group, the unit and `systemctl`. After a reboot `ls -ld /sys/fs/pstore` shows group `hostwatch-rapl`
+   with `r-x` for the group. On TrueNAS the Post Init script `deploy/truenas/rapl-postinit.sh` does both.
+
 4. **Create the settings file.** Copy the example, then set the two group ids.
 
    ```
@@ -281,6 +295,7 @@ from a recorded run, so treat small differences in wording as normal and report 
 | `bootstrap-admin` says users already exist | An administrator was already created | Use the saved password, or reset it with `python -m hostwatch user passwd admin` |
 | The sign-in fails and then locks | Too many wrong passwords (`HOSTWATCH_LOGIN_MAX_FAILURES`) | Run `python -m hostwatch user unlock admin` inside the container |
 | The power source shows unavailable | The container group cannot read the RAPL counters, for example after a reboot before the service ran | Check `HOSTWATCH_RAPL_GID`, run `sudo systemctl status hostwatch-rapl.service`, then restart the container |
+| The pstore source shows `cannot read /host/pstore: Permission denied` | `/sys/fs/pstore` is root-only and `scripts/pstore-access.sh` has not run or the group id is wrong | Run `sudo ./scripts/pstore-access.sh`, check `ls -ld /sys/fs/pstore` and `sudo systemctl status hostwatch-pstore.service`, then restart the container |
 | The journal or boot events show unavailable | `HOSTWATCH_JOURNAL_GID` is wrong or the journal is not persistent | Re-check the group id from step 4; see `UNVERIFIED.md` |
 | The RAID source shows absent on a host with no md arrays | This is expected, not a fault | Nothing to do |
 | The Scrutiny source shows unavailable | `HOSTWATCH_SCRUTINY_URL` does not point at your Scrutiny | Fix the URL in `deploy/.env` and run `sudo docker compose up -d` |

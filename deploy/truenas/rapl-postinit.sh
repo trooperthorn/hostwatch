@@ -1,5 +1,6 @@
 #!/bin/sh
-# Grant the hostwatch-rapl group read access to RAPL energy counters after boot.
+# Grant the hostwatch-rapl group read access to RAPL energy counters and to the
+# pstore crash records after boot.
 # Register it in the TrueNAS UI under System > Advanced > Init/Shutdown Scripts
 # as a Post Init script, with the --apply argument.
 #
@@ -17,12 +18,17 @@
 #   rapl-postinit.sh --dry-run   same as the default
 #   rapl-postinit.sh --apply     make the change (must run as root)
 #
+# pstore: crash dumps in /sys/fs/pstore can contain fragments of kernel memory, so the
+# same group, and only that group, gets read and execute on the directory and read on
+# its files (chgrp and chmod g+r, never write). Set RAPL_PSTORE_DIR to use another tree.
+#
 # It is idempotent: a file that already has the group and mode is left alone.
 # Set RAPL_POWERCAP_DIR to read a different tree (used by the tests).
 
 set -u
 GROUP=hostwatch-rapl
 BASE="${RAPL_POWERCAP_DIR:-/sys/class/powercap}"
+PSTORE="${RAPL_PSTORE_DIR:-/sys/fs/pstore}"
 APPLY=0
 for a in "$@"; do
   case "$a" in
@@ -68,6 +74,26 @@ for f in "$BASE"/intel-rapl:*/energy_uj "$BASE"/intel-rapl:*:*/energy_uj; do
     echo "would grant: $f (now: ${current:-unreadable})"
   fi
 done
+
+if [ -d "$PSTORE" ]; then
+  for f in "$PSTORE" "$PSTORE"/*; do
+    [ -e "$f" ] || continue
+    [ -L "$f" ] && continue
+    if [ -d "$f" ]; then perm=g+rx; else perm=g+r; fi
+    current="$(stat -c '%G %A' "$f" 2>/dev/null)"
+    if [ "${current%% *}" = "$GROUP" ] && [ "$(stat -c '%A' "$f" | cut -c5)" = "r" ]; then
+      echo "ok: $f"
+      continue
+    fi
+    if [ "$APPLY" -eq 1 ]; then
+      chgrp "$GROUP" "$f" && chmod "$perm" "$f" && echo "granted: $f"
+    else
+      echo "would grant: $f (now: ${current:-unreadable})"
+    fi
+  done
+else
+  echo "no pstore directory at $PSTORE"
+fi
 
 if [ "$found" -eq 0 ]; then
   echo "no energy_uj files under $BASE (no RAPL zones on this host)"
