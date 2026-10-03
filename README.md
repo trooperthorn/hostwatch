@@ -100,7 +100,7 @@ trust boundary, not a network control):
 
 ```
 python -m hostwatch bootstrap-admin               # only when no users exist; prints a random password once
-python -m hostwatch user create|disable|unlock|passwd NAME   # password from a prompt, or one line on stdin
+python -m hostwatch user create|disable|unlock|passwd|grant-admin|revoke-admin NAME   # password from a prompt, or one line on stdin
 python -m hostwatch key create --scopes read:metrics,read:events [--owner NAME]   # prints the key once
 python -m hostwatch key list
 python -m hostwatch key revoke ID                 # rejected on the key's next request

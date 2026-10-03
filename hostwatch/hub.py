@@ -96,6 +96,7 @@ class Principal:
     kind: str  # session, api_key, mtls or legacy_token
     scopes: frozenset
     detail: dict = field(default_factory=dict)
+    is_admin: bool = False  # session and mTLS users carry the users.is_admin flag; API keys use the admin scope
 
     def allows(self, scope: str) -> bool:
         return scope in self.scopes or ("admin" in self.scopes and scope != "ingest")
@@ -166,13 +167,13 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
             sess = store.get_session(cookie)
             if sess:
                 request.state.session_token = cookie
-                return Principal(sess["username"], "session", SESSION_SCOPES)
+                return Principal(sess["username"], "session", SESSION_SCOPES, is_admin=bool(sess["is_admin"]))
         if scheme.lower() == "bearer" and token:
             if token.startswith("hw_"):
                 key = store.find_api_key(token)
                 if key:
                     return Principal(f"key:{key['prefix']}", "api_key", frozenset(key["scopes"]),
-                                     {"owner": key["owner"]})
+                                     {"owner": key["owner"]}, is_admin="admin" in key["scopes"])
                 prefix, why = store.classify_api_key_failure(token)
                 extra = {"key_reason": why}
                 if prefix:
@@ -215,6 +216,14 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
                 raise HTTPException(status_code=403, detail="insufficient scope")
             return principal
         return check
+
+    def require_admin(request: Request, principal: Principal = Depends(authenticate)) -> Principal:
+        if not principal.is_admin:
+            request.state.auth_reason = "administrator required"
+            raise HTTPException(status_code=403, detail="administrator required")
+        return principal
+
+    app.state.require_admin = require_admin
 
     allowed_clients = parse_allowed_clients(cfg.allowed_clients)
     denials = DenialAggregator(clock=denial_clock)

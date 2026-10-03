@@ -1,7 +1,7 @@
 """Operator commands for users and API keys.
 
   python -m hostwatch bootstrap-admin [--username NAME]
-  python -m hostwatch user create|disable|unlock|passwd USERNAME
+  python -m hostwatch user create|disable|unlock|passwd|grant-admin|revoke-admin USERNAME
   python -m hostwatch key create --scopes a,b [--owner NAME] | list | revoke ID
   python -m hostwatch source forget HOST SOURCE
   python -m hostwatch cert bind SUBJECT USER | list | revoke SUBJECT
@@ -40,7 +40,7 @@ def _parser() -> argparse.ArgumentParser:
                           help="create the first user with a random password (only when no users exist)")
     boot.add_argument("--username", default="admin")
     user = sub.add_parser("user", help="manage users").add_subparsers(dest="action", required=True)
-    for name in ("create", "disable", "unlock", "passwd"):
+    for name in ("create", "disable", "unlock", "passwd", "grant-admin", "revoke-admin"):
         user.add_parser(name).add_argument("username")
     key = sub.add_parser("key", help="manage API keys").add_subparsers(dest="action", required=True)
     create = key.add_parser("create")
@@ -105,7 +105,7 @@ def run(argv: list[str], cfg: Config) -> int:
             return fail("users already exist; bootstrap-admin only runs on an empty user table", {})
         password = secrets.token_urlsafe(18)
         try:
-            store.create_user(args.username, auth.hash_password(cfg, password))
+            store.create_user(args.username, auth.hash_password(cfg, password), is_admin=True)
         except sqlite3.IntegrityError:
             return fail("username already exists", {"username": args.username})
         audit(0, {"username": args.username})
@@ -146,6 +146,11 @@ def run(argv: list[str], cfg: Config) -> int:
             revoked = store.revoke_user_sessions(name)
             audit(0, {**detail, "sessions_revoked": revoked})
             print(f"Disabled {name!r}.", file=sys.stderr)
+        elif args.action in ("grant-admin", "revoke-admin"):
+            granting = args.action == "grant-admin"
+            store.set_user_admin(name, granting)
+            audit(0, {**detail, "is_admin": granting})
+            print(f"{'Granted' if granting else 'Revoked'} admin for {name!r}.", file=sys.stderr)
         else:  # unlock
             store.reset_failures(name)
             audit(0, detail)

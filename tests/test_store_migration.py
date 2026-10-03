@@ -160,3 +160,27 @@ def test_v4_second_run_is_noop(tmp_path):
     Store(p)
     assert version(p) == SCHEMA_VERSION
     assert len(store.audit_rows()) == 1
+
+
+def test_v7_to_v8_adds_is_admin_marks_earliest_user_and_keeps_rows(tmp_path):
+    assert SCHEMA_VERSION == 8
+    p = tmp_path / "db.sqlite"
+    store = Store(p)
+    for i, name in enumerate(("first", "second", "third")):
+        store.create_user(name, "hash-" + name, now=100.0 + i)
+    store.add_events("h1", [{"ts": 1.0, "kind": "k", "severity": "info", "source": "s",
+                             "title": "t", "dedup_key": "a"}])
+    del store
+    db = sqlite3.connect(p)
+    db.execute("ALTER TABLE users DROP COLUMN is_admin")
+    db.execute("PRAGMA user_version = 7")
+    db.commit()
+    db.close()
+    upgraded = Store(p)
+    assert version(p) == 8
+    assert [(u["username"], u["hash"], u["is_admin"])
+            for u in map(upgraded.get_user, ("first", "second", "third"))] == [
+        ("first", "hash-first", 1), ("second", "hash-second", 0), ("third", "hash-third", 0)]
+    assert len(upgraded.events("h1")) == 1
+    upgraded._migrate()  # a repeat run changes nothing
+    assert upgraded.get_user("second")["is_admin"] == 0

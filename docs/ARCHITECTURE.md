@@ -480,7 +480,7 @@ set it, so a database with version 0 is adopted as version 1. `Store._migrate()`
 applies numbered steps in a transaction, each created with `IF NOT EXISTS` so a
 repeat run changes nothing. Version 2 adds the `events` table (unique per host
 on `dedup_key`) and the `boot_state` heartbeat table; existing tables are never
-altered. Version 6 adds the `present` column to `sources` (default 1, added only when missing). Version 7 adds the `source_seen` table (first seen, last seen and forgotten time per host and source). Version 3 adds the `batch_ids` table (unique per host and batch id) the same way;
+altered. Version 6 adds the `present` column to `sources` (default 1, added only when missing). Version 7 adds the `source_seen` table (first seen, last seen and forgotten time per host and source). Version 8 adds `users.is_admin` (default 0, added only when missing); the earliest user, which is the one `bootstrap-admin` created, is marked admin by the migration so no deployment loses admin access. Version 3 adds the `batch_ids` table (unique per host and batch id) the same way;
 maintenance prunes ids older than the raw retention. If the stored version is newer than the code supports, the store
 refuses to start with `SchemaTooNewError` rather than risk damaging data.
 
@@ -700,7 +700,7 @@ TLS, a specific address with a source allowlist, and the explicit insecure overr
 Covered by `tests/test_config.py`.
 
 Operator CLI (enforced by file access, not by the network): `cli.py` provides
-`bootstrap-admin`, `user create|disable|unlock|passwd` and `key create|list|revoke`.
+`bootstrap-admin`, `user create|disable|unlock|passwd|grant-admin|revoke-admin` and `key create|list|revoke`.
 It opens the SQLite database directly, so whoever can write the data directory
 can run it; it is not reachable over HTTP. Bootstrap refuses to run when any
 user exists. Passwords come from getpass or one stdin line, never from

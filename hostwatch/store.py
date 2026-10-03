@@ -45,13 +45,22 @@ CREATE TABLE IF NOT EXISTS agents (
 # a database with user_version 0 is treated as version 1 once its Phase 1 tables
 # exist. Each migration step is additive: it only creates objects and is guarded
 # with IF NOT EXISTS so that running it twice changes nothing.
-SCHEMA_VERSION = 7
+SCHEMA_VERSION = 8
 
 def _add_sources_present(db: sqlite3.Connection) -> None:
     """Add sources.present (default 1, so rows from older agents read as present) once."""
     cols = {r[1] for r in db.execute("PRAGMA table_info(sources)")}
     if "present" not in cols:
         db.execute("ALTER TABLE sources ADD COLUMN present INTEGER NOT NULL DEFAULT 1")
+
+
+def _add_users_is_admin(db: sqlite3.Connection) -> None:
+    """Add users.is_admin (default 0) once. The earliest user is the one bootstrap-admin created,
+    so it becomes an admin and no deployment loses admin access. Guarded so a repeat run changes nothing."""
+    cols = {r[1] for r in db.execute("PRAGMA table_info(users)")}
+    if "is_admin" not in cols:
+        db.execute("ALTER TABLE users ADD COLUMN is_admin INTEGER NOT NULL DEFAULT 0")
+        db.execute("UPDATE users SET is_admin = 1 WHERE id = (SELECT MIN(id) FROM users)")
 
 
 MIGRATIONS: dict[int, tuple] = {
@@ -121,6 +130,8 @@ BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END""",
   forgotten_at REAL, PRIMARY KEY (host, source)
 )""",
     ),
+    # Admin flag on users. Additive: one guarded column, the earliest user is marked admin.
+    8: (_add_users_is_admin,),
 }
 
 
@@ -189,11 +200,13 @@ class Store:
             cols = [c[0] for c in cur.description]
             return [dict(zip(cols, r)) for r in cur.fetchall()]
 
-    def create_user(self, username: str, password_hash: str, now: float | None = None) -> int:
+    def create_user(self, username: str, password_hash: str, now: float | None = None,
+                    is_admin: bool = False) -> int:
         """Insert a user and return its id. A duplicate username raises sqlite3.IntegrityError."""
         with self._lock, self._db:
-            cur = self._db.execute("INSERT INTO users (username, hash, created) VALUES (?,?,?)",
-                                   (username, password_hash, time.time() if now is None else now))
+            cur = self._db.execute("INSERT INTO users (username, hash, created, is_admin) VALUES (?,?,?,?)",
+                                   (username, password_hash, time.time() if now is None else now,
+                                    1 if is_admin else 0))
             return int(cur.lastrowid)
 
     def bind_cert(self, subject: str, user_id: int, now: float | None = None) -> None:
@@ -216,12 +229,12 @@ class Store:
 
     def find_cert_user(self, subject: str) -> dict | None:
         """The enabled user bound to a subject by an unrevoked binding, or None."""
-        rows = self._rows("SELECT u.id, u.username FROM cert_bindings b JOIN users u ON u.id = b.user_id "
+        rows = self._rows("SELECT u.id, u.username, u.is_admin FROM cert_bindings b JOIN users u ON u.id = b.user_id "
                           "WHERE b.subject = ? AND b.revoked_at IS NULL AND u.disabled = 0", (subject,))
         return rows[0] if rows else None
 
     def get_user(self, username: str) -> dict | None:
-        rows = self._rows("SELECT id, username, hash, disabled, failed_count, locked_until, created "
+        rows = self._rows("SELECT id, username, hash, disabled, failed_count, locked_until, created, is_admin "
                           "FROM users WHERE username = ?", (username,))
         return rows[0] if rows else None
 
@@ -260,6 +273,12 @@ class Store:
             return self._db.execute("UPDATE users SET disabled = ? WHERE username = ?",
                                     (1 if disabled else 0, username)).rowcount > 0
 
+    def set_user_admin(self, username: str, is_admin: bool) -> bool:
+        """Grant or revoke the admin flag. Returns False for an unknown user."""
+        with self._lock, self._db:
+            return self._db.execute("UPDATE users SET is_admin = ? WHERE username = ?",
+                                    (1 if is_admin else 0, username)).rowcount > 0
+
     def revoke_user_sessions(self, username: str) -> int:
         """Revoke every live session of a user. Returns how many were revoked."""
         with self._lock, self._db:
@@ -291,7 +310,7 @@ class Store:
         h = self._digest(token)
         with self._lock, self._db:
             cur = self._db.execute(
-                "SELECT s.id_hash, s.user_id, u.username, s.created, s.expires, s.last_seen FROM sessions s "
+                "SELECT s.id_hash, s.user_id, u.username, u.is_admin, s.created, s.expires, s.last_seen FROM sessions s "
                 "JOIN users u ON u.id = s.user_id "
                 "WHERE s.id_hash = ? AND s.revoked = 0 AND s.expires > ? AND u.disabled = 0", (h, now))
             row = cur.fetchone()

@@ -99,7 +99,8 @@ def make_identity(cfg: Config, store: Store):
         for name in names:
             user = store.find_cert_user(name)
             if user:
-                return Principal(user["username"], "mtls", SESSION_SCOPES, {"cert": name})
+                return Principal(user["username"], "mtls", SESSION_SCOPES, {"cert": name},
+                                 is_admin=bool(user.get("is_admin")))
         request.state.audit = {"actor": "anonymous", "kind": "auth_failure",
                                "detail": {"cert_result": "unmapped client certificate", "cert": names[0][:256]}}
         return None
