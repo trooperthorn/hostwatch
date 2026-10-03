@@ -9,6 +9,11 @@
   --accent-fg: #ffffff;
   --danger: #a4161a;
   --focus: #b45309;
+  --ok: #1a7f37;
+  --warn: #f2c200;
+  --crit: #b3131b;
+  --warn-text: #7a5a00;
+  --crit-text: #a4161a;
 }
 @media (prefers-color-scheme: dark) {
   :root {
@@ -21,6 +26,11 @@
     --accent-fg: #0a1a2b;
     --danger: #ff8a8d;
     --focus: #fbbf24;
+    --ok: #2ea043;
+    --warn: #e3b341;
+    --crit: #d1242f;
+    --warn-text: #f2cc60;
+    --crit-text: #ff8a8d;
   }
 }
 * { box-sizing: border-box; }
@@ -37,4 +47,22 @@ button { background: var(--accent); color: var(--accent-fg); border-color: var(-
 .skip { position: absolute; left: -999px; }
 .skip:focus { left: 0.5rem; top: 0.5rem; background: var(--bg); padding: 0.5rem; z-index: 1; }
 :focus-visible { outline: 3px solid var(--focus); outline-offset: 2px; }
+.muted { color: var(--muted); }
+.banner { display: flex; gap: 0.75rem; align-items: center; padding: 0.75rem 1rem; border-radius: 4px;
+  border: 2px solid var(--border); font-weight: 600; }
+.banner[data-status="0"], .tile[data-status="0"] { border-color: var(--ok); }
+.banner[data-status="1"], .tile[data-status="1"] { border-color: var(--warn); }
+.banner[data-status="2"], .tile[data-status="2"] { border-color: var(--crit); }
+.badge { display: inline-block; padding: 0.1rem 0.6rem; border-radius: 4px; color: #fff; background: var(--muted); }
+[data-status="0"] > .badge, [data-status="0"] .badge-head { background: var(--ok); }
+[data-status="1"] > .badge, [data-status="1"] .badge-head { background: var(--warn); color: #000; }
+[data-status="2"] > .badge, [data-status="2"] .badge-head { background: var(--crit); }
+.tiles { display: grid; gap: 1rem; grid-template-columns: repeat(auto-fill, minmax(18rem, 1fr)); margin-top: 1rem; }
+.tile { border: 3px solid var(--border); border-radius: 6px; padding: 0.75rem; background: var(--surface); }
+.tile h3 { margin: 0 0 0.5rem; font-size: 1.1rem; display: flex; gap: 0.5rem; align-items: center; flex-wrap: wrap; }
+.tile h4 { margin: 0.75rem 0 0.25rem; font-size: 0.95rem; }
+.tile ul { margin: 0; padding-left: 1.1rem; }
+.st-critical { color: var(--crit-text); font-weight: 700; }
+.st-warning { color: var(--warn-text); font-weight: 700; }
+.st-unknown, .st-not_present { color: var(--muted); }
 [hidden] { display: none !important; }

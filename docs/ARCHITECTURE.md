@@ -657,8 +657,22 @@ style-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'`),
 including allowlist refusals. The source allowlist applies to the UI paths like any other.
 Requests for `/` and `/static/` are not audited, because browsers send the session cookie with
 every asset request and the rows would hide real access. The CSS uses colour tokens with a
-`prefers-color-scheme` dark variant and a visible `:focus-visible` outline. Status tiles, the
-timeline, charts and key management arrive in later slices. Tests: `tests/test_ui_shell.py`.
+`prefers-color-scheme` dark variant and a visible `:focus-visible` outline. The timeline, charts and key
+management arrive in later slices. Tests: `tests/test_ui_shell.py`.
+
+### Status tiles
+
+`GET /api/v1/ui/status` (scope `read:metrics`, so the session login and the source allowlist apply)
+returns one document built by `hostwatch/integrations/ui_status.py` from `build_host_summary`, the
+same summary the Home Assistant, Orion and Prometheus outputs use. It holds the banner (worst host,
+its state and reason), `refresh_s`, and the hosts sorted worst overall status first, then by name.
+Each host carries its 0/1/2 status and a text label, and for CPU, memory, power, temperatures, RAID,
+pools, disks and sources each component's value, state, state text and reason. Pools always read
+unknown because no pool source exists. Unknown and not present are shown as such, and a disappeared
+source is critical. `app.js` only renders this document with `textContent`, keeps the order it is
+given, polls at `refresh_s` without a page reload, and holds no threshold logic. State is shown by
+colour, a text badge and the text of each line, so it does not rely on colour alone. Tests:
+`tests/test_ui_status.py`.
 
 ## Security model
 

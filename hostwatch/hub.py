@@ -31,6 +31,7 @@ from pydantic import BaseModel, Field
 from . import __version__, auth
 from .config import Config, normalize_ip, parse_allowed_clients
 from .integrations import orion as orion_doc
+from .integrations import ui_status as ui_status_doc
 from .integrations import prometheus as prom
 from .integrations.summary import build_host_summary
 from .schema import Batch
@@ -476,6 +477,12 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
             raise HTTPException(status_code=422,
                                 detail=f"range and step would return more than {HISTORY_MAX_POINTS} points per series")
         return store.history(host, source, metric, since, end, step, limit=HISTORY_MAX_POINTS * 50)
+
+    @app.get("/api/v1/ui/status", dependencies=[Depends(require_scope("read:metrics"))])
+    def ui_status():
+        now = time.time()
+        names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
+        return ui_status_doc.status_document([build_host_summary(store, n, now) for n in names], now)
 
     @app.get("/api/v1/orion/hosts", dependencies=[Depends(require_scope("read:metrics"))])
     def orion_hosts():

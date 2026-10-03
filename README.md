@@ -21,7 +21,7 @@ Current phase: **2 (event engine)**, code complete and not yet deployed. Phase 0
 | `hostwatch/events/thresholds.py` | Edge-triggered threshold events from samples (md degraded, md sync change, source flip, Scrutiny device_status growth), seeded from stored events |
 | `hostwatch/integrations/summary.py` | Shared host health summary for the Home Assistant, Orion and Prometheus outputs: unavailable values are None with a reason, and `status_for` maps component state to 0 ok, 1 warning, 2 critical |
 | `hostwatch/hub.py` | Internal ingest and read API (session, scoped key or legacy ingest token on every route but health, audited, loopback only) |
-| `hostwatch/web/` | Static web UI shell (`index.html`, `app.css`, `app.js`, no build step) served by the hub at `/` and `/static/`; it ships as package data so the wheel and the Docker image include it |
+| `hostwatch/web/` | Static web UI shell (`index.html`, `app.css`, `app.js`, no build step) served by the hub at `/` and `/static/`, showing status tiles worst first from `GET /api/v1/ui/status` and refreshing every 15 seconds; it ships as package data so the wheel and the Docker image include it |
 | `hostwatch/auth.py` | Auth building blocks (the hub uses the key and session lookups and the login endpoint calls `check_login`): argon2id password hashing with cost from config, login lockout with a dummy verify for unknown users, scope validation, and API key and session token generation that stores only digests |
 | `hostwatch/store.py` | SQLite: raw samples, hourly rollups, source availability, versioned schema with additive events, batch id and auth tables (users, sessions, API keys, audit log) |
 | `scripts/host-prep.sh` | Phase 0 host check and fixes |
