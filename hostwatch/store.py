@@ -45,7 +45,7 @@ CREATE TABLE IF NOT EXISTS agents (
 # a database with user_version 0 is treated as version 1 once its Phase 1 tables
 # exist. Each migration step is additive: it only creates objects and is guarded
 # with IF NOT EXISTS so that running it twice changes nothing.
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # Longest history range served from raw samples. Longer ranges use the hourly rollups.
 HISTORY_RAW_MAX_S = 2 * 86400.0
@@ -135,6 +135,13 @@ BEGIN SELECT RAISE(ABORT, 'audit_log is append-only'); END""",
     ),
     # Admin flag on users. Additive: one guarded column, the earliest user is marked admin.
     8: (_add_users_is_admin,),
+    # Operator acknowledgement of a crash event, so it stops holding the host critical.
+    # Additive: a new table, no existing row changes.
+    9: (
+        """CREATE TABLE IF NOT EXISTS event_acks (
+  event_id INTEGER PRIMARY KEY, acked_at REAL NOT NULL, actor TEXT NOT NULL
+)""",
+    ),
 }
 
 
@@ -481,6 +488,24 @@ class Store:
         for r in rows:
             r["detail"] = json.loads(r["detail"])
         return rows
+
+    def ack_event(self, event_id: int, actor: str, now: float | None = None) -> bool:
+        """Record that an operator acknowledged an event. False when the event does not exist.
+        A repeat acknowledgement keeps the first one."""
+        with self._lock, self._db:
+            if self._db.execute("SELECT 1 FROM events WHERE id = ?", (event_id,)).fetchone() is None:
+                return False
+            self._db.execute("INSERT OR IGNORE INTO event_acks (event_id, acked_at, actor) VALUES (?,?,?)",
+                             (event_id, time.time() if now is None else now, actor))
+            return True
+
+    def acked_event_ids(self, ids: list[int]) -> set[int]:
+        if not ids:
+            return set()
+        with self._lock:
+            marks = ",".join("?" * len(ids))
+            return {r[0] for r in self._db.execute(
+                f"SELECT event_id FROM event_acks WHERE event_id IN ({marks})", ids)}
 
     def get_cursor(self, name: str) -> int | None:
         """The last events.id a publisher reported as sent, or None if it has never run."""

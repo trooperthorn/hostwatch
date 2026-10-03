@@ -51,6 +51,9 @@ class Config:
     procfs: Path = field(default_factory=lambda: Path(_env("HOSTWATCH_PROCFS", "/proc")))
     data_dir: Path = field(default_factory=lambda: Path(_env("HOSTWATCH_DATA_DIR", "/data")))
     interval_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_INTERVAL", "15")))
+    silent_after_s: float | None = field(
+        default_factory=lambda: float(_env("HOSTWATCH_SILENT_AFTER_S", "0")) or None)
+    crash_hold_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_CRASH_HOLD_S", "86400")))
     redetect_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_REDETECT", "600")))
     hub_url: str = field(default_factory=lambda: _env("HOSTWATCH_HUB_URL", "http://127.0.0.1:8090"))
     hub_bind: str = field(default_factory=lambda: _env("HOSTWATCH_HUB_BIND", "127.0.0.1"))
@@ -128,6 +131,10 @@ class Config:
                 "(preferred) or HOSTWATCH_INGEST_TOKEN to the legacy shared token."
             )
 
+        if self.silent_after_s is not None and not self.silent_after_s > 0:
+            raise ValueError(f"HOSTWATCH_SILENT_AFTER_S must be greater than 0 seconds (got {self.silent_after_s})")
+        if not self.crash_hold_s > 0:
+            raise ValueError(f"HOSTWATCH_CRASH_HOLD_S must be greater than 0 seconds (got {self.crash_hold_s})")
         self._validate_bind()
         self._validate_mqtt()
 
@@ -146,6 +153,11 @@ class Config:
         if self.mqtt_password_file:
             return Path(self.mqtt_password_file).read_text(encoding="utf-8").rstrip("\r\n")
         return self.mqtt_password
+
+    @property
+    def silence_window_s(self) -> float:
+        """Seconds without a report before a host is silent: HOSTWATCH_SILENT_AFTER_S, or three agent intervals."""
+        return self.silent_after_s if self.silent_after_s else 3 * self.interval_s
 
     def _validate_mqtt(self) -> None:
         mqtt_set = [n for n, v in (

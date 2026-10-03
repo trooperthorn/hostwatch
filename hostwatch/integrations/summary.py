@@ -16,6 +16,12 @@ Rules that follow the project contract:
   * A source that reports not present after the hub has seen it present and available is
     "disappeared": critical, with the time it was last seen. Only `source forget` makes that
     absence deliberate again.
+  * A host whose agent has not reported for longer than the silence window (default three agent
+    intervals, HOSTWATCH_SILENT_AFTER_S) is critical, with the time of its last report as the reason.
+  * A boot event classified kernel_panic, watchdog_reset or unknown_unclean, or a pstore panic or
+    oops record, is an open crash condition and keeps the host critical until an operator runs
+    `event ack ID` or the hold window (HOSTWATCH_CRASH_HOLD_S, default 24 hours) passes.
+    clean_shutdown and agent_stopped are never critical.
   * Status codes are 0 ok, 1 warning, 2 critical, from `status_for` only.
 """
 
@@ -27,6 +33,11 @@ from typing import Any, Protocol
 
 STALE_AFTER_S = 180.0
 EVENT_WINDOW_S = 86400.0
+SILENT_AFTER_S = 45.0
+CRASH_HOLD_S = 86400.0
+# Event kinds that mean the host went down badly. clean_shutdown and agent_stopped are not here.
+CRASH_KINDS = frozenset({"boot.kernel_panic", "boot.watchdog_reset", "boot.unknown_unclean",
+                         "pstore.kernel_panic", "pstore.kernel_oops"})
 
 STATUS_OK, STATUS_WARNING, STATUS_CRITICAL = 0, 1, 2
 
@@ -97,6 +108,8 @@ class HostSummary:
     unmeasured: list[str] = field(default_factory=list)
     not_present: list[str] = field(default_factory=list)
     disappeared: list[str] = field(default_factory=list)
+    silent: str = ""
+    crashes: list[dict] = field(default_factory=list)
 
     def components(self) -> list[Component]:
         return [self.cpu, self.memory, self.package_power, *self.temperatures, *self.md_arrays,
@@ -117,12 +130,17 @@ class HostSummary:
         nobody measured must not read as healthy.
         """
         worst = self.status
-        if worst is None:
+        if self.silent or self.crashes or worst is None:
             return STATUS_CRITICAL
         return max(worst, STATUS_WARNING) if self.unmeasured else worst
 
     @property
     def overall_reason(self) -> str:
+        if self.silent:
+            return self.silent
+        if self.crashes:
+            return "; ".join(f"unacknowledged crash event {c['id']}: {c['kind']} at {_iso(c['ts'])}"
+                             for c in self.crashes)
         if self.status is None:
             return "no data"
         if self.disappeared:
@@ -130,6 +148,10 @@ class HostSummary:
         if self.unmeasured:
             return "unmeasured groups: " + ", ".join(self.unmeasured)
         return ""
+
+
+def _iso(ts: float) -> str:
+    return datetime.fromtimestamp(ts, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 class StoreLike(Protocol):
@@ -143,7 +165,8 @@ def _label(labels: dict[str, str]) -> str:
     return ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
 
 
-def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
+def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: float = SILENT_AFTER_S,
+                       crash_hold_s: float = CRASH_HOLD_S) -> HostSummary:
     rows = [r for r in store.latest(host) if r["host"] == host]
     src_rows = {r["source"]: r for r in store.sources() if r["host"] == host}
     events = store.events(host=host, since=now - EVENT_WINDOW_S, source="thresholds", limit=1000)
@@ -296,5 +319,25 @@ def build_host_summary(store: StoreLike, host: str, now: float) -> HostSummary:
         comps = group_comps[group]
         if not src_ok or (comps and all(c.status is None for c in comps)):
             unmeasured.append(group)
+
+    # Silence: the newest sign of life from the agent, as a batch (agents) or a source report.
+    agents_fn = getattr(store, "agents", None)
+    agent_seen = [a["last_seen"] for a in agents_fn() if a["host"] == host] if agents_fn else []
+    reported = max([*agent_seen, *([last_seen] if last_seen is not None else [])], default=None)
+    silent = ""
+    if reported is not None and now - reported > silent_after_s:
+        silent = f"host silent: last report at {_iso(reported)}, {now - reported:.0f}s ago"
+
+    # Crashes: unacknowledged crash events inside the hold window, newest first.
+    crashes = [e for src in ("boot", "pstore")
+               for e in store.events(host=host, since=now - crash_hold_s, source=src, limit=1000)
+               if e.get("kind") in CRASH_KINDS]
+    crashes.sort(key=lambda e: (e["ts"], e["id"]), reverse=True)
+    acked_fn = getattr(store, "acked_event_ids", None)
+    if crashes and acked_fn:
+        acked = acked_fn([e["id"] for e in crashes])
+        crashes = [e for e in crashes if e["id"] not in acked]
+    crash_rows = [{"id": e["id"], "kind": e["kind"].split(".", 1)[1], "ts": e["ts"]} for e in crashes]
     return HostSummary(host, now, cpu, memory, power, temps, md, disks, sources, problems,
-                       sorted(open_conditions), last_seen, unmeasured, not_present, sorted(gone))
+                       sorted(open_conditions), last_seen, unmeasured, not_present, sorted(gone),
+                       silent, crash_rows)

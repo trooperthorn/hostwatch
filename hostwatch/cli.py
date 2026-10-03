@@ -4,6 +4,7 @@
   python -m hostwatch user create|disable|unlock|passwd|grant-admin|revoke-admin USERNAME
   python -m hostwatch key create --scopes a,b [--owner NAME] | list | revoke ID
   python -m hostwatch source forget HOST SOURCE
+  python -m hostwatch event ack ID
   python -m hostwatch cert bind SUBJECT USER | list | revoke SUBJECT
 
 These commands open the database directly, so they are for someone who already
@@ -29,7 +30,7 @@ from . import auth
 from .config import Config
 from .store import Store
 
-COMMANDS = {"user", "key", "cert", "source", "bootstrap-admin"}
+COMMANDS = {"user", "key", "cert", "source", "event", "bootstrap-admin"}
 MIN_PASSWORD_LEN = 12
 
 
@@ -59,6 +60,9 @@ def _parser() -> argparse.ArgumentParser:
     forget = source.add_parser("forget", help="declare that a source was removed on purpose")
     forget.add_argument("host")
     forget.add_argument("source")
+    event = sub.add_parser("event", help="manage events").add_subparsers(dest="action", required=True)
+    event.add_parser("ack", help="acknowledge a crash event so it stops holding the host critical").add_argument(
+        "event_id", type=int)
     return p
 
 
@@ -164,6 +168,15 @@ def run(argv: list[str], cfg: Config) -> int:
         audit(0, detail)
         print(f"Forgot {args.source!r} on {args.host!r}. A report of present false now reads as absent "
               "by design until the source is seen again.", file=sys.stderr)
+        return 0
+
+    if args.command == "event":
+        detail = {"event_id": args.event_id}
+        if not store.ack_event(args.event_id, actor):
+            return fail("no event with that id", detail)
+        audit(0, detail)
+        print(f"Acknowledged event {args.event_id}. A crash it held critical now reads as recovered.",
+              file=sys.stderr)
         return 0
 
     if args.command == "cert":

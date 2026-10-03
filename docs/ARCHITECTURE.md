@@ -304,6 +304,17 @@ and 60 C), memory used at 90 percent warns and 97 is critical, an md array with
 warns. These limits are defaults, listed in `UNVERIFIED.md`. `HostSummary.status`
 is the worst known component status, or `None` when nothing is known.
 
+Two host-level conditions also make `overall_status` 2, because a crash must be obvious at a
+glance. A host silent for longer than `HOSTWATCH_SILENT_AFTER_S` seconds (default three agent
+intervals) reads critical with the time of its last report as the reason; the last report is the
+newest of the agent batch time and any source report. A boot event classified `kernel_panic`,
+`watchdog_reset` or `unknown_unclean`, or a pstore `kernel_panic` or `kernel_oops` record, is an
+open crash condition until an operator runs `python -m hostwatch event ack ID` or
+`HOSTWATCH_CRASH_HOLD_S` seconds (default 86400) have passed. The acknowledgement is stored in
+the `event_acks` table (schema version 9) and appends an audit row of kind `cli`. `clean_shutdown`
+and `agent_stopped` are never critical. The logic lives only in `summary.py`, so the UI banner,
+Orion, Prometheus and Home Assistant show both conditions without code of their own.
+
 ## Orion API Poller endpoints
 
 `hostwatch/integrations/orion.py` renders the shared `HostSummary` as flat JSON
@@ -494,7 +505,7 @@ set it, so a database with version 0 is adopted as version 1. `Store._migrate()`
 applies numbered steps in a transaction, each created with `IF NOT EXISTS` so a
 repeat run changes nothing. Version 2 adds the `events` table (unique per host
 on `dedup_key`) and the `boot_state` heartbeat table; existing tables are never
-altered. Version 6 adds the `present` column to `sources` (default 1, added only when missing). Version 7 adds the `source_seen` table (first seen, last seen and forgotten time per host and source). Version 8 adds `users.is_admin` (default 0, added only when missing); the earliest user, which is the one `bootstrap-admin` created, is marked admin by the migration so no deployment loses admin access. Version 3 adds the `batch_ids` table (unique per host and batch id) the same way;
+altered. Version 6 adds the `present` column to `sources` (default 1, added only when missing). Version 7 adds the `source_seen` table (first seen, last seen and forgotten time per host and source). Version 8 adds `users.is_admin` (default 0, added only when missing); the earliest user, which is the one `bootstrap-admin` created, is marked admin by the migration so no deployment loses admin access. Version 9 adds the `event_acks` table (event id, acknowledged time, actor). Version 3 adds the `batch_ids` table (unique per host and batch id) the same way;
 maintenance prunes ids older than the raw retention. If the stored version is newer than the code supports, the store
 refuses to start with `SchemaTooNewError` rather than risk damaging data.
 

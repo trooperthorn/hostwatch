@@ -59,7 +59,7 @@ def test_phase1_database_upgrades_in_place(tmp_path):
     make_phase1(p)
     store = Store(p)
     assert {"events", "boot_state"} <= tables(p)
-    assert version(p) == SCHEMA_VERSION
+    assert version(p) == 9
     assert store.agents()[0]["host"] == "h1"
     assert store.sources()[0]["source"] == "cpu"
     db = sqlite3.connect(p)
@@ -74,7 +74,7 @@ def test_migration_twice_is_noop(tmp_path):
                                 "title": "t", "dedup_key": "a"}])
     store = Store(p)
     store._migrate()
-    assert version(p) == SCHEMA_VERSION
+    assert version(p) == 9
     assert len(store.events("h1")) == 1
 
 
@@ -86,7 +86,7 @@ def test_future_version_is_refused(tmp_path):
     db.close()
     with pytest.raises(SchemaTooNewError, match="supports up to"):
         Store(p)
-    assert version(p) == SCHEMA_VERSION + 1
+    assert version(p) == 10
     assert "events" not in tables(p)
 
 
@@ -141,7 +141,7 @@ def test_v3_database_migrates_to_v4_with_rows_intact(tmp_path):
     make_v3(p)
     assert not (AUTH_TABLES & tables(p))
     store = Store(p)
-    assert version(p) == SCHEMA_VERSION
+    assert version(p) == 9
     assert AUTH_TABLES <= tables(p)
     assert len(store.events("h1")) == 1
     assert store.agents()[0]["host"] == "h1"
@@ -158,12 +158,12 @@ def test_v4_second_run_is_noop(tmp_path):
     store.append_audit("a", "k", "GET", "/x", 200, "127.0.0.1")
     store._migrate()
     Store(p)
-    assert version(p) == SCHEMA_VERSION
+    assert version(p) == 9
     assert len(store.audit_rows()) == 1
 
 
 def test_v7_to_v8_adds_is_admin_marks_earliest_user_and_keeps_rows(tmp_path):
-    assert SCHEMA_VERSION == 8
+    assert SCHEMA_VERSION == 9
     p = tmp_path / "db.sqlite"
     store = Store(p)
     for i, name in enumerate(("first", "second", "third")):
@@ -177,7 +177,7 @@ def test_v7_to_v8_adds_is_admin_marks_earliest_user_and_keeps_rows(tmp_path):
     db.commit()
     db.close()
     upgraded = Store(p)
-    assert version(p) == 8
+    assert version(p) == 9
     assert [(u["username"], u["hash"], u["is_admin"])
             for u in map(upgraded.get_user, ("first", "second", "third"))] == [
         ("first", "hash-first", 1), ("second", "hash-second", 0), ("third", "hash-third", 0)]

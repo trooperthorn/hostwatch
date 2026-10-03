@@ -144,7 +144,7 @@ def test_source_forget_unknown_source_is_refused_and_audited(tmp_path, monkeypat
 
 
 def test_migration_from_previous_version_keeps_rows(tmp_path):
-    assert SCHEMA_VERSION == 8
+    assert SCHEMA_VERSION == 9
     p = tmp_path / "db.sqlite"
     store = Store(p)
     seed_zfs_host(store, md_present=False)
@@ -162,5 +162,5 @@ def test_migration_from_previous_version_keeps_rows(tmp_path):
     seed_zfs_host(upgraded, md_present=True)
     assert {r["source"] for r in upgraded.source_seen()} == set(ALL) - {"mdraid"}
     db = sqlite3.connect(p)
-    assert db.execute("PRAGMA user_version").fetchone()[0] == 8
+    assert db.execute("PRAGMA user_version").fetchone()[0] == 9
     db.close()

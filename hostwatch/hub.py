@@ -452,10 +452,12 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
         found = store.gaps(host, source, metric, time.time() - hours * 3600, max_gap_s)
         return {"gap_count": len(found), "gaps": found}
 
+    summary_opts = {"silent_after_s": cfg.silence_window_s, "crash_hold_s": cfg.crash_hold_s}
+
     def orion_summary(host: str):
         if not any(a["host"] == host for a in store.agents()) and not any(r["host"] == host for r in store.sources()):
             raise HTTPException(status_code=404, detail="unknown host")
-        return build_host_summary(store, host, time.time())
+        return build_host_summary(store, host, time.time(), **summary_opts)
 
     HISTORY_MAX_POINTS = 1000
     HISTORY_MAX_RANGE_S = 366 * 86400.0
@@ -482,14 +484,14 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
     def ui_status():
         now = time.time()
         names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
-        return ui_status_doc.status_document([build_host_summary(store, n, now) for n in names], now)
+        return ui_status_doc.status_document([build_host_summary(store, n, now, **summary_opts) for n in names], now)
 
     @app.get("/api/v1/orion/hosts", dependencies=[Depends(require_scope("read:metrics"))])
     def orion_hosts():
         names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
         out: dict = {"host_count": len(names)}
         for name, key in orion_doc.host_keys(names).items():
-            s = build_host_summary(store, name, time.time())
+            s = build_host_summary(store, name, time.time(), **summary_opts)
             out[f"host_{key}_name"] = name
             out[f"host_{key}_status"] = s.overall_status
         return out
@@ -510,7 +512,7 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
         def metrics():
             now = time.time()
             names = sorted({a["host"] for a in store.agents()} | {r["host"] for r in store.sources()})
-            body = prom.render([build_host_summary(store, n, now) for n in names])
+            body = prom.render([build_host_summary(store, n, now, **summary_opts) for n in names])
             return Response(content=body, media_type=prom.CONTENT_TYPE)
 
     return app

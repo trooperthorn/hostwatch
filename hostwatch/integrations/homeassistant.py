@@ -265,7 +265,8 @@ class HomeAssistantPublisher:
         hosts = self._hosts()
         self._assign_slugs(hosts)
         for host in hosts:
-            summary = build_host_summary(self.store, host, now)
+            summary = build_host_summary(self.store, host, now, silent_after_s=self.config.silence_window_s,
+                                       crash_hold_s=self.config.crash_hold_s)
             entities = build_entities(summary)
             for entity in entities:
                 if not self._publish_entity(host, entity):
