@@ -10,7 +10,9 @@ The bitmask file is the firmware get_throttled attribute under sysfs, or any pat
 HOSTWATCH_RPI_THROTTLED_PATH. Whether that attribute exists on a Pi 5 running Debian, and the
 exact bit meanings, are unconfirmed (UNVERIFIED.md). A Pi without the file is unavailable
 with the reason and the vcgencmd alternative, never reported as zero. A host that is not a Pi
-is reported not present only when the model files were looked for and show no Pi.
+is reported not present only when a model file was read and names no Pi, or when the model
+files are missing from readable trees and no throttled file or path exists. An unreadable model
+file with a throttled file or configured path leaves the source present.
 """
 
 from __future__ import annotations
@@ -63,12 +65,19 @@ class RpiCollector(Collector):
                 return text.replace("\x00", "").strip()
         return None
 
+    def _has_throttled_evidence(self) -> bool:
+        return bool(self._throttled_cfg) or self.throttled_file.exists()
+
     def is_absent(self) -> bool:
-        """Absent when a model file was read and is not a Pi, or when both procfs and sysfs are
-        readable directories and neither holds a model file. Anything else stays unavailable."""
+        """Absent only on positive evidence: a model file was read and does not name a Pi, or
+        no model file exists in readable procfs and sysfs trees and there is no throttled file
+        and no configured throttled path. An unreadable model file never makes the source absent
+        while a throttled file exists or a path is configured."""
         model = self._model()
         if model is not None:
             return not model.startswith("Raspberry Pi")
+        if self._has_throttled_evidence():
+            return False
         return self.procfs.is_dir() and self.sysfs.is_dir()
 
     def _raw(self) -> tuple[int | None, str]:
@@ -83,7 +92,9 @@ class RpiCollector(Collector):
 
     def detect(self) -> tuple[bool, str]:
         model = self._model()
-        if model is None or not model.startswith("Raspberry Pi"):
+        if model is not None and not model.startswith("Raspberry Pi"):
+            return False, "not a Raspberry Pi (no Raspberry Pi device tree model)"
+        if model is None and not self._has_throttled_evidence():
             return False, "not a Raspberry Pi (no Raspberry Pi device tree model)"
         raw, reason = self._raw()
         if raw is None:

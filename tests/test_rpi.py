@@ -72,8 +72,8 @@ def test_garbage_bitmask_is_unavailable(tmp_path):
 def test_non_pi_is_not_present(tmp_path):
     c = collector(tmp_path, throttled=None, model="Some Other Board")
     assert c.detect()[0] is False and c.is_absent() is True
-    c2 = collector(tmp_path / "x", throttled=None, model=None)
-    assert c2.is_absent() is True
+    sysfs, procfs, _ = pi_tree(tmp_path / "x", throttled=None, model=None)
+    assert RpiCollector(sysfs, procfs).is_absent() is True
 
 
 def test_missing_trees_are_not_absent(tmp_path):
@@ -127,3 +127,32 @@ def test_default_path_is_the_firmware_attribute(tmp_path):
     f.parent.mkdir(parents=True)
     f.write_text("0x50000\n")
     assert RpiCollector(sysfs, procfs).detect()[0] is True
+
+
+def test_unreadable_model_with_throttled_file_is_present(tmp_path):
+    sysfs, procfs, f = pi_tree(tmp_path, throttled="0x50000", model=None)
+    (procfs / "device-tree" / "model").mkdir()
+    c2 = RpiCollector(sysfs, procfs, str(f))
+    assert c2.is_absent() is False
+    assert c2.detect()[0] is True
+    c3 = RpiCollector(sysfs, procfs, str(tmp_path / "missing"))
+    assert c3.is_absent() is False
+    ok, reason = c3.detect()
+    assert ok is False and "vcgencmd" in reason
+
+
+def test_readable_non_pi_model_is_absent_even_with_throttled_file(tmp_path):
+    c = collector(tmp_path, throttled="0x0", model="Some Other Board")
+    assert c.is_absent() is True
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="the default firmware path contains a colon")
+def test_default_path_is_read_from_a_fake_tree_without_a_model(tmp_path):
+    sysfs, procfs, _ = pi_tree(tmp_path, throttled=None, model=None)
+    f = sysfs / "devices" / "platform" / "soc" / "soc:firmware" / "get_throttled"
+    f.parent.mkdir(parents=True)
+    f.write_text("0x50005\n")
+    c = RpiCollector(sysfs, procfs)
+    assert c.is_absent() is False
+    assert c.detect()[0] is True
+    assert flags(c)["under_voltage_now"] == 1

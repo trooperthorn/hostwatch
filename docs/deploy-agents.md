@@ -68,7 +68,9 @@ no privileged mode, host networking and read-only host mounts. The host `/proc` 
 mounted. The Pi throttling source reads the firmware bitmask through `/sys`; if the file is
 not at the default location, the confirming command in `UNVERIFIED.md` tells you where it is,
 and you set `HOSTWATCH_RPI_THROTTLED_PATH`. Sources the Pi lacks, such as RAPL and RAID, are
-reported unavailable with a reason.
+reported unavailable with a reason. Because `/proc` is not mounted, the Pi model file may be
+unreadable in the container; the Pi source then stays present and is judged by the throttled
+file, and it is reported not present only when a readable model file names another board.
 
 ## 3. TrueNAS-SVR
 
