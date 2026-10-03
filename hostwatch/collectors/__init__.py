@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from ..config import Config
+from ..config import Config, parse_sensor_patterns
 from ..truenas.client import TruenasClient
 from .base import Collector
 from .cpu import CpuCollector
@@ -23,7 +23,7 @@ def build_collectors(cfg: Config) -> list[Collector]:
         CpuCollector(s, p),
         MemoryCollector(s, p),
         RaplCollector(s, p),
-        HwmonCollector(s, p),
+        HwmonCollector(s, p, parse_sensor_patterns("HOSTWATCH_HWMON_IGNORE", cfg.hwmon_ignore)),
         MdRaidCollector(s, p),
         ZfsCollector(s, p),
         ScrutinyCollector(s, p, cfg.scrutiny_url),

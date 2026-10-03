@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import re
 
+from ..config import sensor_matches
 from .base import Collector, read_int, read_text
 
 # sysfs file prefix -> (metric, unit, divisor to reach the unit)
@@ -18,6 +19,11 @@ INPUT_RE = re.compile(r"^(temp|in|fan|power)(\d+)_input$")
 
 class HwmonCollector(Collector):
     id = "hwmon"
+
+    def __init__(self, sysfs, procfs, ignore=()) -> None:
+        """`ignore` is a sequence of chip:sensor glob patterns whose readings are dropped."""
+        super().__init__(sysfs, procfs)
+        self.ignore = tuple(ignore)
 
     def _devices(self):
         base = self.sysfs / "class" / "hwmon"
@@ -48,6 +54,8 @@ class HwmonCollector(Collector):
                 metric, unit, div = KINDS[prefix]
                 raw = read_int(f)
                 label = read_text(dev / f"{prefix}{idx}_label") or f"{prefix}{idx}"
+                if self.ignore and sensor_matches(self.ignore, chip, label):
+                    continue
                 value = None if raw is None else round(raw / div, 3)
                 out.append(self.sample(metric, value, unit, chip=chip, sensor=label))
         return out

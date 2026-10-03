@@ -31,7 +31,7 @@ import time
 from dataclasses import dataclass, field
 from typing import Any, Callable
 
-from ..config import Config
+from ..config import Config, parse_sensor_patterns
 from .mqtt_client import MqttClient
 from .summary import Component, HostSummary, StoreLike, build_host_summary
 
@@ -274,7 +274,9 @@ class HomeAssistantPublisher:
             if self._wall_power is not None:
                 self._wall_power(host, now)
             summary = build_host_summary(self.store, host, now, silent_after_s=self.config.silence_window_s,
-                                       crash_hold_s=self.config.crash_hold_s)
+                                       crash_hold_s=self.config.crash_hold_s,
+                                       cpu_sensors=parse_sensor_patterns("HOSTWATCH_HWMON_CPU_SENSORS",
+                                                                         self.config.hwmon_cpu_sensors))
             entities = build_entities(summary)
             for entity in entities:
                 if not self._publish_entity(host, entity):

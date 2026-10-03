@@ -174,3 +174,32 @@ def test_scrutiny_unexpected_shape_is_unavailable(fs, monkeypatch):
 def test_scrutiny_unconfigured(fs):
     sysfs, procfs, _ = fs
     assert ScrutinyCollector(sysfs, procfs, "").detect() == (False, "HOSTWATCH_SCRUTINY_URL not set")
+
+
+def test_hwmon_ignore_drops_matching_readings(fs):
+    sysfs, procfs, w = fs
+    w(sysfs, "class/hwmon/hwmon1/name", "coretemp")
+    w(sysfs, "class/hwmon/hwmon1/temp1_input", "34000")
+    w(sysfs, "class/hwmon/hwmon1/temp1_label", "Package id 0")
+    w(sysfs, "class/hwmon/hwmon2/name", "nct6779")
+    for i, label in enumerate(["CPUTIN", "AUXTIN0", "AUXTIN1", "PCH_CHIP_TEMP"], start=1):
+        w(sysfs, f"class/hwmon/hwmon2/temp{i}_input", "103000")
+        w(sysfs, f"class/hwmon/hwmon2/temp{i}_label", label)
+    w(sysfs, "class/hwmon/hwmon2/fan1_input", "900")
+    out = HwmonCollector(sysfs, procfs, ignore=("nct6779:AUXTIN*", "nct6779:PCH_*")).collect()
+    sensors = sorted(s.labels["sensor"] for s in out)
+    assert sensors == ["CPUTIN", "Package id 0", "fan1"]
+    # Without the list everything is reported.
+    assert len(HwmonCollector(sysfs, procfs).collect()) == 6
+
+
+def test_hwmon_patterns_are_validated():
+    import pytest
+    from hostwatch.config import Config, parse_sensor_patterns
+    assert parse_sensor_patterns("X", " nct6779:AUXTIN* , nct6779:PCH_* ,") == ("nct6779:AUXTIN*", "nct6779:PCH_*")
+    for bad in ("AUXTIN*", "nct6779:", ":AUXTIN0", "nct6779:AUX\tTIN"):
+        with pytest.raises(ValueError, match="HOSTWATCH_HWMON_IGNORE"):
+            Config(hwmon_ignore=bad).validate()
+    with pytest.raises(ValueError, match="HOSTWATCH_HWMON_CPU_SENSORS"):
+        Config(hwmon_cpu_sensors="nope").validate()
+    Config(hwmon_ignore="nct6779:AUXTIN*", hwmon_cpu_sensors="nct6779:CPUTIN").validate()

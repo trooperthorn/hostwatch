@@ -464,8 +464,14 @@ problem flag whose inputs are all unknown is `None`, neither true nor false.
 `status_for(component)` is the only mapping from state to a number: ok is 0,
 warning is 1, critical is 2, and an unknown state returns `None`. The integration
 outputs publish `None` as unavailable (Home Assistant) or omit the value and
-status (Orion). Rules: temperature at 80 C warns and 90 C is critical (drives 50
-and 60 C), memory used at 90 percent warns and 97 is critical, an md array with
+status (Orion). Rules: a CPU temperature at 80 C warns and 90 C is critical (drives 50
+and 60 C). The CPU limits apply only to the hwmon chips `coretemp`, `k10temp`, `zenpower` and
+`cpu_thermal`, the Raspberry Pi SoC temperature, and any `chip:sensor` glob listed in
+`HOSTWATCH_HWMON_CPU_SENSORS` on the hub. Every other hwmon temperature is reported with its value,
+status 0 and the note "informational", because the Super I/O chip on MediaIn-SVR reports unused
+inputs at over 100 C. The agent can also drop readings entirely with `HOSTWATCH_HWMON_IGNORE`
+(comma-separated `chip:sensor` globs, matched case-sensitively); both variables are validated at
+start and an entry without a chip and a sensor is rejected. Further rules: memory used at 90 percent warns and 97 is critical, an md array with
 `degraded` above 0 is critical and one that is syncing warns, a Scrutiny
 `device_status` other than 0 is critical, and an unavailable or stale source
 warns. These limits are defaults, listed in `UNVERIFIED.md`. `HostSummary.status`

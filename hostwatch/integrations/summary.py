@@ -31,6 +31,8 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any, Protocol
 
+from ..config import sensor_matches
+
 STALE_AFTER_S = 180.0
 EVENT_WINDOW_S = 86400.0
 SILENT_AFTER_S = 45.0
@@ -57,6 +59,11 @@ OPTIONAL_GROUPS = frozenset({"ups", "pools", "pi"})
 # (warning, critical) thresholds, in the unit of the value. These are defaults
 # chosen for desktop and server parts, not measured limits; see UNVERIFIED.md.
 CPU_TEMP_C = (80.0, 90.0)
+# hwmon chips known to report a CPU temperature. The CPU limits apply only to these and to the
+# chip:sensor patterns the operator lists. Any other hwmon temperature, such as an unused Super I/O
+# input that floats at 100 C, is informational so it cannot raise an alarm.
+CPU_TEMP_CHIPS = frozenset({"coretemp", "k10temp", "zenpower", "cpu_thermal"})
+INFORMATIONAL_NOTE = "informational: no threshold applies to this sensor"
 DISK_TEMP_C = (50.0, 60.0)
 MEMORY_USED_PCT = (90.0, 97.0)
 
@@ -206,7 +213,7 @@ def _label(labels: dict[str, str]) -> str:
 
 
 def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: float = SILENT_AFTER_S,
-                       crash_hold_s: float = CRASH_HOLD_S) -> HostSummary:
+                       crash_hold_s: float = CRASH_HOLD_S, cpu_sensors: tuple[str, ...] = ()) -> HostSummary:
     rows = [r for r in store.latest(host) if r["host"] == host]
     src_rows = {r["source"]: r for r in store.sources() if r["host"] == host}
     events = store.events(host=host, since=now - EVENT_WINDOW_S, source="thresholds", limit=1000)
@@ -303,7 +310,11 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     temps: list[Component] = []
     for r in pick("hwmon", "temp"):
         lab = {"chip": r["labels"].get("chip", ""), "sensor": r["labels"].get("sensor", "")}
-        temps.append(comp(f"temp.{_label(lab)}", "hwmon", [r], "C", CPU_TEMP_C, lab))
+        is_cpu = lab["chip"] in CPU_TEMP_CHIPS or sensor_matches(cpu_sensors, lab["chip"], lab["sensor"])
+        c = comp(f"temp.{_label(lab)}", "hwmon", [r], "C", CPU_TEMP_C if is_cpu else None, lab)
+        if not is_cpu and c.value is not None:
+            c.reason = INFORMATIONAL_NOTE
+        temps.append(c)
     if not temps and "hwmon" not in absent:
         temps.append(comp("temp", "hwmon", [], "C", CPU_TEMP_C))
 

@@ -162,3 +162,44 @@ def test_ups_unavailable_is_unmeasured_only_when_configured():
     # No nut row at all adds nothing either.
     s = build(healthy_rows())
     assert "ups" not in s.unmeasured and "ups" not in s.not_present and s.ups is None
+
+
+# ---------------------------------------------------------------- CPU limits only on CPU sensors
+def _mediain_rows(core_c=34.0, extra=()):
+    """MediaIn-SVR 2026-10-03: coretemp reads normally, unused nct6779 inputs float."""
+    rows = [r for r in healthy_rows() if r["source"] != "hwmon"]
+    rows += [
+        row("hwmon", "temp", core_c, chip="coretemp", sensor="Package id 0"),
+        row("hwmon", "temp", 98.5, chip="nct6779", sensor="AUXTIN0"),
+        row("hwmon", "temp", 103.0, chip="nct6779", sensor="AUXTIN1"),
+        row("hwmon", "temp", 11.0, chip="nct6779", sensor="AUXTIN3"),
+        row("hwmon", "temp", 0.0, chip="nct6779", sensor="PCH_CHIP_TEMP"),
+    ]
+    rows += list(extra)
+    return rows
+
+
+def test_floating_super_io_inputs_do_not_raise_alarms():
+    s = build(_mediain_rows())
+    assert s.overall_status == 0
+    by_sensor = {c.labels["sensor"]: c for c in s.temperatures if "sensor" in c.labels}
+    aux = by_sensor["AUXTIN1"]
+    assert aux.value == 103.0 and aux.status == 0 and "informational" in aux.reason
+    assert by_sensor["Package id 0"].status == 0 and by_sensor["Package id 0"].reason == ""
+    assert s.problems["temperature_high"] is False
+
+
+def test_hot_cpu_sensor_is_critical():
+    s = build(_mediain_rows(core_c=95.0))
+    assert s.overall_status == 2
+
+
+def test_operator_listed_cpu_sensor_uses_cpu_limits():
+    rows = _mediain_rows(extra=[row("hwmon", "temp", 95.0, chip="nct6779", sensor="CPUTIN")])
+    assert build_host_summary(FakeStore(rows, [src(n) for n in ALL]), H, NOW).overall_status == 0
+    s = build_host_summary(FakeStore(rows, [src(n) for n in ALL]), H, NOW, cpu_sensors=("nct6779:CPUTIN",))
+    assert s.overall_status == 2
+    # A glob in the operator list does not reach the floating inputs it does not match.
+    s = build_host_summary(FakeStore(_mediain_rows(), [src(n) for n in ALL]), H, NOW,
+                           cpu_sensors=("nct6779:CPUTIN",))
+    assert s.overall_status == 0

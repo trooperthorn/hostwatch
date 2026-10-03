@@ -370,6 +370,23 @@ Cross-check against the host: `sudo turbostat --quiet --show PkgWatt --interval 
 for `rapl`, `cat /proc/mdstat` for `mdraid`, `sensors` for `hwmon`, and the
 Scrutiny UI for `scrutiny`.
 
+### Unused hwmon inputs
+
+Super I/O chips such as the NCT6779 on MediaIn-SVR report unused inputs with nonsense values
+(AUXTIN0 to AUXTIN2 above 98 C, the PCH_* inputs at 0 C). The CPU temperature limits (80 C warning,
+90 C critical) apply only to the chips `coretemp`, `k10temp`, `zenpower` and `cpu_thermal`, the
+Raspberry Pi SoC, and any `chip:sensor` glob you list in `HOSTWATCH_HWMON_CPU_SENSORS` (hub side,
+for example `nct6779:CPUTIN`). All other hwmon temperatures are shown with their value and no
+threshold, so a floating input cannot make the host read critical.
+
+To remove an input completely, set `HOSTWATCH_HWMON_IGNORE` on the agent to comma-separated
+`chip:sensor` globs. A MediaIn-SVR example is
+`HOSTWATCH_HWMON_IGNORE=nct6779:AUXTIN*,nct6779:PCH_*`. An invalid entry stops the service at
+start with a message naming the variable. The alternative is an `ignore` line in a file under
+`/etc/sensors.d/` (for example `ignore temp7` inside a `chip "nct6779-*"` block), which hides the
+input from the `sensors` tool; that does not change what the kernel exposes in sysfs, so use the
+hostwatch variable for the agent.
+
 ## Web UI
 
 Open the hub address in a browser and sign in with a hub user. The page lists hosts with the worst

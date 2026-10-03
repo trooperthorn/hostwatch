@@ -53,6 +53,37 @@ def parse_bool(name: str, default: str = "0") -> bool:
     raise ValueError(f"{name} must be one of 1, true, yes, on, 0, false, no, off (got {raw!r})")
 
 
+def parse_sensor_patterns(name: str, raw: str) -> tuple[str, ...]:
+    """Parse a comma-separated list of chip:sensor glob patterns, such as nct6779:AUXTIN*.
+
+    Each entry needs a non-empty chip part and a non-empty sensor part separated by one colon
+    (the chip name never contains a colon, so the first colon splits them). Patterns are
+    matched case-sensitively with fnmatch rules. Whitespace around entries is ignored and
+    empty entries are skipped. An entry without a colon, with an empty part, or with a
+    control character raises ValueError naming the variable, so a typo cannot silently
+    drop or keep the wrong readings.
+    """
+    out: list[str] = []
+    for entry in raw.split(","):
+        entry = entry.strip()
+        if not entry:
+            continue
+        chip, sep, sensor = entry.partition(":")
+        if not sep or not chip.strip() or not sensor.strip():
+            raise ValueError(f"{name} entries must look like chip:sensor (got {entry!r})")
+        if any(ord(ch) < 32 or ord(ch) == 127 for ch in entry):
+            raise ValueError(f"{name} entry {entry!r} contains a control character")
+        out.append(f"{chip.strip()}:{sensor.strip()}")
+    return tuple(out)
+
+
+def sensor_matches(patterns, chip: str, sensor: str) -> bool:
+    """True when chip:sensor matches any of the glob patterns."""
+    from fnmatch import fnmatchcase
+    key = f"{chip}:{sensor}"
+    return any(fnmatchcase(key, p) for p in patterns)
+
+
 @dataclass(frozen=True)
 class Config:
     role: str = field(default_factory=lambda: _env("HOSTWATCH_ROLE", "all"))
@@ -124,6 +155,8 @@ class Config:
     mqtt_base_topic: str = field(default_factory=lambda: _env("HOSTWATCH_MQTT_BASE_TOPIC", "hostwatch"))
     mqtt_events_interval: float = field(default_factory=lambda: float(_env("HOSTWATCH_MQTT_EVENTS_INTERVAL", "10")))
     prometheus_enabled: bool = field(default_factory=lambda: parse_bool("HOSTWATCH_PROMETHEUS"))
+    hwmon_ignore: str = field(default_factory=lambda: _env("HOSTWATCH_HWMON_IGNORE", "").strip())
+    hwmon_cpu_sensors: str = field(default_factory=lambda: _env("HOSTWATCH_HWMON_CPU_SENSORS", "").strip())
 
     def __post_init__(self) -> None:
         # Values passed explicitly or through dataclasses.replace are plain str; wrap them too.
@@ -134,6 +167,8 @@ class Config:
 
     def validate(self) -> None:
         self._validate_nut()
+        parse_sensor_patterns("HOSTWATCH_HWMON_IGNORE", self.hwmon_ignore)
+        parse_sensor_patterns("HOSTWATCH_HWMON_CPU_SENSORS", self.hwmon_cpu_sensors)
         if self.audit_retention_days < 0:
             raise ValueError("HOSTWATCH_AUDIT_RETENTION_DAYS must be 0 (keep forever) or a positive number of days")
         if self.role not in {"all", "hub", "agent"}:

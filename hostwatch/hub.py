@@ -29,7 +29,7 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel, Field
 
 from . import __version__, auth
-from .config import Config, normalize_ip, parse_allowed_clients
+from .config import Config, normalize_ip, parse_allowed_clients, parse_sensor_patterns
 from .integrations import orion as orion_doc
 from .integrations import ui_status as ui_status_doc
 from .integrations import prometheus as prom
@@ -529,7 +529,8 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
         found = store.gaps(host, source, metric, now - hours * 3600, max_gap_s, until=now + 1.0)
         return {"gap_count": len(found), "gaps": found}
 
-    summary_opts = {"silent_after_s": cfg.silence_window_s, "crash_hold_s": cfg.crash_hold_s}
+    summary_opts = {"silent_after_s": cfg.silence_window_s, "crash_hold_s": cfg.crash_hold_s,
+                    "cpu_sensors": parse_sensor_patterns("HOSTWATCH_HWMON_CPU_SENSORS", cfg.hwmon_cpu_sensors)}
 
     def summarize(host: str, now: float | None = None):
         """The host summary, built after the wall power entity (if the host has one) is read and
