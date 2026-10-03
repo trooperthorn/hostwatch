@@ -143,6 +143,13 @@ def build_ha(cfg: Config, store, transport_factory=None):
     return HomeAssistantPublisher(cfg, client, store), HomeAssistantEventPublisher(cfg, client, store)
 
 
+def build_witness(cfg: Config):
+    """The Home Assistant plug witness, or None when it is not fully configured."""
+    from .witness.homeassistant import HomeAssistantWitness
+    witness = HomeAssistantWitness.from_config(cfg)
+    return witness if witness.configured else None
+
+
 def chain(*hooks):
     """One callable that runs each non-None hook in order, or None when there are none."""
     active = [h for h in hooks if h]
@@ -187,7 +194,7 @@ def main(argv: list[str] | None = None) -> int:
     app = create_app(cfg, store,
                      on_start=chain(thread.start if thread else None, ha_events.start if ha_events else None),
                      on_stop=chain(ha_events.stop if ha_events else None, agent.stop_and_wait if agent else None),
-                     ha_publisher=ha_publisher)
+                     ha_publisher=ha_publisher, power_witness=build_witness(cfg))
     serve_hub(app, cfg)
     return 0
 

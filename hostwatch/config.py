@@ -54,6 +54,7 @@ class Config:
     silent_after_s: float | None = field(
         default_factory=lambda: float(_env("HOSTWATCH_SILENT_AFTER_S", "0")) or None)
     crash_hold_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_CRASH_HOLD_S", "86400")))
+    witness_skew_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_WITNESS_SKEW_S", "120")))
     redetect_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_REDETECT", "600")))
     hub_url: str = field(default_factory=lambda: _env("HOSTWATCH_HUB_URL", "http://127.0.0.1:8090"))
     hub_bind: str = field(default_factory=lambda: _env("HOSTWATCH_HUB_BIND", "127.0.0.1"))
@@ -143,6 +144,8 @@ class Config:
             raise ValueError(f"HOSTWATCH_SILENT_AFTER_S must be greater than 0 seconds (got {self.silent_after_s})")
         if not self.crash_hold_s > 0:
             raise ValueError(f"HOSTWATCH_CRASH_HOLD_S must be greater than 0 seconds (got {self.crash_hold_s})")
+        if not self.witness_skew_s >= 0:
+            raise ValueError(f"HOSTWATCH_WITNESS_SKEW_S must be 0 or more seconds (got {self.witness_skew_s})")
         self._validate_bind()
         self._validate_mqtt()
 

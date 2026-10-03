@@ -452,6 +452,27 @@ class Store:
             self._db.executemany(self._INSERT_EVENT, rows)
             return self._db.total_changes - before
 
+    def event_by_key(self, host: str, dedup_key: str) -> dict | None:
+        """The stored event with this dedup key for the host, or None."""
+        rows = self._rows("SELECT id, host, ts, kind, severity, source, title, detail, dedup_key, boot_id "
+                          "FROM events WHERE host = ? AND dedup_key = ?", (host, dedup_key))
+        if not rows:
+            return None
+        rows[0]["detail"] = json.loads(rows[0]["detail"])
+        return rows[0]
+
+    def merge_event_detail(self, host: str, dedup_key: str, patch: dict) -> bool:
+        """Add top-level keys to a stored event's detail. Existing keys are kept unless the patch
+        names them. False when the event does not exist. No schema change: detail is JSON text."""
+        with self._lock, self._db:
+            row = self._db.execute("SELECT id, detail FROM events WHERE host = ? AND dedup_key = ?",
+                                   (host, dedup_key)).fetchone()
+            if row is None:
+                return False
+            merged = {**json.loads(row[1]), **patch}
+            self._db.execute("UPDATE events SET detail = ? WHERE id = ?", (json.dumps(merged, sort_keys=True), row[0]))
+            return True
+
     def events(self, host: str | None = None, since: float | None = None,
                kind: str | None = None, limit: int = 100, source: str | None = None,
                before: float | None = None, before_id: int | None = None) -> list[dict]:

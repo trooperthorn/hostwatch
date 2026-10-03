@@ -22,7 +22,7 @@ from importlib.resources import files
 from dataclasses import dataclass, field
 from typing import Callable
 
-from fastapi import Depends, FastAPI, HTTPException, Query, Request, Response
+from fastapi import BackgroundTasks, Depends, FastAPI, HTTPException, Query, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
@@ -116,7 +116,7 @@ class Principal:
 
 def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_clock=time.monotonic,
                mtls_identity: Callable[[Request], Principal | None] | None = None,
-               ha_publisher=None, ha_interval_s: float = 30.0) -> FastAPI:
+               ha_publisher=None, ha_interval_s: float = 30.0, power_witness=None) -> FastAPI:
     if mtls_identity is None:
         from .mtls import make_identity
         mtls_identity = make_identity(cfg, store)
@@ -418,8 +418,14 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
         return {"status": "ok", "version": __version__}
 
     @app.post("/internal/v1/ingest", dependencies=[Depends(require_scope("ingest"))])
-    def ingest(batch: Batch):
+    def ingest(batch: Batch, background: BackgroundTasks):
         n, e, duplicate = store.ingest_batch(batch)
+        if e and not duplicate:
+            from .witness.power import assess_batch_events, eligible
+            boots = [d for d in (ev.model_dump() for ev in batch.events) if eligible(d)]
+            if boots:
+                # After the response: the witness may take seconds and the agent must not wait.
+                background.add_task(assess_batch_events, store, power_witness, batch.host, boots, cfg.witness_skew_s)
         out = {"stored": n, "events_stored": e}
         if duplicate:
             out["duplicate"] = True

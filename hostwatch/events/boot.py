@@ -38,6 +38,7 @@ AGENT_STOPPED = "agent_stopped"
 WATCHDOG_RESET = "watchdog_reset"
 KERNEL_PANIC = "kernel_panic"
 UNKNOWN_UNCLEAN = "unknown_unclean"
+POWER_LOSS = "power_loss"
 UNKNOWN = "unknown"
 
 PSTORE_SKEW_S = 60.0
@@ -49,13 +50,14 @@ PRECEDENCE = (
     "watchdog_reset: watchdog bootstatus card_reset",
     "clean_shutdown: journal shutdown sequence completed",
     "watchdog_reset: journal watchdog message without a completed shutdown",
+    "power_loss: a hub-side witness (smart plug outage or UPS on battery) overlaps the unclean end",
     "unknown_unclean: journal read and ended abruptly, even if the agent stopped",
     "agent_stopped: agent stopped and the journal could not be read",
     "unknown",
 )
 
 SEVERITY = {CLEAN_SHUTDOWN: "info", AGENT_STOPPED: "warning", WATCHDOG_RESET: "critical", KERNEL_PANIC: "critical",
-            UNKNOWN_UNCLEAN: "critical", UNKNOWN: "warning"}
+            POWER_LOSS: "critical", UNKNOWN_UNCLEAN: "critical", UNKNOWN: "warning"}
 
 
 def read_boot_id(procfs: Path) -> str | None:

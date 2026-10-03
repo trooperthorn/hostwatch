@@ -136,7 +136,7 @@ series list.
 never reported, is unavailable or is stale); `overall_unmeasured` counts those
 groups. A source that is absent by design (no md arrays on a ZFS host, no RAPL zone, no hwmon
 devices, no Scrutiny URL) is not unmeasured: its group reports `<group>_present` 0 and status 0 and
-raises no warning. An unreadable source is not absent and stays a warning. A source that was reported present and available and later reports not present is critical (`disappeared`, status 2) until an operator runs `source forget HOST SOURCE`. A host silent for longer than `HOSTWATCH_SILENT_AFTER_S` (default three agent intervals) is critical with its last report time as the reason. A boot event classified kernel panic, watchdog reset or unknown unclean, or a pstore panic or oops record, keeps the host critical until `python -m hostwatch event ack ID` or `HOSTWATCH_CRASH_HOLD_S` (default 86400) passes; a clean shutdown or an agent stop does not. A host with no data at all reports `overall_status` 2 with the reason
+raises no warning. An unreadable source is not absent and stays a warning. A source that was reported present and available and later reports not present is critical (`disappeared`, status 2) until an operator runs `source forget HOST SOURCE`. A host silent for longer than `HOSTWATCH_SILENT_AFTER_S` (default three agent intervals) is critical with its last report time as the reason. A boot event classified kernel panic, watchdog reset, unknown unclean or power loss, or a pstore panic or oops record, keeps the host critical until `python -m hostwatch event ack ID` or `HOSTWATCH_CRASH_HOLD_S` (default 86400) passes; a clean shutdown or an agent stop does not. A host with no data at all reports `overall_status` 2 with the reason
 "no data". The `hosts` list keys each entry by a slug of the host name
 (`host_<slug>_name`, `host_<slug>_status`), so a new host never renames existing
 keys; names whose slugs collide get a short hash suffix. To monitor a host in
@@ -236,7 +236,9 @@ curl -s -H "Authorization: Bearer $TOKEN" http://127.0.0.1:8090/internal/v1/sour
 # 2. Watchdog hang: stop the watchdog feeder or hang the host so the watchdog resets it.
 #    Expect boot.watchdog_reset.
 # 3. Power pull: remove power with the host running. Expect boot.unknown_unclean, because
-#    a power cut cannot be separated from a hang without a witness (Phase 6).
+#    a power cut cannot be separated from a hang without a witness. With the Home Assistant
+#    plug witness configured (or a UPS on-battery event stored) and an outage overlapping the
+#    window (HOSTWATCH_WITNESS_SKEW_S, default 120), expect boot.power_loss as well.
 # 4. Test-array failure: `sudo mdadm /dev/<test-array> --fail /dev/<member>`. Expect an
 #    md.degraded event (query with kind=md.degraded).
 

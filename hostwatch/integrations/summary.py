@@ -37,6 +37,7 @@ SILENT_AFTER_S = 45.0
 CRASH_HOLD_S = 86400.0
 # Event kinds that mean the host went down badly. clean_shutdown and agent_stopped are not here.
 CRASH_KINDS = frozenset({"boot.kernel_panic", "boot.watchdog_reset", "boot.unknown_unclean",
+                         "boot.power_loss",
                          "pstore.kernel_panic", "pstore.kernel_oops"})
 
 STATUS_OK, STATUS_WARNING, STATUS_CRITICAL = 0, 1, 2
@@ -358,6 +359,11 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     crashes = [e for src in ("boot", "pstore")
                for e in store.events(host=host, since=now - crash_hold_s, source=src, limit=1000)
                if e.get("kind") in CRASH_KINDS]
+    # A confirmed power loss replaces the unknown_unclean event of the same boot, even once
+    # the power loss event is acknowledged, so one outage is never two open conditions.
+    confirmed = {e.get("boot_id") for e in crashes if e["kind"] == "boot.power_loss" and e.get("boot_id")}
+    crashes = [e for e in crashes
+               if not (e["kind"] == "boot.unknown_unclean" and e.get("boot_id") in confirmed)]
     crashes.sort(key=lambda e: (e["ts"], e["id"]), reverse=True)
     acked_fn = getattr(store, "acked_event_ids", None)
     if crashes and acked_fn:

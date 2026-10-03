@@ -58,8 +58,7 @@ window, where the state was `unavailable`, `unknown` or `off`. An unreachable
 server, a 401 or 403, another HTTP error, an empty history (a missing entity) or
 an unexpected shape returns `available=False` with a reason. An empty interval
 list is returned only when Home Assistant did answer with history, so a missing
-witness is never read as proof of no outage. The boot classifier does not use
-this reader yet.
+witness is never read as proof of no outage. The hub applies this reader to unclean boots; see Witness-confirmed power loss.
 
 ## Data flow
 
@@ -134,6 +133,45 @@ winning class disagrees with other evidence, `detail.contradiction` names each
 disagreement and `detail.evidence_seen` lists every piece of evidence. The
 `unknown` reason states what was actually read (journal unavailable, hints read
 but inconclusive, or journal not checked).
+
+### Witness-confirmed power loss (`hostwatch/witness/power.py`)
+
+When the hub stores a `boot.unknown_unclean` event (or a `boot.agent_stopped` event whose
+journal hints show an abrupt end), it asks the witnesses about the window from the previous
+heartbeat minus a skew allowance to the boot time plus the allowance. The boot time is the
+event's `detail.detected_at`, when the agent noticed the new boot. The allowance is
+`HOSTWATCH_WITNESS_SKEW_S` (default 120 seconds) and absorbs clock differences between the
+host, the hub and Home Assistant. The work runs after the ingest response, so a slow Home
+Assistant never delays the agent. The witnesses are the plug history of the host's configured
+entity and the stored UPS events `ups.on_battery` and `ups.low_battery` of the same host.
+
+If a plug outage interval (`unavailable`, `unknown` or `off`) overlaps the window, or a UPS
+on-battery or low-battery event falls inside it, the hub stores a new `boot.power_loss` event
+(critical) with the same `boot_id` and the dedup key `boot:<boot_id>:power_loss`. Its detail is
+the original detail plus `power_witness`: the window, the skew used, each plug interval, the
+UPS events, and `supersedes`. The original event is kept and gets the same `power_witness`
+with `superseded_by`. Otherwise the original event stays and `detail.power_witness` records
+what was asked and why there was no confirmation. A witness that is not configured, refuses the
+token or cannot be reached is recorded as unavailable with its reason, never as no outage.
+An event that already has `power_witness` is not assessed again, so a resend adds nothing.
+
+Precedence of the final classification, strongest first:
+
+| Rank | Class | Basis |
+|------|-------|-------|
+| 1 | `kernel_panic` | fresh pstore record; an overlapping outage is only noted in `detail.power_witness` |
+| 2 | `watchdog_reset` | bootstatus card reset; an overlapping outage is only noted |
+| 3 | `clean_shutdown` | journal shutdown sequence completed |
+| 4 | `watchdog_reset` | journal watchdog message with no completed shutdown |
+| 5 | `power_loss` | unclean end plus an overlapping plug outage or UPS on-battery event |
+| 6 | `unknown_unclean` | unclean end with no overlapping witness outage |
+| 7 | `agent_stopped`, `unknown` | as above |
+
+`power_loss` is critical while held with the same rules as the other crashes: it is an open
+crash condition until `python -m hostwatch event ack ID` or `HOSTWATCH_CRASH_HOLD_S` passes. The
+summary hides the `unknown_unclean` event of a boot that has a `power_loss` event, even after the
+power loss is acknowledged, so one outage is not two open conditions. Without any witness the
+result is unchanged.
 
 When more than one boot passed while the agent was down, `JournalWatcher.list_boots`
 runs `journalctl --list-boots -o json` through a pluggable reader. The heartbeat's boot
@@ -355,7 +393,7 @@ Two host-level conditions also make `overall_status` 2, because a crash must be 
 glance. A host silent for longer than `HOSTWATCH_SILENT_AFTER_S` seconds (default three agent
 intervals) reads critical with the time of its last report as the reason; the last report is the
 newest of the agent batch time and any source report. A boot event classified `kernel_panic`,
-`watchdog_reset` or `unknown_unclean`, or a pstore `kernel_panic` or `kernel_oops` record, is an
+`watchdog_reset`, `unknown_unclean` or `power_loss`, or a pstore `kernel_panic` or `kernel_oops` record, is an
 open crash condition until an operator runs `python -m hostwatch event ack ID` or
 `HOSTWATCH_CRASH_HOLD_S` seconds (default 86400) have passed. The acknowledgement is stored in
 the `event_acks` table (schema version 9) and appends an audit row of kind `cli`. `clean_shutdown`

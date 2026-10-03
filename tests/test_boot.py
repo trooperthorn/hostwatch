@@ -154,7 +154,7 @@ def test_abrupt_journal_end_without_witness_is_unknown_unclean_not_power_loss():
     result = boot.classify({"boot_id": OLD, "ts": 1.0, "agent_stopped_cleanly": False}, NEW, False,
                            {"abrupt_end": True})
     assert result.kind == boot.UNKNOWN_UNCLEAN
-    assert not hasattr(boot, "POWER_LOSS")
+    assert result.kind != boot.POWER_LOSS  # only the hub applies a witness
     assert "without a witness" in result.detail["reason"]
 
 
