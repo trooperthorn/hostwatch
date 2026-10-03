@@ -81,4 +81,4 @@ def test_timeline_script_uses_text_and_cursor_headers():
     js = files("hostwatch").joinpath("web", "app.js").read_text(encoding="utf-8")
     assert "innerHTML" not in js
     assert "X-Next-Before-Id" in js and "ArrowDown" in js
-    assert re.search(r'el\("td", e\.host\)', js) and re.search(r'el\("td", e\.title\)', js)
+    assert re.search(r'el\("td", e\.host[,)]', js) and re.search(r'el\("td", e\.title[,)]', js)

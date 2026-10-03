@@ -109,13 +109,13 @@
       tr.appendChild(el("td", m.label));
       tr.appendChild(el("td", m.value === null || m.value === undefined ? "unavailable" : m.value));
       tr.appendChild(el("td", m.unit || "none"));
-      tr.appendChild(el("td", labelText(m.labels)));
+      tr.appendChild(el("td", labelText(m.labels), "grow"));
       tr.appendChild(el("td", m.source));
       var st = el("td");
       st.appendChild(statusMark(m.status, m.status_text));
       tr.appendChild(st);
       tr.appendChild(el("td", m.reason || "none"));
-      tr.appendChild(el("td", stamp(m.ts)));
+      tr.appendChild(el("td", stamp(m.ts), "nowrap"));
       body.appendChild(tr);
     });
     table.appendChild(body);
@@ -498,12 +498,12 @@
     var tr = el("tr");
     tr.tabIndex = -1;
     tr.setAttribute("data-severity", String(e.severity));
-    tr.appendChild(el("td", new Date(e.ts * 1000).toLocaleString()));
-    tr.appendChild(el("td", e.host));
-    tr.appendChild(el("td", e.source));
-    tr.appendChild(el("td", e.kind));
+    tr.appendChild(el("td", new Date(e.ts * 1000).toLocaleString(), "nowrap"));
+    tr.appendChild(el("td", e.host, "nowrap"));
+    tr.appendChild(el("td", e.source, "nowrap"));
+    tr.appendChild(el("td", e.kind, "nowrap"));
     tr.appendChild(el("td", e.severity, "sev-" + String(e.severity).replace(/[^a-z]/g, "")));
-    tr.appendChild(el("td", e.title));
+    tr.appendChild(el("td", e.title, "grow"));
     return tr;
   }
 
@@ -822,8 +822,10 @@
 
   function auditRow(r) {
     var tr = el("tr");
-    [new Date(r.ts * 1000).toLocaleString(), r.actor, r.kind, r.method, r.path, r.status, r.remote,
-     JSON.stringify(r.detail)].forEach(function (v) { tr.appendChild(el("td", v)); });
+    // Fixed-format columns stay on one line; path and detail wrap and take the spare width.
+    [[new Date(r.ts * 1000).toLocaleString(), "nowrap"], [r.actor, "nowrap"], [r.kind, "nowrap"],
+     [r.method, "nowrap"], [r.path, "path"], [r.status, "nowrap"], [r.remote, "nowrap"],
+     [JSON.stringify(r.detail), "grow"]].forEach(function (c) { tr.appendChild(el("td", c[0], c[1])); });
     return tr;
   }
 

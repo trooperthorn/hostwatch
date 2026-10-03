@@ -80,6 +80,7 @@
         <button type="submit">Apply filters</button>
       </form>
       <p id="events-note" role="status" aria-live="polite" class="muted"></p>
+      <div class="table-scroll">
       <table id="events-table" class="events">
         <caption>Events, newest first. Use the up and down arrow keys, Home and End to move between rows.</caption>
         <thead>
@@ -94,6 +95,7 @@
         </thead>
         <tbody id="events-body"></tbody>
       </table>
+      </div>
       <button type="button" id="events-more" hidden>Load older events</button>
     </div>
     <div id="history-panel" hidden>
@@ -114,6 +116,7 @@
       </form>
       <p id="history-note" role="status" aria-live="polite" class="muted"></p>
       <div id="history-chart" class="chart"></div>
+      <div class="table-scroll">
       <table id="history-table" class="events" hidden>
         <caption id="history-caption">Chart data as text.</caption>
         <thead>
@@ -128,6 +131,7 @@
         </thead>
         <tbody id="history-body"></tbody>
       </table>
+      </div>
       <h4 id="gaps-title">Gaps with no data</h4>
       <ul id="history-gaps"></ul>
     </div>
@@ -151,6 +155,7 @@
         <p><code id="secret-value"></code></p>
         <button type="button" id="secret-dismiss">I have copied it</button>
       </div>
+      <div class="table-scroll">
       <table id="keys-table" class="events">
         <caption>API keys, newest first. Secrets are never listed.</caption>
         <thead>
@@ -167,6 +172,7 @@
         </thead>
         <tbody id="keys-body"></tbody>
       </table>
+      </div>
     </div>
     <div id="audit-panel" hidden>
       <h3 id="audit-title">Audit log</h3>
@@ -185,6 +191,7 @@
         <button type="submit">Apply filters</button>
       </form>
       <p id="audit-note" role="status" aria-live="polite" class="muted"></p>
+      <div class="table-scroll">
       <table id="audit-table" class="events">
         <caption>Audit log, newest first. This view is read only.</caption>
         <thead>
@@ -201,6 +208,7 @@
         </thead>
         <tbody id="audit-body"></tbody>
       </table>
+      </div>
       <button type="button" id="audit-more" hidden>Load older rows</button>
     </div>
   </section>

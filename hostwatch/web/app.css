@@ -40,7 +40,9 @@ body { margin: 0; background: var(--bg); color: var(--fg); font: 16px/1.5 system
 .bar { display: flex; align-items: center; justify-content: space-between; padding: 0.5rem 1rem;
   background: var(--surface); border-bottom: 1px solid var(--border); }
 .bar h1 { margin: 0; font-size: 1.25rem; }
-main { max-width: 60rem; margin: 0 auto; padding: 1rem; }
+/* The page uses the full window width, so wide screens show more columns instead of
+   empty margins. Very wide screens stop at 160rem so lines stay readable. */
+main { max-width: 160rem; margin: 0 auto; padding: 1rem clamp(0.75rem, 2vw, 2rem); }
 form { display: grid; gap: 0.5rem; max-width: 20rem; }
 input, button { font: inherit; padding: 0.5rem; border: 1px solid var(--border); border-radius: 4px;
   background: var(--bg); color: var(--fg); }
@@ -74,6 +76,13 @@ button { background: var(--accent); color: var(--accent-fg); border-color: var(-
 .events { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
 .events caption { text-align: left; color: var(--muted); padding-bottom: 0.25rem; }
 .events th, .events td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+/* Tables scroll inside their own box on narrow screens rather than widening the page. */
+.table-scroll { overflow-x: auto; max-width: 100%; }
+/* Short fixed-format columns stay on one line; the free-text columns take the rest of
+   the width and wrap long values such as JSON details or paths. */
+.events .nowrap { white-space: nowrap; }
+.events .grow { width: 100%; min-width: 16rem; overflow-wrap: anywhere; word-break: break-word; }
+.events .path { overflow-wrap: anywhere; min-width: 10rem; }
 .sev-critical { color: var(--crit-text); font-weight: 700; }
 .sev-warning { color: var(--warn-text); font-weight: 700; }
 .chart svg { width: 100%; height: auto; max-height: 24rem; background: var(--surface); border: 1px solid var(--border); }
@@ -168,6 +177,8 @@ button { background: var(--accent); color: var(--accent-fg); border-color: var(-
 .expert .groups { grid-template-columns: 1fr; }
 .table-wrap { overflow-x: auto; }
 .expert-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+.expert-table .grow { overflow-wrap: anywhere; }
+.expert-table .nowrap { white-space: nowrap; }
 .expert-table th, .expert-table td { text-align: left; padding: 0.25rem 0.4rem; border-bottom: 1px solid var(--border);
   vertical-align: top; }
 .expert-table caption { text-align: left; color: var(--muted); }
