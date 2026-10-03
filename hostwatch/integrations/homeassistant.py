@@ -275,6 +275,7 @@ class HomeAssistantPublisher:
                 self._wall_power(host, now)
             summary = build_host_summary(self.store, host, now, silent_after_s=self.config.silence_window_s,
                                        crash_hold_s=self.config.crash_hold_s,
+                                       alert_window_s=self.config.alert_window_s,
                                        cpu_sensors=parse_sensor_patterns("HOSTWATCH_HWMON_CPU_SENSORS",
                                                                          self.config.hwmon_cpu_sensors),
                                        required_fans=parse_sensor_patterns("HOSTWATCH_HWMON_REQUIRED_FANS",

@@ -99,6 +99,7 @@ class Config:
     silent_after_s: float | None = field(
         default_factory=lambda: float(_env("HOSTWATCH_SILENT_AFTER_S", "0")) or None)
     crash_hold_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_CRASH_HOLD_S", "86400")))
+    alert_window_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_ALERT_WINDOW_S", "86400")))
     witness_skew_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_WITNESS_SKEW_S", "120")))
     witness_retry_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_WITNESS_RETRY_S", "86400")))
     redetect_s: float = field(default_factory=lambda: float(_env("HOSTWATCH_REDETECT", "600")))
@@ -213,6 +214,8 @@ class Config:
             raise ValueError(f"HOSTWATCH_SILENT_AFTER_S must be greater than 0 seconds (got {self.silent_after_s})")
         if not self.crash_hold_s > 0:
             raise ValueError(f"HOSTWATCH_CRASH_HOLD_S must be greater than 0 seconds (got {self.crash_hold_s})")
+        if not self.alert_window_s > 0:
+            raise ValueError(f"HOSTWATCH_ALERT_WINDOW_S must be greater than 0 seconds (got {self.alert_window_s})")
         if not self.witness_skew_s >= 0:
             raise ValueError(f"HOSTWATCH_WITNESS_SKEW_S must be 0 or more seconds (got {self.witness_skew_s})")
         if not self.witness_retry_s >= 0:

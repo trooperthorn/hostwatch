@@ -539,7 +539,7 @@ def create_app(cfg: Config, store: Store, on_start=None, on_stop=None, denial_cl
         found = store.gaps(host, source, metric, now - hours * 3600, max_gap_s, until=now + 1.0)
         return {"gap_count": len(found), "gaps": found}
 
-    summary_opts = {"silent_after_s": cfg.silence_window_s, "crash_hold_s": cfg.crash_hold_s,
+    summary_opts = {"silent_after_s": cfg.silence_window_s, "crash_hold_s": cfg.crash_hold_s, "alert_window_s": cfg.alert_window_s,
                     "cpu_sensors": parse_sensor_patterns("HOSTWATCH_HWMON_CPU_SENSORS", cfg.hwmon_cpu_sensors),
                     "required_fans": parse_sensor_patterns("HOSTWATCH_HWMON_REQUIRED_FANS",
                                                            cfg.hwmon_required_fans)}

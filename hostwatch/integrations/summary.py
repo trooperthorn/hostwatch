@@ -163,6 +163,7 @@ class HostSummary:
     pools: list[Component] = field(default_factory=list)
     pi: Component | None = None
     fans: list[Component] = field(default_factory=list)
+    alert_items: list[Component] = field(default_factory=list)
 
     def components(self) -> list[Component]:
         extra = [c for c in (self.ups, self.wall_power, self.pi) if c is not None]
@@ -186,7 +187,22 @@ class HostSummary:
         worst = self.status
         if self.silent or self.crashes or worst is None:
             return STATUS_CRITICAL
-        return max(worst, STATUS_WARNING) if self.unmeasured else worst
+        base = max(worst, STATUS_WARNING) if self.unmeasured else worst
+        return max(base, self._group_status()[0])
+
+    def _group_status(self, strict: bool = False) -> tuple[int, str]:
+        """The worst status over every group, visible or hidden, with the reason. Warning and
+        critical groups count as themselves; a partly unmeasured (unknown) group counts as a warning,
+        because a group nobody fully measured must not read as healthy. `strict` leaves unknown groups out."""
+        level, reasons = STATUS_OK, []
+        for g in group_documents(self):
+            lvl = {"critical": STATUS_CRITICAL, "warning": STATUS_WARNING,
+                   "unknown": None if strict else STATUS_WARNING}.get(g["status"])
+            if lvl:
+                level = max(level, lvl)
+                reasons.append((lvl, f"{g['label']}: {g['summary']}"))
+        reasons.sort(key=lambda r: -r[0])
+        return level, "; ".join(text for _, text in reasons)
 
     @property
     def overall_reason(self) -> str:
@@ -200,7 +216,13 @@ class HostSummary:
         if self.disappeared:
             return "sources disappeared: " + ", ".join(self.disappeared)
         if self.unmeasured:
-            return "unmeasured groups: " + ", ".join(self.unmeasured)
+            text = "unmeasured groups: " + ", ".join(self.unmeasured)
+            bad = self._group_status(strict=True)[1]
+            return f"{text}; {bad}" if bad else text
+        known = [c.status for c in self.components() if c.status is not None]
+        group_level, group_reason = self._group_status()
+        if group_level > max(known, default=STATUS_OK):
+            return group_reason
         return ""
 
 
@@ -219,9 +241,52 @@ def _label(labels: dict[str, str]) -> str:
     return ",".join(f"{k}={v}" for k, v in sorted(labels.items()))
 
 
+def _alert_items(store: StoreLike, host: str, now: float, window_s: float,
+                 open_crash_ids: set[int]) -> list[Component]:
+    """TrueNAS alerts, the last boot classification and recent warning or critical events as members
+    of the alerts group. Boot and pstore events are left out of the recent events: open crashes have
+    their own members, acknowledged ones are excluded, and the last boot has its classification member."""
+    out: list[Component] = []
+    newest: dict[str, dict] = {}
+    for e in store.events(host=host, kind="truenas.alert", limit=1000):
+        if e.get("kind") != "truenas.alert":
+            continue
+        key = str((e.get("detail") or {}).get("uuid") or e["id"])
+        if key not in newest or (e["ts"], e["id"]) > (newest[key]["ts"], newest[key]["id"]):
+            newest[key] = e
+    for e in sorted(newest.values(), key=lambda e: (e["ts"], e["id"]), reverse=True):
+        detail = e.get("detail") or {}
+        text = detail.get("formatted") or e.get("title") or "TrueNAS alert"
+        labels = {"event": str(e["id"])}
+        name = f"truenas_alert.{e['id']}"
+        if detail.get("dismissed"):
+            out.append(Component(name, None, "", "ok", f"informational: dismissed TrueNAS alert: {text}",
+                                 labels, "truenas", e["ts"]))
+        elif e.get("severity") in ("warning", "critical"):
+            out.append(Component(name, None, "", e["severity"], f"TrueNAS alert: {text}",
+                                 labels, "truenas", e["ts"]))
+        else:
+            out.append(Component(name, None, "", "ok", f"informational: TrueNAS alert: {text}",
+                                 labels, "truenas", e["ts"]))
+    boots = [e for e in store.events(host=host, source="boot", limit=1) if e.get("source") == "boot"]
+    if boots and boots[0]["id"] not in open_crash_ids:
+        b = boots[0]
+        out.append(Component("boot.last", None, "", "ok",
+                             f"informational: last boot classified {b['kind'].split('.', 1)[-1]} at {_iso(b['ts'])}",
+                             {"event": str(b["id"])}, "boot", b["ts"]))
+    for e in store.events(host=host, since=now - window_s, limit=1000):
+        if (e.get("severity") not in ("warning", "critical") or e.get("source") in ("thresholds", "boot", "pstore")
+                or e.get("kind") == "truenas.alert" or e.get("kind") in CRASH_KINDS):
+            continue
+        out.append(Component(f"event.{e['id']}", None, "", e["severity"],
+                             f"{e['kind']} at {_iso(e['ts'])}: {e.get('title') or ''}".rstrip(": "),
+                             {"event": str(e["id"])}, e.get("source") or "events", e["ts"]))
+    return out
+
+
 def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: float = SILENT_AFTER_S,
                        crash_hold_s: float = CRASH_HOLD_S, cpu_sensors: tuple[str, ...] = (),
-                       required_fans: tuple[str, ...] = ()) -> HostSummary:
+                       required_fans: tuple[str, ...] = (), alert_window_s: float = EVENT_WINDOW_S) -> HostSummary:
     rows = [r for r in store.latest(host) if r["host"] == host]
     src_rows = {r["source"]: r for r in store.sources() if r["host"] == host}
     events = store.events(host=host, since=now - EVENT_WINDOW_S, source="thresholds", limit=1000)
@@ -528,9 +593,10 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
         acked = acked_fn([e["id"] for e in crashes])
         crashes = [e for e in crashes if e["id"] not in acked]
     crash_rows = [{"id": e["id"], "kind": e["kind"].split(".", 1)[1], "ts": e["ts"]} for e in crashes]
+    alert_items = _alert_items(store, host, now, alert_window_s, {c["id"] for c in crash_rows})
     return HostSummary(host, now, cpu, memory, power, temps, md, disks, sources, problems,
                        sorted(open_conditions), last_seen, unmeasured, not_present, sorted(gone),
-                       silent, crash_rows, ups, wall, pools, pi, fans)
+                       silent, crash_rows, ups, wall, pools, pi, fans, alert_items)
 
 
 # ---------------------------------------------------------------------------------------------
@@ -604,10 +670,25 @@ def _group_summary(members: list[dict], agg: str) -> str:
     info = sum(1 for m in members if m["reason"].startswith("informational"))
     if info:
         text += f" ({info} informational)"
-    if agg in ("warning", "critical", "unknown"):
+    if agg in ("warning", "critical"):
         worst = next(m for m in members if m["status"] == agg)
         text += f". {worst['label']}: {worst['reason'] or worst['status_text']}"
+    elif agg == "unknown":
+        gaps = [m for m in members if m["status"] == "unknown"]
+        text += ". Not measured: " + "; ".join(f"{m['label']} ({m['reason'] or m['status_text']})" for m in gaps)
     return text
+
+
+def group_key(comps: list[Component], members: list[dict]) -> str:
+    """The status of a group: the worst warning or critical member, else unknown when any member is
+    unknown or unavailable (a partly unmeasured group is not Good), else good. A member that is not
+    present is not a measurement and is ignored."""
+    worst = worst_key([m["status"] for m in members])
+    if worst in ("warning", "critical"):
+        return worst
+    if any(c.state == "unknown" for c in comps):
+        return "unknown"
+    return worst
 
 
 def _alert_members(s: HostSummary) -> list[Component]:
@@ -621,6 +702,7 @@ def _alert_members(s: HostSummary) -> list[Component]:
     for key in s.open_conditions:
         out.append(Component(f"condition.{key}", None, "", "warning", f"open threshold condition {key}",
                              source="thresholds"))
+    out.extend(s.alert_items)
     return out
 
 
@@ -646,7 +728,7 @@ def group_documents(s: HostSummary) -> list[dict[str, Any]]:
         if gid == "alerts" and not members:
             agg, text = "good", "No open alerts or crash events."
         else:
-            agg = worst_key([m["status"] for m in members])
+            agg = group_key(comps, members)
             text = _group_summary(members, agg)
         out.append({"id": gid, "label": label, "icon": icon, "status": agg,
                     "status_text": _KEY_TEXT[agg], "summary": text, "members": members})

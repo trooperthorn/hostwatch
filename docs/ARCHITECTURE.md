@@ -450,8 +450,22 @@ membership of each group (`cpu`, `memory`, `power`, `temperatures`, `fans`, `poo
 `ups`, `pi_power`, `alerts`, `sources`, in that order) and its aggregate status once on the server, so
 the page never re-derives either. The aggregate is the worst member; it is unknown only when every
 member is unknown. A group with no members is omitted unless one of its sources is present on the host.
-The alerts group holds unacknowledged crash events, a silent host and open threshold conditions.
-TrueNAS API alerts are not collected yet, so they are not in this group. Fans are `fan.*` components
+The aggregate is the worst warning or critical member. When no member is warning or critical but at
+least one is unknown or unavailable, the group reads unknown and its summary names each unmeasured
+member with its reason, so a group with one good and one unreadable member is never Good. A member that
+is not present is not a measurement and is ignored.
+The alerts group holds unacknowledged crash events, a silent host, open threshold conditions, the
+TrueNAS alerts stored as `truenas.alert` events, the last boot classification and recent events. For
+TrueNAS the newest event per alert uuid decides: an active alert counts with its severity (warning and
+critical raise the group), a dismissed one is an informational member and never raises it. An alert stays
+until it is dismissed, because the collector reports no resolution. The last boot classification is
+informational unless it is an open crash, which has its own member. Recent events are warning or critical
+events inside `HOSTWATCH_ALERT_WINDOW_S` (default 86400 seconds); threshold, boot and pstore events are
+left out because open conditions, crash members and the boot classification already cover them, so an
+acknowledged crash is never shown again.
+Every group counts toward the host status, hidden or not: the overall status is never better than the
+worst group, an unknown group counts as a warning, and the banner and the host reason name the group that
+raised it. The page opens a host exactly when its status is not Good. Fans are `fan.*` components
 from the hwmon `fan` readings. A 0 RPM fan is informational unless it matches
 `HOSTWATCH_HWMON_REQUIRED_FANS` (hub side `chip:sensor` globs), where it is critical. Hosts are sorted
 worst first by `grouped_document`, which also builds the banner text and the per-status counts, and
