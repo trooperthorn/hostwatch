@@ -74,4 +74,16 @@ button { background: var(--accent); color: var(--accent-fg); border-color: var(-
 .events th, .events td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
 .sev-critical { color: var(--crit-text); font-weight: 700; }
 .sev-warning { color: var(--warn-text); font-weight: 700; }
+.chart svg { width: 100%; height: auto; max-height: 24rem; background: var(--surface); border: 1px solid var(--border); }
+.chart .axis { stroke: var(--muted); stroke-width: 1; }
+.chart .grid { stroke: var(--border); stroke-width: 1; }
+.chart .label { fill: var(--fg); font-size: 11px; stroke: none; }
+.chart .gap { fill: var(--crit); fill-opacity: 0.25; stroke: var(--crit); stroke-dasharray: 4 3; }
+.chart .band { fill-opacity: 0.15; stroke: none; }
+.chart .line { fill: none; stroke-width: 2; }
+.s0 { stroke: var(--accent); fill: var(--accent); }
+.s1 { stroke: var(--ok); fill: var(--ok); }
+.s2 { stroke: var(--warn); fill: var(--warn); }
+.s3 { stroke: var(--crit); fill: var(--crit); }
+.s4 { stroke: var(--muted); fill: var(--muted); }
 [hidden] { display: none !important; }

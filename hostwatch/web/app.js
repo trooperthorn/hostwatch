@@ -166,13 +166,167 @@
     rows[to].focus();
   }
 
+  // History chart. Data comes from GET /api/v1/hosts/{host}/history (raw samples for short
+  // ranges, hourly rollups for long ones, chosen by the hub) and gaps from /internal/v1/gaps.
+  // The SVG is built with createElementNS and every label is set with textContent.
+  var SVG_NS = "http://www.w3.org/2000/svg";
+  var W = 720, H = 300, PAD_L = 60, PAD_R = 12, PAD_T = 12, PAD_B = 28;
+
+  function svg(tag, attrs) {
+    var node = document.createElementNS(SVG_NS, tag);
+    Object.keys(attrs || {}).forEach(function (k) { node.setAttribute(k, String(attrs[k])); });
+    return node;
+  }
+
+  function svgText(x, y, text, anchor) {
+    var t = svg("text", { x: x, y: y, "text-anchor": anchor || "middle", "class": "label" });
+    t.textContent = text;
+    return t;
+  }
+
+  function seriesName(s) {
+    var keys = Object.keys(s.labels || {});
+    return keys.length ? keys.map(function (k) { return k + "=" + s.labels[k]; }).join(", ") : "all";
+  }
+
+  function fmt(v) { return v === null || v === undefined ? "n/a" : String(Math.round(v * 100) / 100); }
+
+  function buildChart(doc, gaps) {
+    var lo = Infinity, hi = -Infinity;
+    doc.series.forEach(function (s) {
+      s.points.forEach(function (p) { lo = Math.min(lo, p.min); hi = Math.max(hi, p.max); });
+    });
+    if (lo === hi) { lo -= 1; hi += 1; }
+    var t0 = doc.since, t1 = doc.until;
+    function x(t) { return PAD_L + (t - t0) / (t1 - t0) * (W - PAD_L - PAD_R); }
+    function y(v) { return PAD_T + (hi - v) / (hi - lo) * (H - PAD_T - PAD_B); }
+    var root = svg("svg", { viewBox: "0 0 " + W + " " + H, role: "img", "aria-labelledby": "chart-t chart-d" });
+    var title = svg("title", { id: "chart-t" });
+    title.textContent = doc.metric + " on " + doc.host + " (" + doc.source + ")";
+    var desc = svg("desc", { id: "chart-d" });
+    desc.textContent = "Line chart of the average " + doc.metric + " in " + (doc.unit || "no unit") +
+      ", from " + fmt(lo) + " to " + fmt(hi) + ", with " + gaps.length + " gaps. The same values are in the table below.";
+    root.appendChild(title);
+    root.appendChild(desc);
+    [0, 0.25, 0.5, 0.75, 1].forEach(function (f) {
+      var v = lo + (hi - lo) * f;
+      root.appendChild(svg("line", { x1: PAD_L, x2: W - PAD_R, y1: y(v), y2: y(v), "class": "grid" }));
+      root.appendChild(svgText(PAD_L - 4, y(v) + 4, fmt(v), "end"));
+    });
+    [0, 0.5, 1].forEach(function (f) {
+      var t = t0 + (t1 - t0) * f;
+      root.appendChild(svgText(x(t), H - 8, new Date(t * 1000).toLocaleString(), f === 0 ? "start" : (f === 1 ? "end" : "middle")));
+    });
+    gaps.forEach(function (g) {
+      var a = Math.max(x(g[0]), PAD_L), b = Math.min(x(g[1]), W - PAD_R);
+      if (b > a) { root.appendChild(svg("rect", { x: a, y: PAD_T, width: b - a, height: H - PAD_T - PAD_B, "class": "gap" })); }
+    });
+    root.appendChild(svg("line", { x1: PAD_L, x2: PAD_L, y1: PAD_T, y2: H - PAD_B, "class": "axis" }));
+    root.appendChild(svg("line", { x1: PAD_L, x2: W - PAD_R, y1: H - PAD_B, y2: H - PAD_B, "class": "axis" }));
+    doc.series.forEach(function (s, i) {
+      var cls = "s" + (i % 5);
+      var avg = s.points.map(function (p) { return x(p.ts) + "," + y(p.avg); }).join(" ");
+      var upper = s.points.map(function (p) { return x(p.ts) + "," + y(p.max); });
+      var lower = s.points.map(function (p) { return x(p.ts) + "," + y(p.min); }).reverse();
+      if (s.points.length > 1) {
+        root.appendChild(svg("polygon", { points: upper.concat(lower).join(" "), "class": "band " + cls }));
+        root.appendChild(svg("polyline", { points: avg, "class": "line " + cls }));
+      } else if (s.points.length === 1) {
+        root.appendChild(svg("circle", { cx: x(s.points[0].ts), cy: y(s.points[0].avg), r: 3, "class": cls }));
+      }
+    });
+    return root;
+  }
+
+  function fillTable(doc, gaps) {
+    var body = byId("history-body");
+    while (body.firstChild) { body.removeChild(body.firstChild); }
+    doc.series.forEach(function (s) {
+      var name = seriesName(s);
+      s.points.forEach(function (p) {
+        var tr = el("tr");
+        [new Date(p.ts * 1000).toLocaleString(), name, fmt(p.min), fmt(p.avg), fmt(p.max), p.n].forEach(function (v) {
+          tr.appendChild(el("td", v));
+        });
+        body.appendChild(tr);
+      });
+    });
+    byId("history-caption").textContent = "Values for " + doc.metric + " (" + (doc.unit || "no unit") + ") on " +
+      doc.host + ", " + doc.resolution + " data in steps of " + doc.step + " seconds.";
+    byId("history-table").hidden = body.children.length === 0;
+    var list = byId("history-gaps");
+    while (list.firstChild) { list.removeChild(list.firstChild); }
+    gaps.forEach(function (g) {
+      list.appendChild(el("li", "No data from " + new Date(g[0] * 1000).toLocaleString() + " to " +
+        new Date(g[1] * 1000).toLocaleString() + "."));
+    });
+    if (!gaps.length) { list.appendChild(el("li", "No gaps in this range.")); }
+  }
+
+  function loadSeries() {
+    var pick = byId("h-series");
+    fetch("/internal/v1/latest", { credentials: "same-origin" }).then(function (resp) {
+      if (resp.status === 401) { show(false, ""); return null; }
+      if (!resp.ok) { throw new Error("status " + resp.status); }
+      return resp.json();
+    }).then(function (rows) {
+      if (!rows) { return; }
+      var seen = {};
+      while (pick.firstChild) { pick.removeChild(pick.firstChild); }
+      rows.forEach(function (r) {
+        var key = JSON.stringify([r.host, r.source, r.metric]);
+        if (seen[key]) { return; }
+        seen[key] = true;
+        var o = el("option", r.host + " / " + r.source + " / " + r.metric);
+        o.value = key;
+        pick.appendChild(o);
+      });
+      byId("history-note").textContent = pick.children.length ? "" : "No metrics have been recorded yet.";
+    }).catch(function () { byId("history-note").textContent = "The metric list could not be loaded."; });
+  }
+
+  function loadHistory() {
+    var note = byId("history-note");
+    var pick = byId("h-series").value;
+    if (!pick) { note.textContent = "Choose a series first."; return; }
+    var sel = JSON.parse(pick);
+    var span = Number(byId("h-range").value);
+    var until = Date.now() / 1000;
+    var hq = new URLSearchParams({ source: sel[1], metric: sel[2], since: String(until - span), until: String(until) });
+    var step = Math.max(60, span / 300);
+    var gq = new URLSearchParams({ host: sel[0], source: sel[1], metric: sel[2], hours: String(span / 3600),
+                                   max_gap_s: String(Math.max(120, step * 2)) });
+    note.textContent = "Loading.";
+    Promise.all([
+      fetch("/api/v1/hosts/" + encodeURIComponent(sel[0]) + "/history?" + hq.toString(), { credentials: "same-origin" }),
+      fetch("/internal/v1/gaps?" + gq.toString(), { credentials: "same-origin" })
+    ]).then(function (resps) {
+      if (resps[0].status === 401 || resps[1].status === 401) { show(false, ""); return null; }
+      if (!resps[0].ok || !resps[1].ok) { throw new Error("status"); }
+      return Promise.all([resps[0].json(), resps[1].json()]);
+    }).then(function (docs) {
+      if (!docs) { return; }
+      var chart = byId("history-chart");
+      while (chart.firstChild) { chart.removeChild(chart.firstChild); }
+      var hist = docs[0], gaps = docs[1].gaps;
+      fillTable(hist, gaps);
+      if (!hist.series.length) { note.textContent = "No samples in this range."; return; }
+      chart.appendChild(buildChart(hist, gaps));
+      note.textContent = "Showing " + hist.resolution + " data, " + gaps.length + " gaps.";
+    }).catch(function () { note.textContent = "The history could not be loaded."; });
+  }
+
   function selectView(name) {
     var events = name === "events";
-    byId("status-panel").hidden = events;
+    var history = name === "history";
+    byId("status-panel").hidden = events || history;
     byId("events-panel").hidden = !events;
-    byId("tab-status").setAttribute("aria-pressed", String(!events));
+    byId("history-panel").hidden = !history;
+    byId("tab-status").setAttribute("aria-pressed", String(!events && !history));
     byId("tab-events").setAttribute("aria-pressed", String(events));
+    byId("tab-history").setAttribute("aria-pressed", String(history));
     if (events) { loadEvents(false); }
+    if (history) { loadSeries(); }
   }
 
   function show(signedIn, username) {
@@ -220,6 +374,8 @@
     byId("logout").addEventListener("click", onLogout);
     byId("tab-status").addEventListener("click", function () { selectView("status"); });
     byId("tab-events").addEventListener("click", function () { selectView("events"); });
+    byId("tab-history").addEventListener("click", function () { selectView("history"); });
+    byId("history-form").addEventListener("submit", function (e) { e.preventDefault(); loadHistory(); });
     byId("events-form").addEventListener("submit", function (e) { e.preventDefault(); loadEvents(false); });
     byId("events-more").addEventListener("click", function () { loadEvents(true); });
     byId("events-body").addEventListener("keydown", onEventKey);

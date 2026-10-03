@@ -33,6 +33,7 @@
     <nav aria-label="Views" class="views">
       <button type="button" id="tab-status" aria-pressed="true">Status</button>
       <button type="button" id="tab-events" aria-pressed="false">Events</button>
+      <button type="button" id="tab-history" aria-pressed="false">History</button>
     </nav>
     <div id="status-panel">
     <div id="banner" role="status" aria-live="polite" class="banner"><span id="banner-badge" class="badge"></span> <span id="banner-text"></span></div>
@@ -74,6 +75,41 @@
         <tbody id="events-body"></tbody>
       </table>
       <button type="button" id="events-more" hidden>Load older events</button>
+    </div>
+    <div id="history-panel" hidden>
+      <h3 id="history-title">History</h3>
+      <form id="history-form" class="filters" aria-labelledby="history-title">
+        <label for="h-series">Series</label>
+        <select id="h-series" name="series"></select>
+        <label for="h-range">Range</label>
+        <select id="h-range" name="range">
+          <option value="3600">Last hour (raw samples)</option>
+          <option value="21600">Last 6 hours (raw samples)</option>
+          <option value="86400" selected>Last 24 hours (raw samples)</option>
+          <option value="604800">Last 7 days</option>
+          <option value="2592000">Last 30 days (hourly rollups)</option>
+          <option value="7776000">Last 90 days (hourly rollups)</option>
+        </select>
+        <button type="submit">Show chart</button>
+      </form>
+      <p id="history-note" role="status" aria-live="polite" class="muted"></p>
+      <div id="history-chart" class="chart"></div>
+      <table id="history-table" class="events" hidden>
+        <caption id="history-caption">Chart data as text.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Time</th>
+            <th scope="col">Series</th>
+            <th scope="col">Minimum</th>
+            <th scope="col">Average</th>
+            <th scope="col">Maximum</th>
+            <th scope="col">Samples</th>
+          </tr>
+        </thead>
+        <tbody id="history-body"></tbody>
+      </table>
+      <h4 id="gaps-title">Gaps with no data</h4>
+      <ul id="history-gaps"></ul>
     </div>
   </section>
 </main>

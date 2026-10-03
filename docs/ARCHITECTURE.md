@@ -685,6 +685,10 @@ has a caption, column headers with `scope="col"`, labelled filter fields, and ar
 End navigation between rows using a roving tabindex. Every cell is set with `textContent`, so a host
 name or title containing markup shows as text. Tests: `tests/test_ui_events.py`.
 
+### History charts
+
+The History view lists the series from `GET /internal/v1/latest` and, for the chosen series and range, reads `GET /api/v1/hosts/{host}/history` and `GET /internal/v1/gaps` (scope `read:metrics`, so the session login and the source allowlist apply). It adds no endpoint. The hub decides between raw samples and hourly rollups from the range length, so the range selector only chooses the span: up to 24 hours reads raw samples and longer ranges read rollups, and the response `resolution` field is shown to the reader. The chart is built in `app.js` with `createElementNS`: an average line and a minimum to maximum band per label set, axis labels, and a shaded, dashed rectangle for each interval the gaps endpoint reports, so missing data is visible and never interpolated. The gap threshold is twice the step, at least 120 seconds. The SVG has a title and description, and a table of the same buckets plus a list of the gaps give a text alternative. All labels are set with `textContent`, no style attributes are written, and no third-party origin is referenced. Tests: `tests/test_ui_history.py`.
+
 ## Security model
 
 Control summary for Phase 3, each labelled honestly. Enforced means the code
