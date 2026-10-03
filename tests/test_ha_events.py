@@ -12,7 +12,7 @@ from hostwatch.config import Config
 from hostwatch.integrations.ha_events import CURSOR_NAME, HomeAssistantEventPublisher
 from hostwatch.integrations.mqtt_client import MqttClient
 from hostwatch.store import SCHEMA_VERSION, SchemaTooNewError, Store
-from tests.test_ha_discovery import FakeBroker, FakeTransport
+from test_ha_discovery import FakeBroker, FakeTransport
 
 TOPIC = "hostwatch/events"
 
