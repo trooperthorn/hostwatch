@@ -22,7 +22,9 @@ COPY requirements.lock pyproject.toml ./
 # resolving anything further.
 RUN pip install --require-hashes --no-cache-dir -r requirements.lock
 COPY hostwatch ./hostwatch
-RUN pip install --no-cache-dir --no-deps . && rm -rf /root/.cache
+# pip, setuptools and wheel are only needed to build. They are removed afterwards
+# so the runtime image carries no installer with its own vulnerability history.
+RUN pip install --no-cache-dir --no-deps .  && pip uninstall -y pip setuptools wheel  && rm -rf /root/.cache
 
 # A fresh named volume copies the ownership of the image directory, so /data is
 # created here owned by the runtime user. Without this the volume would be

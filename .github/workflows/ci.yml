@@ -75,6 +75,15 @@ jobs:
         with:
           name: hostwatch-sbom
           path: hostwatch.spdx.json
+      - name: List fixable critical findings in the log
+        # SARIF output does not print findings, so this table makes a failing gate readable.
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: hostwatch:ci
+          format: table
+          severity: CRITICAL
+          ignore-unfixed: true
+          exit-code: "0"
       - name: Scan the image with trivy
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
         with:
