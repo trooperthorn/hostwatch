@@ -657,7 +657,7 @@ style-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'`),
 including allowlist refusals. The source allowlist applies to the UI paths like any other.
 Requests for `/` and `/static/` are not audited, because browsers send the session cookie with
 every asset request and the rows would hide real access. The CSS uses colour tokens with a
-`prefers-color-scheme` dark variant and a visible `:focus-visible` outline. The timeline, charts and key
+`prefers-color-scheme` dark variant and a visible `:focus-visible` outline. The charts and key
 management arrive in later slices. Tests: `tests/test_ui_shell.py`.
 
 ### Status tiles
@@ -673,6 +673,17 @@ source is critical. `app.js` only renders this document with `textContent`, keep
 given, polls at `refresh_s` without a page reload, and holds no threshold logic. State is shown by
 colour, a text badge and the text of each line, so it does not rely on colour alone. Tests:
 `tests/test_ui_status.py`.
+
+### Event timeline
+
+The Events view reads `GET /internal/v1/events` (scope `read:events`, so the session login and the
+source allowlist apply) and adds no endpoint. The filter form passes `host`, `source`, `kind` and
+`since` (a relative range converted to an epoch time in the browser) straight through. Paging
+follows the `X-Next-Before` and `X-Next-Before-Id` headers the endpoint sets on a full page and
+sends them back as `before` and `before_id`, so rows sharing a timestamp are not skipped. The table
+has a caption, column headers with `scope="col"`, labelled filter fields, and arrow key, Home and
+End navigation between rows using a roving tabindex. Every cell is set with `textContent`, so a host
+name or title containing markup shows as text. Tests: `tests/test_ui_events.py`.
 
 ## Security model
 

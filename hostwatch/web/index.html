@@ -30,9 +30,51 @@
   <section id="app-view" aria-labelledby="app-title" hidden>
     <h2 id="app-title">Status</h2>
     <p id="app-user"></p>
+    <nav aria-label="Views" class="views">
+      <button type="button" id="tab-status" aria-pressed="true">Status</button>
+      <button type="button" id="tab-events" aria-pressed="false">Events</button>
+    </nav>
+    <div id="status-panel">
     <div id="banner" role="status" aria-live="polite" class="banner"><span id="banner-badge" class="badge"></span> <span id="banner-text"></span></div>
     <p id="refresh-note" class="muted"></p>
     <div id="tiles" class="tiles"></div>
+    </div>
+    <div id="events-panel" hidden>
+      <h3 id="events-title">Event timeline</h3>
+      <form id="events-form" class="filters" aria-labelledby="events-title">
+        <label for="f-host">Host</label>
+        <input id="f-host" name="host" type="text" maxlength="128">
+        <label for="f-source">Source</label>
+        <input id="f-source" name="source" type="text" maxlength="64">
+        <label for="f-kind">Kind</label>
+        <input id="f-kind" name="kind" type="text" maxlength="128">
+        <label for="f-since">Time range</label>
+        <select id="f-since" name="since">
+          <option value="3600">Last hour</option>
+          <option value="86400" selected>Last 24 hours</option>
+          <option value="604800">Last 7 days</option>
+          <option value="2592000">Last 30 days</option>
+          <option value="0">All time</option>
+        </select>
+        <button type="submit">Apply filters</button>
+      </form>
+      <p id="events-note" role="status" aria-live="polite" class="muted"></p>
+      <table id="events-table" class="events">
+        <caption>Events, newest first. Use the up and down arrow keys, Home and End to move between rows.</caption>
+        <thead>
+          <tr>
+            <th scope="col">Time</th>
+            <th scope="col">Host</th>
+            <th scope="col">Source</th>
+            <th scope="col">Kind</th>
+            <th scope="col">Severity</th>
+            <th scope="col">Title</th>
+          </tr>
+        </thead>
+        <tbody id="events-body"></tbody>
+      </table>
+      <button type="button" id="events-more" hidden>Load older events</button>
+    </div>
   </section>
 </main>
 </body>

@@ -98,6 +98,83 @@
 
   function doc_refresh_default() { return 15; }
 
+  // Event timeline. Filtering and paging are done by GET /internal/v1/events; the page passes
+  // the filters through and follows the X-Next-Before cursor headers it returns.
+  var EVENT_PAGE = 50;
+  var nextCursor = null;
+
+  function eventParams(cursor) {
+    var q = new URLSearchParams();
+    ["host", "source", "kind"].forEach(function (name) {
+      var v = byId("f-" + name).value.trim();
+      if (v) { q.set(name, v); }
+    });
+    var span = Number(byId("f-since").value);
+    if (span > 0) { q.set("since", String(Date.now() / 1000 - span)); }
+    q.set("limit", String(EVENT_PAGE));
+    if (cursor) { q.set("before", cursor.before); q.set("before_id", cursor.id); }
+    return q.toString();
+  }
+
+  function eventRow(e) {
+    var tr = el("tr");
+    tr.tabIndex = -1;
+    tr.setAttribute("data-severity", String(e.severity));
+    tr.appendChild(el("td", new Date(e.ts * 1000).toLocaleString()));
+    tr.appendChild(el("td", e.host));
+    tr.appendChild(el("td", e.source));
+    tr.appendChild(el("td", e.kind));
+    tr.appendChild(el("td", e.severity, "sev-" + String(e.severity).replace(/[^a-z]/g, "")));
+    tr.appendChild(el("td", e.title));
+    return tr;
+  }
+
+  function loadEvents(append) {
+    var body = byId("events-body");
+    var note = byId("events-note");
+    var cursor = append ? nextCursor : null;
+    fetch("/internal/v1/events?" + eventParams(cursor), { credentials: "same-origin" }).then(function (resp) {
+      if (resp.status === 401) { show(false, ""); return null; }
+      if (!resp.ok) { throw new Error("status " + resp.status); }
+      var before = resp.headers.get("X-Next-Before");
+      var id = resp.headers.get("X-Next-Before-Id");
+      nextCursor = before !== null && id !== null ? { before: before, id: id } : null;
+      return resp.json();
+    }).then(function (rows) {
+      if (!rows) { return; }
+      if (!append) { while (body.firstChild) { body.removeChild(body.firstChild); } }
+      rows.forEach(function (e) { body.appendChild(eventRow(e)); });
+      if (body.firstChild && !append) { body.firstChild.tabIndex = 0; }
+      byId("events-more").hidden = nextCursor === null;
+      note.textContent = body.children.length ? body.children.length + " events shown." : "No events match these filters.";
+    }).catch(function () { note.textContent = "The events could not be loaded."; });
+  }
+
+  function onEventKey(event) {
+    var rows = Array.prototype.slice.call(byId("events-body").children);
+    var i = rows.indexOf(document.activeElement);
+    if (i < 0) { return; }
+    var to = -1;
+    if (event.key === "ArrowDown") { to = Math.min(i + 1, rows.length - 1); }
+    else if (event.key === "ArrowUp") { to = Math.max(i - 1, 0); }
+    else if (event.key === "Home") { to = 0; }
+    else if (event.key === "End") { to = rows.length - 1; }
+    if (to < 0) { return; }
+    event.preventDefault();
+    rows[i].tabIndex = -1;
+    rows[to].tabIndex = 0;
+    rows[to].focus();
+  }
+
+  function selectView(name) {
+    var events = name === "events";
+    byId("status-panel").hidden = events;
+    byId("events-panel").hidden = !events;
+    byId("tab-status").setAttribute("aria-pressed", String(!events));
+    byId("tab-events").setAttribute("aria-pressed", String(events));
+    if (events) { loadEvents(false); }
+  }
+
   function show(signedIn, username) {
     if (!signedIn) { stopRefresh(); }
     byId("login-view").hidden = signedIn;
@@ -141,6 +218,11 @@
   function start() {
     byId("login-form").addEventListener("submit", onLogin);
     byId("logout").addEventListener("click", onLogout);
+    byId("tab-status").addEventListener("click", function () { selectView("status"); });
+    byId("tab-events").addEventListener("click", function () { selectView("events"); });
+    byId("events-form").addEventListener("submit", function (e) { e.preventDefault(); loadEvents(false); });
+    byId("events-more").addEventListener("click", function () { loadEvents(true); });
+    byId("events-body").addEventListener("keydown", onEventKey);
     // An existing session shows the signed-in view; anything else shows the login form.
     fetch("/internal/v1/latest", { credentials: "same-origin" }).then(function (resp) {
       show(resp.ok, resp.ok ? "this session" : "");

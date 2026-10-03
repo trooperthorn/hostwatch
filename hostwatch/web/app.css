@@ -65,4 +65,13 @@ button { background: var(--accent); color: var(--accent-fg); border-color: var(-
 .st-critical { color: var(--crit-text); font-weight: 700; }
 .st-warning { color: var(--warn-text); font-weight: 700; }
 .st-unknown, .st-not_present { color: var(--muted); }
+.views { display: flex; gap: 0.5rem; margin: 0.5rem 0; }
+.views button[aria-pressed="false"] { background: var(--bg); color: var(--fg); border-color: var(--border); }
+.views button[aria-pressed="true"] { text-decoration: underline; }
+.filters { grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); max-width: none; align-items: end; }
+.events { width: 100%; border-collapse: collapse; margin-top: 0.5rem; }
+.events caption { text-align: left; color: var(--muted); padding-bottom: 0.25rem; }
+.events th, .events td { text-align: left; padding: 0.35rem 0.5rem; border-bottom: 1px solid var(--border); vertical-align: top; }
+.sev-critical { color: var(--crit-text); font-weight: 700; }
+.sev-warning { color: var(--warn-text); font-weight: 700; }
 [hidden] { display: none !important; }
