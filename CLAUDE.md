@@ -34,6 +34,13 @@ SolarWinds Orion (API Poller). One image, three roles (`HOSTWATCH_ROLE=all|hub|a
   optional Prometheus `/metrics`, all behind `read:metrics` keys and the Phase 3
   allowlist. **Not yet verified against a real broker, Home Assistant, Orion or
   Prometheus**; see `UNVERIFIED.md`.
+- Phase 6 (power witnesses): code complete and unit-tested, including the exit
+  test in `tests/test_phase6_exit.py`. A read-only NUT client (off unless
+  `HOSTWATCH_NUT_HOST` and `HOSTWATCH_NUT_UPS` are set) raises on-battery,
+  low-battery and on-line events, and the hub reads a Home Assistant smart plug
+  history (token from a file) to classify a witnessed outage as `boot.power_loss`.
+  **Not yet verified against a real UPS, NUT server or Home Assistant**; see
+  `UNVERIFIED.md`.
 - Next: deploy on MediaIn-SVR, confirm all six sources, run the 24h gap test,
   then run the four Phase 2 exit scenarios and the open Phase 3 checks.
 

@@ -118,7 +118,7 @@ agent also reads `<sysfs>/class/watchdog/watchdog0/bootstatus`; the
 `WDIOF_CARDRESET` bit (0x20) is hardware watchdog evidence and the value is recorded in
 `detail.watchdog_bootstatus`. An abrupt end with no other evidence is `unknown_unclean`,
 not a power loss: a power cut and a hang cannot be told apart without a witness, which
-Phase 6 adds. Kinds are never inferred from absence of evidence.
+Phase 6 adds (see Witness-confirmed power loss). Kinds are never inferred from absence of evidence.
 
 Precedence when evidence contradicts, strongest first (`boot.PRECEDENCE`):
 fresh pstore panic record, then watchdog bootstatus `card_reset`, then a
@@ -920,3 +920,13 @@ label Critical and a banner naming it, the banner precedes the tiles in `index.h
 renders the text label and a state class, and the package data in `pyproject.toml` plus the
 Dockerfile install step ship the web assets. Rendering, contrast and the 5-second criterion are
 owner checks recorded in `UNVERIFIED.md`.
+
+## Phase 6 exit test
+
+`tests/test_phase6_exit.py` runs a fake upsd bound to 127.0.0.1 through the NUT collector and the
+threshold engine and asserts `ups.on_battery` then `ups.on_line`. It then delivers the on-battery event
+to the hub, posts an abrupt-end boot event for the same host with a mocked Home Assistant plug history
+that shows an overlapping outage, and asserts a critical `boot.power_loss` event beside the kept
+`boot.unknown_unclean`, with the plug intervals and the UPS event in `detail.power_witness`. A boot
+with no witness configured stays `unknown_unclean`. The real UPS and plug pulls are owner checks in
+`UNVERIFIED.md`.

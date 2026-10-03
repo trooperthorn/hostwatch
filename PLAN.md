@@ -101,6 +101,14 @@ package contains the web assets. Components and labels:
 
 The phase is not done until the browser checks in `UNVERIFIED.md` pass on the listed hosts.
 
+## Phase 6 status
+
+Code complete and unit-tested; not yet verified on hardware. The exit test is
+`tests/test_phase6_exit.py`: a fake upsd outage logs `ups.on_battery`, and a post-outage boot with
+plug witness evidence is classified `power_loss` through the hub, while a boot without a witness
+stays `unknown_unclean`. The owner checks (a real UPS on battery and a real plug pull) are in
+`UNVERIFIED.md`.
+
 ## Phase 0 detail
 
 Run on each host:

@@ -288,6 +288,30 @@ entities kept in the data directory. Host names that differ only in case or punc
 short hash suffix on their device identifier and topics, with a warning in the log. Pool health arrives in a
 later release.
 
+## Power witnesses (Phase 6, off by default)
+
+Two witnesses let an abrupt end be classified as `boot.power_loss` instead of `boot.unknown_unclean`.
+Without them the result is unchanged, and a witness that is missing or unreachable is reported
+unavailable with a reason, never read as proof that no outage happened.
+
+NUT UPS client (agent side). Set `HOSTWATCH_NUT_HOST` and `HOSTWATCH_NUT_UPS`; the port defaults
+to 3493. `HOSTWATCH_NUT_USER` and `HOSTWATCH_NUT_PASSWORD_FILE` are optional and only needed if your
+`upsd` demands a login. The client sends read-only `LIST VAR` requests, never `SET`, `INSTCMD` or
+`FSD`. It stores `ups.status`, battery charge and runtime, input voltage and load as samples and
+raises `ups.on_battery`, `ups.low_battery` and `ups.on_line` events.
+
+Home Assistant smart plug (hub side). Create a long-lived access token in your Home Assistant
+profile, save it to a file readable only by the container user, and mount that file read-only.
+Then set `HOSTWATCH_HA_URL`, `HOSTWATCH_HA_TOKEN_FILE` (the path inside the container) and
+`HOSTWATCH_POWER_WITNESS` as comma separated `host=entity_id` pairs, for example
+`MediaIn-SVR=switch.rack_plug`. The plug must be on the same circuit as the host. The token is read
+from the file at call time and never logged. A period where the plug was unavailable, unknown or
+off that overlaps the window from the host's last heartbeat to its next boot, widened by
+`HOSTWATCH_WITNESS_SKEW_S` (default 120 seconds), counts as evidence. A stored UPS on-battery event
+in the same window counts too. The original boot event is kept and every piece of evidence is in the
+detail of the new `boot.power_loss` event. The exit test is `tests/test_phase6_exit.py`; the real
+plug pull and UPS checks are owner checks listed in `UNVERIFIED.md`.
+
 ## Tests
 
 ```
