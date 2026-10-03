@@ -11,7 +11,7 @@ Current phase: **7 (hardening and release)**, code and documents complete and no
 | Path | Purpose |
 |---|---|
 | `hostwatch/schema.py` | Agent-to-hub wire schema, version 1, with an optional events list |
-| `hostwatch/collectors/` | One module per source: `cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `zfs`, `scrutiny`, `nut`, `truenas` |
+| `hostwatch/collectors/` | One module per source: `cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `zfs`, `scrutiny`, `nut`, `truenas`, `rpi` |
 | `hostwatch/agent.py` | Detect, collect, push to hub; durable outbox while the hub is down; writes the boot heartbeat |
 | `hostwatch/outbox.py` | Durable agent outbox (`outbox.db` in the data directory): batches stay until the hub answers 2xx, 400 and 422 dead-letter the batch, a 5xx never dead-letters and the batch waits with capped backoff, an undecodable row is dead-lettered with its error, a corrupt `outbox.db` is renamed to `outbox.db.corrupt-<timestamp>` and a fresh outbox started, overflow drops the oldest samples first and keeps events, and source progress markers commit in the same transaction as the batch |
 | `hostwatch/events/boot.py` | Heartbeat writer and boot classifier (clean shutdown, agent stopped, watchdog reset from journal messages or the watchdog bootstatus, kernel panic using only pstore records from the configured `HOSTWATCH_PSTORE` root that are newer than the previous boot's start and not already counted in an earlier boot event; shutdown hints come from the journal of the heartbeat's own boot id, unknown_unclean for an abrupt end without a witness, unknown; evidence is ranked by an explicit precedence table and contradictions are reported in the event detail) |
@@ -30,6 +30,8 @@ Current phase: **7 (hardening and release)**, code and documents complete and no
 | `scripts/host-prep.sh` | Phase 0 host check and fixes |
 | `scripts/rapl-access.sh` | Grant RAPL read access to a dedicated group (see its header for the security trade-off) |
 | `deploy/` | Compose file and `.env.example` |
+
+The `rpi` source reads the Raspberry Pi firmware throttled bitmask (default the sysfs `get_throttled` file under `soc:firmware`, or the path in `HOSTWATCH_RPI_THROTTLED_PATH`) and the `cpu-thermal` zone. Under-voltage now is critical, capped or throttled now is a warning, and the has-occurred bits stay a warning until a reboot. On a Pi without the file it is unavailable with the `vcgencmd get_throttled` alternative named, and on any other host it is reported not present. The bit meanings and file location are unconfirmed; see `UNVERIFIED.md`.
 
 ## What Phase 1 does and does not do
 

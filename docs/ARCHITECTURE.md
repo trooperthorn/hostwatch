@@ -1111,3 +1111,9 @@ A state file that cannot be read gives a sample with no value, which is unmeasur
 reported not present only when the zfs kstat directory is readable and empty, or is missing while
 `/proc` is readable. The pool list is a separate group from `raid`, so a host with both md and
 ZFS shows both. Pool state events and the TrueNAS API detail are not part of this slice.
+
+### Raspberry Pi throttling
+
+The `rpi` collector detects a Pi from `<procfs>/device-tree/model` or `<sysfs>/firmware/devicetree/base/model`. It reads the firmware throttled bitmask from `<sysfs>/devices/platform/soc/soc:firmware/get_throttled`, or from the file named by `HOSTWATCH_RPI_THROTTLED_PATH`, and emits one `throttle_flag` sample per decoded bit (under-voltage, frequency capped, throttled and soft temperature limit, each as now and has-occurred), a `throttled_raw` sample and a `soc_temp` sample from the thermal zone of type `cpu-thermal`. A Pi without the bitmask file is unavailable with a reason that names the `vcgencmd get_throttled` alternative, and its flags are never reported as zero. A host whose model files show no Pi is reported not present.
+
+The hub summary adds a `pi_throttling` component: under-voltage now is critical, capped, throttled or soft limit now is a warning, and any has-occurred bit is a warning until a reboot clears it. The SoC temperature joins the temperature list with the CPU thresholds. The `pi` group is optional and appears in `unmeasured` or `not_present` only for hosts whose agent sent an `rpi` row. The Orion, Prometheus and Home Assistant outputs do not yet publish the Pi component separately; it does count toward the overall status.

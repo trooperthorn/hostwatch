@@ -48,11 +48,11 @@ POOL_CRITICAL_STATES = frozenset({"DEGRADED", "FAULTED", "UNAVAIL", "SUSPENDED"}
 # Expected component group -> the source that feeds it. A group whose source is unavailable,
 # stale or has never reported is unmeasured. Pools are optional: they are expected only once the zfs source has a row.
 EXPECTED_GROUPS = {"cpu": "cpu", "memory": "memory", "power": "rapl", "temperatures": "hwmon",
-                   "raid": "mdraid", "pools": "zfs", "disks": "scrutiny", "ups": "nut"}
+                   "raid": "mdraid", "pools": "zfs", "disks": "scrutiny", "ups": "nut", "pi": "rpi"}
 # Groups that are expected only when their source has a row at all. The nut source reports
 # not present when NUT is unconfigured, so a host with no nut row is treated as not using NUT.
 # A host that never reported zfs is likewise not expected to have pools.
-OPTIONAL_GROUPS = frozenset({"ups", "pools"})
+OPTIONAL_GROUPS = frozenset({"ups", "pools", "pi"})
 
 # (warning, critical) thresholds, in the unit of the value. These are defaults
 # chosen for desktop and server parts, not measured limits; see UNVERIFIED.md.
@@ -121,9 +121,10 @@ class HostSummary:
     ups: Component | None = None
     wall_power: Component | None = None
     pools: list[Component] = field(default_factory=list)
+    pi: Component | None = None
 
     def components(self) -> list[Component]:
-        extra = [c for c in (self.ups, self.wall_power) if c is not None]
+        extra = [c for c in (self.ups, self.wall_power, self.pi) if c is not None]
         return [self.cpu, self.memory, self.package_power, *self.temperatures, *self.md_arrays,
                 *self.pools, *self.disks, *extra, *self.sources.values()]
 
@@ -328,6 +329,32 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
         if not names:
             pools.append(comp("truenas_pools", "truenas", [], ""))
 
+    # Raspberry Pi throttling: under-voltage now is critical, capped or throttled now is a warning,
+    # and a has-occurred bit stays a warning until a reboot clears it. SoC temperature joins the
+    # temperature list. A host with no rpi row, or one where it is not present, adds nothing.
+    pi: Component | None = None
+    if "rpi" in src_rows and "rpi" not in absent:
+        flags = {r["labels"].get("flag"): r for r in pick("rpi", "throttle_flag")}
+        pi = comp("pi_throttling", "rpi", list(flags.values()), "")
+        if pi.value is not None:
+            if any(r["value"] is None for r in flags.values()):
+                pi = Component("pi_throttling", None, "", "unknown", "rpi could not decode the throttled bitmask")
+            else:
+                on = {k for k, r in flags.items() if r["value"]}
+                if "under_voltage_now" in on:
+                    pi.value, pi.state, pi.reason = 2.0, "critical", "Raspberry Pi is under-voltage now"
+                elif on & {"freq_capped_now", "throttled_now", "soft_temp_limit_now"}:
+                    pi.value, pi.state = 1.0, "warning"
+                    pi.reason = "Raspberry Pi is capped or throttled now: " + ", ".join(sorted(on))
+                elif on:
+                    pi.value, pi.state = 1.0, "warning"
+                    pi.reason = ("Raspberry Pi has been under-voltage, capped or throttled since boot: "
+                                 + ", ".join(sorted(on)))
+                else:
+                    pi.value, pi.state = 0.0, "ok"
+        for r in pick("rpi", "soc_temp"):
+            temps.append(comp("temp.soc", "rpi", [r], "C", CPU_TEMP_C, {"chip": "rpi", "sensor": "soc"}))
+
     disks: list[Component] = []
     for r in pick("scrutiny", "device_status"):
         lab = {k: r["labels"].get(k, "") for k in ("wwn", "device", "model")}
@@ -391,7 +418,8 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     }
     last_seen = max((r["updated"] for r in src_rows.values()), default=None)
     group_comps = {"cpu": [cpu], "memory": [memory], "power": [power], "temperatures": temps,
-                   "raid": md, "pools": pools, "disks": disks, "ups": [ups] if ups is not None else []}
+                   "raid": md, "pools": pools, "disks": disks, "ups": [ups] if ups is not None else [],
+                   "pi": [pi] if pi is not None else []}
     unmeasured = []
     not_present = []
     for group, source in EXPECTED_GROUPS.items():
@@ -432,4 +460,4 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
     crash_rows = [{"id": e["id"], "kind": e["kind"].split(".", 1)[1], "ts": e["ts"]} for e in crashes]
     return HostSummary(host, now, cpu, memory, power, temps, md, disks, sources, problems,
                        sorted(open_conditions), last_seen, unmeasured, not_present, sorted(gone),
-                       silent, crash_rows, ups, wall, pools)
+                       silent, crash_rows, ups, wall, pools, pi)

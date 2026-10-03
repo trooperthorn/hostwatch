@@ -100,6 +100,7 @@ class Config:
     nut_password_file: str = field(default_factory=lambda: _env("HOSTWATCH_NUT_PASSWORD_FILE", "").strip())
     ha_url: str = field(default_factory=lambda: _env("HOSTWATCH_HA_URL", "").strip())
     ha_token_file: str = field(default_factory=lambda: _env("HOSTWATCH_HA_TOKEN_FILE", "").strip())
+    rpi_throttled_path: str = field(default_factory=lambda: _env("HOSTWATCH_RPI_THROTTLED_PATH", "").strip())
     truenas_url: str = field(default_factory=lambda: _env("HOSTWATCH_TRUENAS_URL", "").strip())
     truenas_api_key_file: str = field(default_factory=lambda: _env("HOSTWATCH_TRUENAS_API_KEY_FILE", "").strip())
     truenas_ca: str = field(default_factory=lambda: _env("HOSTWATCH_TRUENAS_CA", "").strip())
