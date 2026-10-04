@@ -92,7 +92,7 @@ def event_log_script(log_name: str, event_ids: list[int] | None, since: float | 
         f"try {{ $e = @(Get-WinEvent -FilterHashtable @{{{'; '.join(filt)}}} -MaxEvents {count}) }} "
         "catch { if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $e = @() } else { throw } }; "
         "ConvertTo-Json -Compress -Depth 3 -InputObject @($e | ForEach-Object { [ordered]@{ "
-        "id=$_.Id; provider=$_.ProviderName; level=$_.Level; "
+        "id=$_.Id; record=$_.RecordId; provider=$_.ProviderName; level=$_.Level; "
         "time=[DateTimeOffset]::new($_.TimeCreated).ToUnixTimeSeconds(); message=$_.Message } })"
     )
 

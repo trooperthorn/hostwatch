@@ -1209,6 +1209,26 @@ recording fake runner, and `tests/test_windows_seam.py` fails if a real reader i
 protocol of the fan controller service and the PowerShell output shape are unconfirmed on Windows; see
 `UNVERIFIED.md`. No wire schema field changed.
 
+### Windows Event Log boot and crash events
+
+`hostwatch/events/winevent.py` reads the System log through the seam's `EventLogReader` for Kernel-Power 41,
+EventLog 6006 and 6008, BugCheck 1001 and WHEA-Logger records. The `PowerShellEventLogReader` script now also
+returns the record id, an additive key that fakes may omit. `classify_windows_boot()` maps one shutdown's
+records onto the existing `Classification` kinds and `boot_event()` builds the wire event: a BugCheck is
+`kernel_panic`, 41 or 6008 without a BugCheck is `unknown_unclean` (a power cut and a hang cannot be told apart
+without a witness, so it is never `power_loss`), and 6006 alone is `clean_shutdown`. Windows exposes no boot id,
+so the boot id is `win-<epoch seconds of the earliest record>`. Records within 15 minutes of each other form one
+shutdown, and a group is classified only once it has been quiet for 15 minutes, because the BugCheck record can
+arrive after the Kernel-Power one. WHEA records become `hardware_error` events with `table`, `err_type` and
+`err_msg` in the detail, as rasdaemon events have, from source `winevent`.
+
+The bookmark is the time of the newest finished record, stored in `winevent/winevent_bookmark.json` under the
+data directory. Keys of records already reported are stored with `load_classified` and `save_classified` in the
+same directory, so a restart does not repeat an event. State is saved before the events are returned, so a crash
+in between loses events rather than duplicating them. The first read looks back seven days. A log that cannot be
+read makes the source unavailable with the reason. Nothing wires this reader into the agent yet. No wire schema
+field changed. See `UNVERIFIED.md` for the unconfirmed record shapes.
+
 ## Hub validation
 
 `Sample.ts` and `Event.ts` accept only finite numbers. A batch carrying NaN or
