@@ -17,6 +17,20 @@ DOC = ROOT / "docs" / "deploy-truenas.md"
 ENV = {"PATH": "/usr/bin:/bin"}
 
 
+
+def find_bash():
+    """A real bash. On Windows the System32 bash.exe is the WSL launcher, which fails
+    without a distribution installed, so Git Bash is preferred there."""
+    if sys.platform != "win32":
+        return shutil.which("bash")
+    for candidate in (r"C:\Program Files\Git\bin\bash.exe", r"C:\Program Files\Git\usr\bin\bash.exe"):
+        if os.path.exists(candidate):
+            return candidate
+    found = shutil.which("bash")
+    if found and "system32" in found.lower():
+        pytest.skip("only the WSL bash launcher is on PATH")
+    return found
+
 def _parse(text: str) -> dict:
     """Parse the YAML subset the compose file uses: nested maps, scalar lists and scalars."""
     lines = []
@@ -52,7 +66,7 @@ def _parse(text: str) -> dict:
 
 
 def _run(*args, powercap: Path):
-    bash = shutil.which("bash")
+    bash = find_bash()
     assert bash, "bash is required to run the Post Init script test"
     return subprocess.run([bash, SCRIPT.as_posix(), *args], capture_output=True, text=True, timeout=30,
                           env={**ENV, "RAPL_POWERCAP_DIR": powercap.as_posix()})
@@ -170,7 +184,7 @@ def test_pstore_access_dry_run_plans_only_pstore_chgrp_and_chmod(tmp_path):
     pstore = tmp_path / "fake-root" / "sys" / "fs" / "pstore"
     pstore.mkdir(parents=True)
     (pstore / "dmesg-efi_pstore-1").write_text("Panic#1 Part1\n")
-    bash = shutil.which("bash")
+    bash = find_bash()
     assert bash
     result = subprocess.run([bash, PSTORE_SCRIPT.as_posix(), "--dry-run"], capture_output=True, text=True,
                             timeout=30, env={**ENV, "HOSTWATCH_PSTORE_DIR": pstore.as_posix()})
@@ -214,7 +228,7 @@ def test_truenas_postinit_pstore_section_plans_and_checks_modes(tmp_path):
     pstore = tmp_path / "pstore"
     pstore.mkdir()
     (pstore / "dmesg-1").write_text("x")
-    sh = shutil.which("bash")
+    sh = find_bash()
     result = subprocess.run([sh, (ROOT / "deploy" / "truenas" / "rapl-postinit.sh").as_posix(), "--dry-run"],
                             capture_output=True, text=True, timeout=30,
                             env={**ENV, "RAPL_PSTORE_DIR": pstore.as_posix(),
