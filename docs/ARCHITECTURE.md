@@ -1303,3 +1303,39 @@ and `mem_available`, plus the Windows-only `commit_limit` and `commit_used`, fro
 (`AvailableBytes`, `CommitLimit`, `CommittedBytes`). A figure the host does not report is left out. A seam failure
 makes the source unavailable with the reason. No wire schema field changed; the counter shapes are listed in
 `UNVERIFIED.md`.
+
+### Windows disk, Storage Spaces and smartctl collectors
+
+`hostwatch/collectors/win_storage.py` holds two collectors that `build_collectors` adds only on a Windows platform, so
+they never exist on Linux and add no source id that a Linux host reports.
+
+`WinStorageCollector` (source `win_storage`) queries the `root/Microsoft/Windows/Storage` namespace through the seam's
+`CimQuery`. `MSFT_PhysicalDisk` is required: if it fails or returns no disks the source is unavailable with the reason.
+`MSFT_StorageReliabilityCounter`, `MSFT_StoragePool` and `MSFT_VirtualDisk` are optional, since not every host exposes
+them, and a failed query only leaves its samples out. Per physical disk it reports `disk_health` and, from the
+reliability counter with the same `DeviceId`, `temp`, `wear_pct`, `power_on_hours`, `read_errors_uncorrected` and
+`write_errors_uncorrected`. A counter that is missing or null is left out, never reported as zero. It also reports
+`pool_health` (the primordial pool is skipped) and `virtual_disk_health`. Health samples carry a stable `id` label plus
+the `health` and `operational` text Windows reported.
+
+Health uses the 0 ok, 1 warning, 2 critical scale of the truenas `pool_health` metric. The level is the worst of
+`HealthStatus` (0 healthy, 1 warning, 2 unhealthy) and every `OperationalStatus` value that is recognised. OK is 0;
+Stressed, Stopped and In Service (a repair or maintenance in progress) are 1; Degraded, Predictive Failure, Error,
+Non-Recoverable Error, No Contact and Lost Communication are 2, because a degraded pool is critical for md and ZFS too.
+Values the collector does not recognise are ignored, and a subject with no recognised value has a null health, never
+zero. Enum values may arrive as numbers, numeric strings or names.
+
+`WinSmartctlCollector` (source `win_smartctl`) runs `smartctl --scan -j` and then `smartctl -a -j [-d type] <device>`
+for up to 32 devices through the seam's `CommandRunner`, with no shell. Device names and types from the scan are checked
+against a strict pattern before they are used as arguments. It reports `smart_passed` (1 passed, 0 failed, null when
+smartctl gave no verdict), `temp`, `power_on_hours`, `reallocated_sectors` (ATA attribute 5), and for NVMe `wear_pct`
+and `media_errors`. smartctl's exit status is a bit mask that also encodes a failing disk, so the JSON is read whatever
+the status; a disk whose output is not JSON is skipped for that cycle. The source is absent (not just unavailable) only
+when the runner reports that smartctl cannot be started, which is the normal case on a host without it; a timeout or a
+bad answer is unavailable with the reason.
+
+The threshold engine gains one rule for both sources. `winstorage.health_raised` fires when the level of a disk, pool,
+virtual disk or SMART self-assessment rises (warning for 1, critical for 2, and again when 1 becomes 2), and
+`winstorage.health_cleared` fires on return to 0. The rule key uses the metric and the `id` label, so it survives the
+text labels changing, and the state is seeded from stored events like the other rules. A null level neither raises nor
+clears. No wire schema field changed; the class and property assumptions are listed in `UNVERIFIED.md`.

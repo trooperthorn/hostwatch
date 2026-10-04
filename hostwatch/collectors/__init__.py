@@ -20,6 +20,7 @@ from .thermalctl import ThermalctlCollector
 from .truenas import TruenasCollector
 from .win_cpu import WinCpuCollector
 from .win_memory import WinMemoryCollector
+from .win_storage import WinSmartctlCollector, WinStorageCollector
 from .zfs import ZfsCollector
 
 
@@ -28,7 +29,8 @@ def build_collectors(cfg: Config, seam: WindowsSeam | None = None,
     """Build the collectors in gather order. The seam is carried on each collector so Windows
     collectors read through it; the Linux collectors ignore it. On Windows the CPU and memory
     collectors are the seam-backed ones, which keep the source ids `cpu` and `memory`, so no host
-    has two sources with one id. `platform` defaults from `sys.platform`; tests pass it to build
+    has two sources with one id, and the disk collectors `win_storage` and `win_smartctl` are added.
+    `platform` defaults from `sys.platform`; tests pass it to build
     the Windows set on Linux."""
     s, p = cfg.sysfs, cfg.procfs
     windows = (platform or ("windows" if sys.platform == "win32" else "")) == "windows"
@@ -45,6 +47,8 @@ def build_collectors(cfg: Config, seam: WindowsSeam | None = None,
         RpiCollector(s, p, cfg.rpi_throttled_path),
         ThermalctlCollector(s, p, cfg.thermalctl_status),
     ]
+    if windows:
+        built += [WinStorageCollector(s, p), WinSmartctlCollector(s, p)]
     for c in built:
         c.seam = seam
     return built

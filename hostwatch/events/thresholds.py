@@ -20,7 +20,10 @@ Rules:
   source.returned         that source is present and available again
   scrutiny.status_raised  Scrutiny device_status grew above its previous value
   scrutiny.status_cleared device_status returned to 0
-  ups.on_battery          ups.status changed from on line to OB (warning)
+  winstorage.health_raised   a Windows physical disk, Storage Spaces pool, virtual disk or smartctl
+                          self-assessment moved to a worse level (warning or critical)
+  winstorage.health_cleared  that subject returned to healthy
+  ups.on_battery         ups.status changed from on line to OB (warning)
   ups.low_battery         ups.status shows LB (critical)
   ups.on_line             ups.status is OL again after OB or LB
 """
@@ -34,6 +37,7 @@ from typing import Any
 from ..schema import Event, Sample, SourceStatus
 
 SOURCE = "thresholds"
+WIN_HEALTH_METRICS = frozenset({"disk_health", "pool_health", "virtual_disk_health"})
 
 
 class ThresholdEngine:
@@ -71,6 +75,10 @@ class ThresholdEngine:
                 self._sync(s, now, out)
             elif s.source == "scrutiny" and s.metric == "device_status":
                 self._scrutiny(s, now, out)
+            elif s.source == "win_storage" and s.metric in WIN_HEALTH_METRICS:
+                self._win_health(s, int(s.value), now, out)  # type: ignore[arg-type]
+            elif s.source == "win_smartctl" and s.metric == "smart_passed":
+                self._win_health(s, 0 if s.value else 2, now, out)
         self._ups(samples_list, now, out)
         for st in statuses:
             self._source(st, now, out)
@@ -125,6 +133,26 @@ class ThresholdEngine:
                        previous=prev, current=0)
         else:
             self.state[key] = value
+
+    def _win_health(self, s: Sample, level: int, now: float, out: list[Event]) -> None:
+        """Windows disk, Storage Spaces pool, virtual disk and smartctl health on a 0 ok, 1 warning,
+        2 critical scale. The subject is the metric and the stable `id` label, not the text labels,
+        which change when the health does."""
+        subject = s.labels.get("id", "")
+        key = f"winstorage.health|{s.source}.{s.metric}|id={subject}"
+        what = {"pool_health": "Storage Spaces pool", "virtual_disk_health": "virtual disk",
+                "disk_health": "physical disk", "smart_passed": "SMART self-assessment of disk"}[s.metric]
+        was = self.state.get(key)
+        prev = 0 if was is None else int(was)
+        detail = {"labels": dict(s.labels), "previous": prev, "current": level}
+        if level > prev:
+            self._emit(out, key, "winstorage.health_raised", "critical" if level >= 2 else "warning", now,
+                       f"{what} {subject} health is {'critical' if level >= 2 else 'warning'}", level, **detail)
+        elif level == 0 and prev > 0:
+            self._emit(out, key, "winstorage.health_cleared", "info", now,
+                       f"{what} {subject} is healthy again", 0, **detail)
+        else:
+            self.state[key] = level
 
     def _ups(self, samples: list[Sample], now: float, out: list[Event]) -> None:
         """Edges of the ups.status flags. The state is "OL", "OB" or "LB" (LB wins over OB).

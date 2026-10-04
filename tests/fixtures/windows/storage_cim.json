@@ -1,0 +1,51 @@
+{
+  "healthy": {
+    "MSFT_PhysicalDisk": [
+      {"DeviceId": "0", "FriendlyName": "Samsung SSD 980 PRO 1TB", "SerialNumber": "S6B0NX0R", "MediaType": 4, "BusType": 17, "HealthStatus": 0, "OperationalStatus": [2]},
+      {"DeviceId": "1", "FriendlyName": "WDC WD40EFRX-68N32N0", "SerialNumber": "WD-WCC7K1", "MediaType": 3, "BusType": 11, "HealthStatus": 0, "OperationalStatus": 2}
+    ],
+    "MSFT_StorageReliabilityCounter": [
+      {"DeviceId": "0", "Temperature": 41, "Wear": 3, "PowerOnHours": 5120, "ReadErrorsUncorrected": 0, "WriteErrorsUncorrected": 0},
+      {"DeviceId": "1", "Temperature": 33, "Wear": null, "PowerOnHours": "30211", "ReadErrorsUncorrected": 0, "WriteErrorsUncorrected": 0}
+    ],
+    "MSFT_StoragePool": [
+      {"FriendlyName": "Primordial", "IsPrimordial": true, "HealthStatus": 0, "OperationalStatus": [2]},
+      {"FriendlyName": "Tank", "IsPrimordial": false, "HealthStatus": 0, "OperationalStatus": [2]}
+    ],
+    "MSFT_VirtualDisk": [
+      {"FriendlyName": "Media", "HealthStatus": 0, "OperationalStatus": [2]}
+    ]
+  },
+  "warning": {
+    "MSFT_PhysicalDisk": [
+      {"DeviceId": "0", "FriendlyName": "Samsung SSD 980 PRO 1TB", "SerialNumber": "S6B0NX0R", "MediaType": 4, "BusType": 17, "HealthStatus": 1, "OperationalStatus": [2]}
+    ],
+    "MSFT_StorageReliabilityCounter": [
+      {"DeviceId": "0", "Temperature": 70, "Wear": 91, "PowerOnHours": 40000, "ReadErrorsUncorrected": 2, "WriteErrorsUncorrected": 0}
+    ],
+    "MSFT_StoragePool": [],
+    "MSFT_VirtualDisk": []
+  },
+  "degraded_pool": {
+    "MSFT_PhysicalDisk": [
+      {"DeviceId": "1", "FriendlyName": "WDC WD40EFRX-68N32N0", "SerialNumber": "WD-WCC7K1", "MediaType": 3, "BusType": 11, "HealthStatus": 0, "OperationalStatus": [2]},
+      {"DeviceId": "2", "FriendlyName": "WDC WD40EFRX-68N32N0", "SerialNumber": "WD-WCC7K2", "MediaType": 3, "BusType": 11, "HealthStatus": 2, "OperationalStatus": [6, 13]}
+    ],
+    "MSFT_StorageReliabilityCounter": [],
+    "MSFT_StoragePool": [
+      {"FriendlyName": "Tank", "IsPrimordial": false, "HealthStatus": 1, "OperationalStatus": [3]}
+    ],
+    "MSFT_VirtualDisk": [
+      {"FriendlyName": "Media", "HealthStatus": 1, "OperationalStatus": [3, 11]}
+    ]
+  },
+  "missing_counters": {
+    "MSFT_PhysicalDisk": [
+      {"DeviceId": "0", "FriendlyName": "Virtual HD", "SerialNumber": null, "MediaType": 0, "BusType": 1, "HealthStatus": 0, "OperationalStatus": [2]},
+      {"DeviceId": "7", "FriendlyName": "Odd Disk", "SerialNumber": "X", "MediaType": 0, "BusType": 1, "HealthStatus": 5, "OperationalStatus": [0]}
+    ],
+    "MSFT_StorageReliabilityCounter": [
+      {"DeviceId": "0", "Temperature": null, "Wear": null, "PowerOnHours": null, "ReadErrorsUncorrected": null, "WriteErrorsUncorrected": null}
+    ]
+  }
+}

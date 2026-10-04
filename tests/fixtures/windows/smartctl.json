@@ -1,0 +1,33 @@
+{
+  "scan": {
+    "json_format_version": [1, 0],
+    "devices": [
+      {"name": "/dev/sda", "info_name": "/dev/sda", "type": "ata", "protocol": "ATA"},
+      {"name": "/dev/nvme0", "info_name": "/dev/nvme0", "type": "nvme", "protocol": "NVMe"},
+      {"name": "/dev/sdz; rm", "info_name": "x", "type": "ata", "protocol": "ATA"}
+    ]
+  },
+  "sata_ok": {
+    "model_name": "WDC WD40EFRX-68N32N0",
+    "serial_number": "WD-WCC7K1",
+    "smart_status": {"passed": true},
+    "temperature": {"current": 34},
+    "power_on_time": {"hours": 30211},
+    "ata_smart_attributes": {"table": [
+      {"id": 1, "name": "Raw_Read_Error_Rate", "raw": {"value": 0}},
+      {"id": 5, "name": "Reallocated_Sector_Ct", "raw": {"value": 8}}
+    ]}
+  },
+  "nvme_failing": {
+    "model_name": "Samsung SSD 980 PRO 1TB",
+    "serial_number": "S6B0NX0R",
+    "smart_status": {"passed": false},
+    "temperature": {"current": 55},
+    "power_on_time": {"hours": 5120},
+    "nvme_smart_health_information_log": {"percentage_used": 97, "media_errors": 4}
+  },
+  "no_status": {
+    "model_name": "Odd USB Bridge",
+    "serial_number": "U1"
+  }
+}
