@@ -410,6 +410,16 @@ def build_host_summary(store: StoreLike, host: str, now: float, silent_after_s: 
             else:
                 c.reason = FAN_INFORMATIONAL_NOTE
         fans.append(c)
+    # Fan controller headers from thermalctl. The state label comes from the controller: a header
+    # in failsafe is a warning that carries the controller's reasons, because the fan is then being
+    # driven at full speed by design and is not itself broken.
+    for r in pick("thermalctl", "fan"):
+        lab = {"chip": r["labels"].get("chip", "thermalctl"), "sensor": r["labels"].get("sensor", "")}
+        c = comp(f"fan.{_label(lab)}", "thermalctl", [r], "RPM", None, lab)
+        if c.value is not None and r["labels"].get("state") == "failsafe":
+            c.state = "warning"
+            c.reason = "fan controller failsafe: " + (r["labels"].get("reasons") or "no reason given")
+        fans.append(c)
 
     md: list[Component] = []
     for arr in sorted({r["labels"].get("array", "") for r in rows if r["source"] == "mdraid"}):

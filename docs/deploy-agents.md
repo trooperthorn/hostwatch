@@ -72,6 +72,13 @@ reported unavailable with a reason. Because `/proc` is not mounted, the Pi model
 unreadable in the container; the Pi source then stays present and is judged by the throttled
 file, and it is reported not present only when a readable model file names another board.
 
+On a Linux host that runs the thermalctl fan controller, the agent can also report the controller
+status. The `thermalctl` source reads `/run/thermalctl/status.json`, so that directory must be
+visible to the container as a read-only mount (for example `/run/thermalctl:/run/thermalctl:ro`),
+or set `HOSTWATCH_THERMALCTL_STATUS` to another path. A host without the controller reports the
+source as not present, and a controller that has stopped is reported unavailable once its file
+is older than 60 seconds.
+
 ## 3. TrueNAS-SVR
 
 A pool seen by both the kstat and API sources appears once on the hub, at the worse of the two states. The TrueNAS API client does not use proxy environment variables.
