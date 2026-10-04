@@ -13,11 +13,20 @@ Nothing here is verified on a Windows host yet; see `UNVERIFIED.md`.
 from __future__ import annotations
 
 import json
+import os
 import re
+import struct
 from dataclasses import dataclass
 from typing import Any, Protocol, runtime_checkable
 
 DEFAULT_TIMEOUT_S = 30.0
+# A status pipe answers at once or not at all, so it gets a much shorter limit than a PowerShell query.
+DEFAULT_PIPE_TIMEOUT_S = 3.0
+# The one request the reader ever sends. The service documents it as read only: it needs no
+# privilege and has no write path. The framing is a 4 byte little-endian length and a UTF-8 JSON body.
+STATUS_REQUEST_TYPE = "GetStatusReadOnly"
+MAX_FRAME_BYTES = 1024 * 1024
+PIPE_DIR = r"\\.\pipe" + "\\"
 _NAME = re.compile(r"[A-Za-z0-9_.\-/ ]{1,128}")
 _IDENT = re.compile(r"[A-Za-z_][A-Za-z0-9_]{0,63}")
 _PIPE = re.compile(r"[A-Za-z0-9_.\-]{1,128}")
@@ -25,6 +34,10 @@ _PIPE = re.compile(r"[A-Za-z0-9_.\-]{1,128}")
 
 class SeamError(Exception):
     """A seam call failed. The message is safe to show as an unavailable reason."""
+
+
+class PipeAbsentError(SeamError):
+    """The named pipe does not exist, which means its service is not installed or not running."""
 
 
 @dataclass(frozen=True)
@@ -56,8 +69,9 @@ class CimQuery(Protocol):
 
 @runtime_checkable
 class PipeStatusReader(Protocol):
-    def read(self, pipe_name: str) -> dict[str, Any]:
-        """Return the JSON object a status pipe serves. Raises SeamError when it cannot be read."""
+    def read(self, pipe_name: str, timeout_s: float | None = None) -> dict[str, Any]:
+        """Return the JSON object a status pipe serves. Raises PipeAbsentError when the pipe does not
+        exist and SeamError when it cannot be read within the timeout."""
 
 
 @dataclass(frozen=True)
@@ -169,20 +183,88 @@ class PowerShellCimQuery:
         return parse_json_list(run_powershell(self.runner, script, self.timeout_s))
 
 
-class NamedPipeStatusReader:
-    """Read one JSON document from a read-only named pipe. The pipe protocol of the fan
-    controller service is unconfirmed, so this only opens the pipe and reads until it closes."""
+def encode_status_request() -> bytes:
+    """The framed GetStatusReadOnly request, the only bytes the reader ever writes to a pipe."""
+    body = json.dumps({"Type": STATUS_REQUEST_TYPE}).encode("utf-8")
+    return struct.pack("<i", len(body)) + body
 
-    def read(self, pipe_name: str) -> dict[str, Any]:
+
+def _read_exact(stream: Any, count: int) -> bytes:
+    data = b""
+    while len(data) < count:
+        chunk = stream.read(count - len(data))
+        if not chunk:
+            raise SeamError("the status pipe closed before a full reply arrived")
+        data += chunk
+    return data
+
+
+def exchange_status(stream: Any) -> dict[str, Any]:
+    """Send the status request on an open binary stream and return the ReadOnlyStatus object.
+
+    The reply is one length-prefixed JSON response with a Success flag and a ReadOnlyStatus object.
+    A response without that object, or with Success false, is an error, never a partial result."""
+    stream.write(encode_status_request())
+    stream.flush()
+    (length,) = struct.unpack("<i", _read_exact(stream, 4))
+    if length <= 0 or length > MAX_FRAME_BYTES:
+        raise SeamError(f"the status pipe sent an unusable frame length {length}")
+    try:
+        response = json.loads(_read_exact(stream, length).decode("utf-8"))
+    except (ValueError, UnicodeDecodeError) as exc:
+        raise SeamError(f"the status pipe reply was not JSON: {exc}") from exc
+    if not isinstance(response, dict):
+        raise SeamError("the status pipe reply was not a JSON object")
+    if response.get("Success") is not True:
+        detail = str(response.get("Error") or "no detail")[:200]
+        raise SeamError(f"the status pipe reported failure: {detail}")
+    status = response.get("ReadOnlyStatus")
+    if not isinstance(status, dict):
+        raise SeamError("the status pipe reply carried no ReadOnlyStatus object")
+    return status
+
+
+class NamedPipeStatusReader:
+    """Query the read-only status of a service over its named pipe.
+
+    The pipe is first looked up in the pipe directory listing, which does not connect to it, so a
+    service that is not running is reported as PipeAbsentError and never waits. The exchange itself
+    (one GetStatusReadOnly request, one reply) runs on a helper thread so a service that accepts the
+    connection and then says nothing cannot block the agent beyond the timeout. A timed out thread is
+    a daemon and ends when its pipe handle is closed by the service or the process exits."""
+
+    def __init__(self, timeout_s: float = DEFAULT_PIPE_TIMEOUT_S) -> None:
+        self.timeout_s = timeout_s
+
+    def read(self, pipe_name: str, timeout_s: float | None = None) -> dict[str, Any]:
         _check(pipe_name, _PIPE, "pipe name")
+        limit = self.timeout_s if timeout_s is None else timeout_s
         try:
-            with open("\\\\.\\pipe\\" + pipe_name, "r", encoding="utf-8") as pipe:
-                data = json.loads(pipe.read())
-        except (OSError, ValueError) as exc:
-            raise SeamError(f"cannot read pipe {pipe_name}: {exc}") from exc
-        if not isinstance(data, dict):
-            raise SeamError(f"pipe {pipe_name} did not serve a JSON object")
-        return data
+            names = os.listdir(PIPE_DIR)
+        except OSError as exc:
+            raise SeamError(f"cannot list the named pipes: {exc}") from exc
+        if pipe_name not in names:
+            raise PipeAbsentError(f"pipe {pipe_name} does not exist")
+        import threading
+        outcome: dict[str, Any] = {}
+
+        def work() -> None:
+            try:
+                with open(PIPE_DIR + pipe_name, "r+b", buffering=0) as pipe:
+                    outcome["status"] = exchange_status(pipe)
+            except SeamError as exc:
+                outcome["error"] = exc
+            except OSError as exc:
+                outcome["error"] = SeamError(f"cannot read pipe {pipe_name}: {exc}")
+
+        worker = threading.Thread(target=work, name=f"pipe-{pipe_name}", daemon=True)
+        worker.start()
+        worker.join(limit)
+        if worker.is_alive():
+            raise SeamError(f"pipe {pipe_name} did not answer within {limit:g} seconds")
+        if "error" in outcome:
+            raise outcome["error"]
+        return outcome["status"]
 
 
 def real_seam(timeout_s: float = DEFAULT_TIMEOUT_S) -> WindowsSeam:

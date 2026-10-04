@@ -1339,3 +1339,33 @@ virtual disk or SMART self-assessment rises (warning for 1, critical for 2, and 
 `winstorage.health_cleared` fires on return to 0. The rule key uses the metric and the `id` label, so it survives the
 text labels changing, and the state is seeded from stored events like the other rules. A null level neither raises nor
 clears. No wire schema field changed; the class and property assumptions are listed in `UNVERIFIED.md`.
+
+### Windows Thermal Control Suite status
+
+`hostwatch/collectors/win_thermalsuite.py` (source id `win_thermalsuite`, Windows only) reads the status of the
+Thermal Control Suite service through the seam's `PipeStatusReader`. The real `NamedPipeStatusReader` first looks the
+pipe `ThermalControlSuite.Ipc` up in the pipe directory listing, which does not connect, and raises `PipeAbsentError`
+when it is missing. It then opens the pipe and writes exactly one request, the length-prefixed JSON
+`{"Type": "GetStatusReadOnly"}`, which the service documents as having no write path and needing no privilege. It reads
+one length-prefixed reply, checks `Success`, and returns the `ReadOnlyStatus` object. The exchange runs on a helper
+thread with a 3 second timeout (`DEFAULT_PIPE_TIMEOUT_S`), so a service that accepts the connection and never answers
+cannot hold the agent. No setter, override or audit request is ever built.
+
+The accepted payload is the service's read-only status document with `schemaVersion` 1. The collector rejects any other
+version, including a missing or non-integer one, as unavailable with the version in the reason, because the service
+adds fields within a version and raises the number only for a breaking change. The pipe serves PascalCase property
+names and the status file camelCase, so the collector lowers the first letter of every key and accepts both.
+
+It emits `zone_temp`, `zone_load` and `zone_duty` per zone, and for each fan `fan_duty`, `fan` (RPM) and `fan_target`,
+plus a document level `failsafe` count. The fan samples use the `thermalctl` label names: `chip=thermalsuite`,
+`sensor=<fan id>`, `state`, `mode` and `reasons`, with `dry_run`, `firmware_controlled`, `config_error` and `applied`
+added. The state is `failsafe` when a `fan:<id>` or `control:` reason is active or the fan is stalled, then
+`firmware_controlled`, `dry_run` and `active`, so the summary shows a failsafe fan as a warning in the Fans group exactly
+as for `thermalctl`. `fan_duty` carries the applied percentage and has no value when the duty was not applied (dry run) or
+the firmware sets the fan, because the service reports an actual of 0 there that is not a measurement; `fan_target` carries
+the computed duty. The contract has no watts, so no power reading is emitted.
+
+The source is unavailable when the read times out or fails, the payload is not the documented shape, the schema version
+is unknown, the service has not completed a control pass (`passAgeSeconds` is null), or the last pass is more than 60
+seconds old. It is not present only when the pipe does not exist. No wire schema field changed; the new metrics and
+labels are additive. Nothing here is verified against a running service; see `UNVERIFIED.md`.

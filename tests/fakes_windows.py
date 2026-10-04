@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from hostwatch.windows import CommandResult, SeamError, WindowsSeam
+from hostwatch.windows import CommandResult, PipeAbsentError, SeamError, WindowsSeam
 
 FIXTURE = Path(__file__).parent / "fixtures" / "windows" / "seam.json"
 
@@ -44,11 +44,14 @@ class FakePipeStatusReader:
     def __init__(self, pipes: dict[str, dict[str, Any]]) -> None:
         self.pipes, self.calls = pipes, []
 
-    def read(self, pipe_name):
+    def read(self, pipe_name, timeout_s=None):
         self.calls.append(pipe_name)
         if pipe_name not in self.pipes:
-            raise SeamError(f"cannot read pipe {pipe_name}: not found")
-        return dict(self.pipes[pipe_name])
+            raise PipeAbsentError(f"pipe {pipe_name} does not exist")
+        served = self.pipes[pipe_name]
+        if isinstance(served, Exception):
+            raise served
+        return dict(served)
 
 
 class FakeCommandRunner:

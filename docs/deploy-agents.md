@@ -83,9 +83,15 @@ is older than 60 seconds.
 
 A native Windows agent is being built in stages. So far only the platform seam exists in the code:
 the interfaces and PowerShell-backed readers a Windows agent will use, tested with fakes. There is no
-Windows installer or service yet (the Event Log boot and crash reader and the CPU, memory, disk health and smartctl collectors exist in the code but nothing runs them), so nothing needs deploying on Windows and this guide has no
+Windows installer or service yet (the Event Log boot and crash reader and the CPU, memory, disk health, smartctl and Thermal Control Suite collectors exist in the code but nothing runs them), so nothing needs deploying on Windows and this guide has no
 Windows steps. The agent will push the same wire schema to the hub, so the hub settings in step 1 will
 apply unchanged.
+
+When the agent does run on a Windows host that has the Thermal Control Suite service, the
+`win_thermalsuite` source needs no setting and no file mount. It connects to the service pipe
+`ThermalControlSuite.Ipc`, which any local user may query, and asks only for the read-only status.
+A host without the service reports the source as not present, and a service whose last control pass
+is more than 60 seconds old is reported unavailable.
 
 ## 3. TrueNAS-SVR
 

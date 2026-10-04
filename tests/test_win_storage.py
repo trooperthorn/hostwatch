@@ -191,7 +191,7 @@ def test_registered_only_on_windows(tmp_path):
     cfg = Config(data_dir=tmp_path, sysfs=tmp_path / "sys", procfs=tmp_path / "proc")
     seam = seam_for()
     win = build_collectors(cfg, seam, platform="windows")
-    assert [type(c) for c in win[-2:]] == [WinStorageCollector, WinSmartctlCollector]
+    assert [type(c) for c in win[-3:-1]] == [WinStorageCollector, WinSmartctlCollector]
     assert len({c.id for c in win}) == len(win)
     assert all(c.seam is seam for c in win)
     lin = build_collectors(cfg, platform="x86")

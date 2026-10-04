@@ -1,0 +1,72 @@
+{
+  "normal": {
+    "schemaVersion": 1,
+    "timestampUtc": "2026-10-03T12:00:00+00:00",
+    "zones": [
+      {"id": "cpu", "tempC": 51.0, "loadPercent": null, "dutyPercent": 40.0, "reasons": ["Normal"]}
+    ],
+    "fans": [
+      {"id": "f1", "enabled": true, "targetPercent": 40.0, "actualPercent": 38.0, "rpm": 812.0, "stalled": false,
+       "firmwareControlled": false, "configError": false, "applied": true}
+    ],
+    "failSafeReasons": [],
+    "dryRun": false,
+    "passAgeSeconds": 0.4
+  },
+  "failsafe": {
+    "schemaVersion": 1,
+    "timestampUtc": "2026-10-03T12:00:00+00:00",
+    "zones": [
+      {"id": "cpu", "tempC": 51.0, "loadPercent": null, "dutyPercent": 100.0, "reasons": ["PassFailed"]},
+      {"id": "gpu", "tempC": null, "loadPercent": 12.0, "dutyPercent": 100.0, "reasons": ["Missing"]}
+    ],
+    "fans": [
+      {"id": "f1", "enabled": true, "targetPercent": 100.0, "actualPercent": 100.0, "rpm": 1650.0, "stalled": false,
+       "firmwareControlled": false, "configError": false, "applied": true},
+      {"id": "f2", "enabled": true, "targetPercent": 100.0, "actualPercent": 100.0, "rpm": 0.0, "stalled": true,
+       "firmwareControlled": false, "configError": false, "applied": true}
+    ],
+    "failSafeReasons": ["control:PassFailed", "zone:cpu:PassFailed", "zone:gpu:Missing", "fan:f2:Stalled"],
+    "dryRun": false,
+    "passAgeSeconds": 1.2
+  },
+  "dryrun": {
+    "schemaVersion": 1,
+    "timestampUtc": "2026-10-03T12:00:00+00:00",
+    "zones": [
+      {"id": "cpu", "tempC": 48.5, "loadPercent": 20.0, "dutyPercent": 35.0, "reasons": ["Normal"]}
+    ],
+    "fans": [
+      {"id": "f1", "enabled": true, "targetPercent": 35.0, "actualPercent": 0.0, "rpm": 790.0, "stalled": false,
+       "firmwareControlled": false, "configError": false, "applied": false}
+    ],
+    "failSafeReasons": [],
+    "dryRun": true,
+    "passAgeSeconds": 0.3
+  },
+  "firmware": {
+    "schemaVersion": 1,
+    "timestampUtc": "2026-10-03T12:00:00+00:00",
+    "zones": [
+      {"id": "cpu", "tempC": 55.0, "loadPercent": null, "dutyPercent": 50.0, "reasons": ["Normal"]}
+    ],
+    "fans": [
+      {"id": "f1", "enabled": true, "targetPercent": 50.0, "actualPercent": 48.0, "rpm": 900.0, "stalled": false,
+       "firmwareControlled": false, "configError": false, "applied": true},
+      {"id": "f3", "enabled": false, "targetPercent": 0.0, "actualPercent": 0.0, "rpm": 1100.0, "stalled": false,
+       "firmwareControlled": true, "configError": false, "applied": false}
+    ],
+    "failSafeReasons": [],
+    "dryRun": false,
+    "passAgeSeconds": 0.5
+  },
+  "unknown_version": {
+    "schemaVersion": 2,
+    "timestampUtc": "2026-10-03T12:00:00+00:00",
+    "zones": [],
+    "fans": [],
+    "failSafeReasons": [],
+    "dryRun": false,
+    "passAgeSeconds": 0.1
+  }
+}
