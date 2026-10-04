@@ -1197,7 +1197,9 @@ from a named pipe) and `CommandRunner` (a program, an argument list and a timeou
 The real readers use only the standard library. `PowerShellEventLogReader` and `PowerShellCimQuery` build a
 `powershell.exe -NoProfile -NonInteractive` script around `Get-WinEvent` or `Get-CimInstance` that ends in
 `ConvertTo-Json`, run it through the `CommandRunner` with a timeout (30 seconds by default), and parse the
-output. The log name, class name, property names and namespace are checked against a strict pattern and
+output. Every script begins by setting `[Console]::OutputEncoding` to UTF-8, and `SubprocessRunner` captures bytes
+and decodes them as UTF-8 with replacement, so localized event text survives and a stray byte becomes U+FFFD
+instead of failing the cycle. The log name, class name, property names and namespace are checked against a strict pattern and
 event ids and times are formatted as numbers, so a caller value cannot add PowerShell syntax. A log with no
 matching events is an empty list, and any other failure raises `SeamError` with a reason that becomes the
 source's unavailable reason. Process-spawning is imported inside `SubprocessRunner.run`, and no Windows-only

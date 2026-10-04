@@ -18,6 +18,9 @@ from hostwatch.collectors.base import Collector
 from hostwatch.config import Config
 from hostwatch.windows import CommandResult, SeamError
 
+SubprocessRunnerReal = win.SubprocessRunner
+EventReaderReal = win.PowerShellEventLogReader
+
 REAL_CLASSES = ("SubprocessRunner", "PowerShellEventLogReader", "PowerShellCimQuery", "NamedPipeStatusReader")
 
 
@@ -166,3 +169,53 @@ def test_the_guard_really_blocks_real_readers():
 def test_event_log_script_reads_oldest_first_only_when_asked():
     assert "-Oldest" in win.event_log_script("System", [41], None, 50, oldest_first=True)
     assert "-Oldest" not in win.event_log_script("System", [41], None, 50)
+
+
+class _BytesRunner:
+    """A runner that returns what SubprocessRunner would: raw bytes decoded by the seam's decoder."""
+
+    def __init__(self, stdout: bytes) -> None:
+        self.stdout = stdout
+
+    def run(self, args, timeout_s):
+        return CommandResult(0, win.decode_output(self.stdout))
+
+
+def test_localized_utf8_event_text_decodes_correctly():
+    payload = json.dumps([{"id": 41, "message": "Das System wurde neu gestartet: Größe, Übung"},
+                          {"id": 6008, "message": "予期しないシャットダウン"}], ensure_ascii=False)
+    rows = EventReaderReal(_BytesRunner(payload.encode("utf-8"))).read("System")
+    assert rows[0]["message"] == "Das System wurde neu gestartet: Größe, Übung"
+    assert rows[1]["message"] == "予期しないシャットダウン"
+
+
+def test_invalid_bytes_are_replaced_and_the_cycle_continues():
+    raw = b'[{"id": 1, "message": "bad \xff\xfe byte"}]'
+    rows = EventReaderReal(_BytesRunner(raw)).read("System")
+    assert rows == [{"id": 1, "message": "bad \ufffd\ufffd byte"}]
+    assert win.decode_output(None) == ""
+
+
+def test_subprocess_runner_decodes_bytes_with_replacement(monkeypatch):
+    import subprocess
+
+    class Done:
+        returncode, stdout, stderr = 0, b"\xe6\x97\xa5 \xff", b"\xff"
+
+    seen = {}
+
+    def fake_run(args, **kwargs):
+        seen.update(kwargs)
+        return Done()
+
+    monkeypatch.setattr(subprocess, "run", fake_run)
+    result = SubprocessRunnerReal().run(["powershell.exe"], 5)
+    assert result.stdout == "日 \ufffd" and result.stderr == "\ufffd"
+    assert seen["timeout"] == 5 and seen["shell"] is False and "text" not in seen
+
+
+def test_every_script_sets_utf8_output_encoding():
+    scripts = [win.event_log_script("System", None, None, 10), win.event_log_script("System", [41], 5.0, 1, True),
+               win.cim_script("Win32_Processor", None, None), win.cim_script("MSFT_PhysicalDisk", ["A"], "root/x")]
+    for script in scripts:
+        assert script.startswith("[Console]::OutputEncoding = [System.Text.Encoding]::UTF8;")

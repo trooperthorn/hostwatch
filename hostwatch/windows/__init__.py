@@ -87,6 +87,15 @@ class WindowsSeam:
 # constructing a reader. Every caller supplied value is validated or numeric before it is
 # placed in the script text, so a value cannot add PowerShell syntax.
 
+# Every script starts with this so PowerShell writes UTF-8 whatever the console code page is.
+UTF8_PREAMBLE = "[Console]::OutputEncoding = [System.Text.Encoding]::UTF8; "
+
+
+def decode_output(raw: bytes | None) -> str:
+    """Decode PowerShell output as UTF-8. A stray byte becomes U+FFFD and never fails a cycle."""
+    return (raw or b"").decode("utf-8", errors="replace")
+
+
 def _check(value: str, pattern: re.Pattern[str], what: str) -> str:
     if not pattern.fullmatch(value):
         raise SeamError(f"invalid {what}: {value!r}")
@@ -103,7 +112,7 @@ def event_log_script(log_name: str, event_ids: list[int] | None, since: float | 
         filt.append(f"StartTime=[DateTimeOffset]::FromUnixTimeSeconds({int(since)}).LocalDateTime")
     count = max(1, min(int(max_events), 1000))
     return (
-        "$ErrorActionPreference='Stop'; "
+        f"{UTF8_PREAMBLE}$ErrorActionPreference='Stop'; "
         f"try {{ $e = @(Get-WinEvent -FilterHashtable @{{{'; '.join(filt)}}} -MaxEvents {count}{' -Oldest' if oldest_first else ''}) }} "
         "catch { if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $e = @() } else { throw } }; "
         "ConvertTo-Json -Compress -Depth 3 -InputObject @($e | ForEach-Object { [ordered]@{ "
@@ -121,7 +130,7 @@ def cim_script(class_name: str, properties: list[str] | None, namespace: str | N
     if properties:
         names = ",".join(_check(p, _IDENT, "CIM property") for p in properties)
         select = f" | Select-Object {names}"
-    return ("$ErrorActionPreference='Stop'; "
+    return (f"{UTF8_PREAMBLE}$ErrorActionPreference='Stop'; "
             f"ConvertTo-Json -Compress -Depth 3 -InputObject @(Get-CimInstance {' '.join(parts)}{select})")
 
 
@@ -155,13 +164,12 @@ class SubprocessRunner:
     def run(self, args: list[str], timeout_s: float) -> CommandResult:
         import subprocess
         try:
-            done = subprocess.run(args, capture_output=True, text=True, encoding="utf-8",
-                                  errors="replace", timeout=timeout_s, check=False, shell=False)
+            done = subprocess.run(args, capture_output=True, timeout=timeout_s, check=False, shell=False)
         except subprocess.TimeoutExpired as exc:
             raise SeamError(f"{args[0]} timed out after {timeout_s:g} seconds") from exc
         except OSError as exc:
             raise SeamError(f"cannot run {args[0]}: {exc}") from exc
-        return CommandResult(done.returncode, done.stdout, done.stderr)
+        return CommandResult(done.returncode, decode_output(done.stdout), decode_output(done.stderr))
 
 
 class PowerShellEventLogReader:
