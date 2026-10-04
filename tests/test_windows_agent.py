@@ -405,3 +405,15 @@ def test_a_stop_ends_the_normal_flush_between_sends(tmp_path):
     assert hub.batches == [] and host.agent.outbox.depth() == 2
     from hostwatch.agent import SEND_TIMEOUT_S
     assert 0 < SEND_TIMEOUT_S <= 5 and 0 < svc.FINAL_FLUSH_BOUND_S <= 10
+
+
+def test_windows_agent_reports_linux_only_sources_as_not_present(tmp_path):
+    agent = svc.build_agent(agent_cfg(tmp_path), seam())
+    agent.detect()
+    status = {s.source: s for s in agent.status.values()}
+    for source in ("rapl", "hwmon", "mdraid", "zfs", "rpi", "thermalctl"):
+        assert status[source].present is False and status[source].available is False, source
+        assert "not present on Windows" in status[source].reason
+    assert status["cpu"].present is True and status["win_storage"].present is True
+    batch = agent.collect_once()
+    assert not [s for s in batch.samples if s.source in ("rapl", "hwmon", "mdraid", "zfs", "rpi", "thermalctl")]

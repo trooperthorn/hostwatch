@@ -41,6 +41,7 @@ def decode_throttled(raw: int) -> dict[str, bool]:
 
 
 class RpiCollector(Collector):
+    linux_only = True
     id = "rpi"
 
     def __init__(self, sysfs: Path, procfs: Path, throttled_path: str = "") -> None:

@@ -15,6 +15,7 @@ from .base import Collector, read_int, read_text
 
 
 class MdRaidCollector(Collector):
+    linux_only = True
     id = "mdraid"
 
     def _arrays(self):

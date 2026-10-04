@@ -72,6 +72,7 @@ def test_fakes_serve_the_json_fixture():
         seam.pipe.read("Nope")
 
 
+@pytest.mark.real_platform
 def test_detect_platform_reports_windows_without_touching_sysfs(monkeypatch):
     def boom(self, *a, **k):
         raise AssertionError("sysfs or procfs was touched")

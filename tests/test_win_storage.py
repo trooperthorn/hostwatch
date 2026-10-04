@@ -85,7 +85,8 @@ def test_degraded_pool_is_critical_and_in_service_virtual_disk_too():
 def test_missing_reliability_counters_leave_samples_out():
     c = storage("missing_counters")
     samples = c.collect()
-    assert {s.metric for s in samples} == {"disk_health"}
+    assert {s.metric for s in samples} == {"disk_health", "pool_health", "virtual_disk_health"}
+    assert not find(samples, "temp") and not find(samples, "wear_pct")
     h0, h7 = find(samples, "disk_health", id="0")[0], find(samples, "disk_health", id="7")[0]
     assert h0.value == 0
     assert h7.value is None and h7.labels["health"] == "Unknown"  # unrecognised is unknown, never ok
@@ -94,7 +95,8 @@ def test_missing_reliability_counters_leave_samples_out():
 def test_counter_class_failure_does_not_lose_health():
     classes = {"MSFT_PhysicalDisk": CIM["healthy"]["MSFT_PhysicalDisk"]}  # the other classes raise SeamError
     samples = WinStorageCollector(seam=seam_for(classes)).collect()
-    assert [s.metric for s in samples] == ["disk_health", "disk_health"]
+    assert [s.metric for s in samples if s.metric == "disk_health"] == ["disk_health", "disk_health"]
+    assert not find(samples, "temp")
 
 
 def test_seam_failure_is_unavailable_with_reason():
@@ -241,9 +243,32 @@ def test_smart_failure_event_and_seed_survives_restart():
 def test_agent_cycle_carries_samples_and_events(tmp_path):
     cfg = Config(data_dir=tmp_path, sysfs=tmp_path / "sys", procfs=tmp_path / "proc")
     seam = seam_for(CIM["degraded_pool"], results=[CommandResult(0, "x")] * 4)
-    agent = Agent(cfg, seam)
+    agent = Agent(cfg, seam, platform="windows")
     agent.collectors = [c for c in agent.collectors if c.id == "win_storage"]
     agent.seeded = True
     batch = agent.collect_once()
     assert any(e.kind == "winstorage.health_raised" and "Tank" in e.title for e in batch.events)
     assert next(s for s in batch.sources if s.source == "win_storage").available
+
+
+def test_empty_disk_list_is_unavailable_with_a_reason_at_collect_too():
+    c = WinStorageCollector(seam=seam_for({"MSFT_PhysicalDisk": []}))
+    ok_, reason = c.detect()
+    assert ok_ is False and "no physical disks" in reason
+    with pytest.raises(SeamError, match="no physical disks"):
+        c.collect()
+
+
+def test_failed_pool_and_virtual_disk_queries_are_visible_unknowns_with_reasons():
+    classes = {"MSFT_PhysicalDisk": CIM["healthy"]["MSFT_PhysicalDisk"]}  # pool and virtual disk raise SeamError
+    samples = WinStorageCollector(seam=seam_for(classes)).collect()
+    (pool,) = find(samples, "pool_health")
+    (vdisk,) = find(samples, "virtual_disk_health")
+    for s, cls in ((pool, "MSFT_StoragePool"), (vdisk, "MSFT_VirtualDisk")):
+        assert s.value is None and s.labels["health"] == "Unknown"
+        assert cls in s.labels["reason"] and "query failed" in s.labels["reason"]
+
+
+def test_successful_queries_carry_no_failure_sample():
+    samples = storage("healthy").collect()
+    assert not [s for s in samples if "reason" in s.labels]

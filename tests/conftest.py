@@ -19,3 +19,18 @@ def fs(tmp_path):
     sysfs, procfs = tmp_path / "sys", tmp_path / "proc"
     sysfs.mkdir(); procfs.mkdir()
     return sysfs, procfs, write
+
+
+@pytest.fixture(autouse=True)
+def _agent_platform_is_not_the_test_host(request, monkeypatch):
+    """The agent tests build fake Linux trees. Without this, an Agent built on a Windows developer
+    machine detects the platform windows and reports the Linux sources not present. A test that
+    wants the Windows agent passes platform="windows" explicitly."""
+    if request.node.get_closest_marker("real_platform"):
+        return
+    import hostwatch.agent as agent_module
+    monkeypatch.setattr(agent_module, "detect_platform", lambda sysfs=None: "x86")
+
+
+def pytest_configure(config):
+    config.addinivalue_line("markers", "real_platform: use the real detect_platform instead of the Linux stand-in")

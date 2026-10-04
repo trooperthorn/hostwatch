@@ -9,7 +9,7 @@ import pytest
 from test_zfs import H, Agent, Config, Store, build_host_summary
 
 from hostwatch.collectors import build_collectors
-from hostwatch.collectors.thermalctl import STALE_AFTER_S, ThermalctlCollector
+from hostwatch.collectors.thermalctl import FUTURE_SKEW_S, STALE_AFTER_S, ThermalctlCollector, ThermalctlError
 from hostwatch.integrations.summary import group_documents
 
 NOW = 1_000_000.0
@@ -84,7 +84,8 @@ def test_malformed_is_unavailable_not_absent(tmp_path, text):
     c = make(write(tmp_path, text))
     ok, reason = c.detect()
     assert ok is False and reason and c.is_absent() is False
-    assert c.collect() == []
+    with pytest.raises(ThermalctlError):
+        c.collect()
 
 
 def test_stale_timestamp_is_unavailable(tmp_path):
@@ -139,3 +140,35 @@ def test_host_without_controller_reports_present_false(tmp_path):
     (tmp_path / "run").mkdir()
     st = {x.source: x for x in agent.collect_once().sources}["thermalctl"]
     assert st.available is False and st.present is False
+
+
+def test_future_timestamp_beyond_skew_is_stale_with_a_reason(tmp_path):
+    f = write(tmp_path, doc(ts=NOW + FUTURE_SKEW_S + 30))
+    ok, reason = make(f).detect()
+    assert ok is False and "stale" in reason and "future" in reason
+    assert make(write(tmp_path, doc(ts=NOW + FUTURE_SKEW_S - 1))).detect()[0] is True
+
+
+def test_source_that_goes_stale_after_detect_is_unavailable_with_a_reason(tmp_path):
+    f = write(tmp_path, doc())
+    now = [NOW]
+    c = ThermalctlCollector(f.parent, f.parent, str(f), clock=lambda: now[0])
+    assert c.detect()[0] is True
+    now[0] = NOW + STALE_AFTER_S + 10
+    with pytest.raises(ThermalctlError, match="stale"):
+        c.collect()
+
+
+def test_agent_marks_a_collector_that_went_stale_unavailable_with_its_reason(tmp_path):
+    f = write(tmp_path, doc(ts=time.time()))
+    (tmp_path / "sys").mkdir()
+    (tmp_path / "proc").mkdir()
+    data = tmp_path / "data"
+    data.mkdir()
+    agent = Agent(Config(procfs=tmp_path / "proc", sysfs=tmp_path / "sys", data_dir=data, ingest_token="x" * 32,
+                         host_name=H, journal=tmp_path / "j", journal_volatile=tmp_path / "jv",
+                         pstore=tmp_path / "p", scrutiny_url="", thermalctl_status=str(f)))
+    agent.detect()
+    f.write_text(json.dumps(doc(ts=time.time() - STALE_AFTER_S - 30)))
+    st = {x.source: x for x in agent.collect_once().sources}["thermalctl"]
+    assert st.available is False and "stale" in st.reason and st.present is True

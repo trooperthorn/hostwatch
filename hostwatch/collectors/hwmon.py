@@ -18,6 +18,7 @@ INPUT_RE = re.compile(r"^(temp|in|fan|power)(\d+)_input$")
 
 
 class HwmonCollector(Collector):
+    linux_only = True
     id = "hwmon"
 
     def __init__(self, sysfs, procfs, ignore=()) -> None:

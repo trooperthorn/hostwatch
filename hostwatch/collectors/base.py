@@ -25,6 +25,9 @@ class Collector:
     # True for a configured network source that is polled every cycle even after a failure,
     # being unavailable for that cycle only. Local sysfs sources wait for re-detection.
     retry_each_cycle: bool = False
+    # True for a source that reads Linux-only locations (sysfs, procfs, /run). The agent reports it
+    # not present on a Windows host instead of present but unavailable.
+    linux_only: bool = False
 
     def __init__(self, sysfs: Path | None = None, procfs: Path | None = None,
                  seam: WindowsSeam | None = None) -> None:

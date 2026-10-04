@@ -18,6 +18,7 @@ from .base import Collector, read_int, read_text
 
 
 class RaplCollector(Collector):
+    linux_only = True
     id = "rapl"
 
     def __init__(self, *args, **kwargs) -> None:

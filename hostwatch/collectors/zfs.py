@@ -17,6 +17,7 @@ from .base import Collector, read_text
 
 
 class ZfsCollector(Collector):
+    linux_only = True
     id = "zfs"
 
     @property

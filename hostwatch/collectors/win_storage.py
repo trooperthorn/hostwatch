@@ -128,8 +128,22 @@ class WinStorageCollector(Collector):
         except SeamError:
             return []
 
+    def _queried(self, class_name: str, properties: list[str]) -> tuple[list[dict[str, Any]], str]:
+        try:
+            return self.seam.cim.query(class_name, properties, NAMESPACE), ""
+        except SeamError as exc:
+            return [], str(exc)
+
+    def _failed_query(self, metric: str, label: str, class_name: str, why: str):
+        """A pool or virtual disk query that failed is an unknown health with the reason in a label,
+        so a failed query is a visible warning and never reads as healthy."""
+        return self.sample(metric, None, "", id=f"{class_name} query failed", health="Unknown", operational="",
+                           reason=f"{class_name} query failed: {why}", **{label: ""})
+
     def collect(self):
         disks = self.seam.cim.query(DISK_CLASS, DISK_PROPERTIES, NAMESPACE)
+        if not disks:
+            raise SeamError(f"{DISK_CLASS} returned no physical disks")
         counters = {_text(r.get("DeviceId")): r for r in self._optional(COUNTER_CLASS, COUNTER_PROPERTIES)
                     if _text(r.get("DeviceId"))}
         out = []
@@ -151,11 +165,17 @@ class WinStorageCollector(Collector):
                 value = _number(counter.get(prop))
                 if value is not None:
                     out.append(self.sample(metric, value, unit, **labels))
-        for row in self._optional(POOL_CLASS, POOL_PROPERTIES):
+        pools, pool_err = self._queried(POOL_CLASS, POOL_PROPERTIES)
+        if pool_err:
+            out.append(self._failed_query("pool_health", "pool", POOL_CLASS, pool_err))
+        for row in pools:
             if row.get("IsPrimordial") is True or not _text(row.get("FriendlyName")):
                 continue  # the primordial pool holds every unused disk and has no meaningful health
             out.append(self._health_sample("pool_health", "pool", row))
-        for row in self._optional(VDISK_CLASS, VDISK_PROPERTIES):
+        vdisks, vdisk_err = self._queried(VDISK_CLASS, VDISK_PROPERTIES)
+        if vdisk_err:
+            out.append(self._failed_query("virtual_disk_health", "virtual_disk", VDISK_CLASS, vdisk_err))
+        for row in vdisks:
             if _text(row.get("FriendlyName")):
                 out.append(self._health_sample("virtual_disk_health", "virtual_disk", row))
         return out

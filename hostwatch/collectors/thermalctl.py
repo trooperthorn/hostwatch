@@ -13,7 +13,7 @@ failsafe state is shown as a warning) and the reasons label joins the failsafe r
 commas. A value the controller could not measure is a sample with no value, never zero.
 
 The file is unavailable when it cannot be read, is not a JSON object, or its timestamp is
-older than STALE_AFTER_S, because a dead controller leaves its last file behind. It is absent
+older than STALE_AFTER_S or more than FUTURE_SKEW_S in the future, because a dead controller leaves its last file behind. It is absent
 only on positive evidence: the directory that would hold the file is readable and the file is
 missing, or the directory is missing from a readable parent (a host that never ran thermalctl).
 """
@@ -31,6 +31,8 @@ from .base import Collector
 
 DEFAULT_STATUS = "/run/thermalctl/status.json"
 STALE_AFTER_S = 60.0
+# A timestamp this far ahead of the clock cannot be a fresh write, so it counts as stale.
+FUTURE_SKEW_S = 5.0
 CHIP = "thermalctl"
 
 
@@ -38,6 +40,10 @@ def _num(value: object) -> float | None:
     if isinstance(value, bool) or not isinstance(value, int | float):
         return None
     return float(value) if math.isfinite(value) else None
+
+
+class ThermalctlError(Exception):
+    """The status file stopped being usable after detection; the message is the reason."""
 
 
 class ThermalctlCollector(Collector):
@@ -48,6 +54,8 @@ class ThermalctlCollector(Collector):
         super().__init__(sysfs, procfs)
         self.path = Path(status_path.strip() or DEFAULT_STATUS)
         self._clock = clock
+        # The default path is under /run, which Windows does not have; a configured path is honoured.
+        self.linux_only = not status_path.strip()
 
     def _read(self) -> tuple[dict | None, str]:
         try:
@@ -64,6 +72,9 @@ class ThermalctlCollector(Collector):
         if ts is None:
             return None, f"thermalctl status {self.path} has no numeric timestamp"
         age = self._clock() - ts
+        if age < -FUTURE_SKEW_S:
+            return None, (f"thermalctl status {self.path} is stale: its timestamp is {-age:.0f}s in the future, "
+                          "so the clock or the file is wrong")
         if age > STALE_AFTER_S:
             return None, f"thermalctl status {self.path} is stale: written {age:.0f}s ago, the controller may be stopped"
         return doc, ""
@@ -92,9 +103,9 @@ class ThermalctlCollector(Collector):
         return True
 
     def collect(self):
-        doc, _ = self._read()
+        doc, reason = self._read()
         if doc is None:
-            return []
+            raise ThermalctlError(reason)
         out = []
         mode = str(doc.get("mode", ""))
         zones = doc.get("zones")

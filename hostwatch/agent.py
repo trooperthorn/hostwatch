@@ -295,15 +295,20 @@ class Agent:
 
     def detect(self) -> None:
         for c in self.collectors:
-            try:
-                ok, reason = c.detect()
-            except Exception as exc:
-                ok, reason = False, f"detect error: {type(exc).__name__}: {exc}"
+            absent = False
+            if self.platform == "windows" and c.linux_only:
+                # Nothing was probed: these sources read sysfs, procfs or /run, which a Windows host
+                # does not have, so they are not present rather than present but unavailable.
+                ok, reason, absent = False, f"{c.id} reads Linux-only locations and is not present on Windows", True
+            else:
+                try:
+                    ok, reason = c.detect()
+                except Exception as exc:
+                    ok, reason = False, f"detect error: {type(exc).__name__}: {exc}"
             prev = self.status.get(c.id)
             if prev is None or prev.available != ok:
                 log.info("source %s: %s %s", c.id, "available" if ok else "unavailable", reason)
-            absent = False
-            if not ok:
+            if not ok and not absent:
                 try:
                     absent = c.is_absent()
                 except Exception as exc:

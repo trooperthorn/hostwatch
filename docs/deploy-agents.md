@@ -122,6 +122,10 @@ A pool seen by both the kstat and API sources appears once on the hub, at the wo
 Follow `docs/deploy-truenas.md`. Add the TrueNAS-SVR address to `HOSTWATCH_ALLOWED_CLIENTS`
 on the hub and use its own ingest key, as in step 1 above.
 
+## Windows source reporting
+
+A Windows agent reports the Linux-only sources (`rapl`, `hwmon`, `mdraid`, `zfs`, `rpi` and `thermalctl` unless `HOSTWATCH_THERMALCTL_STATUS` is set) as not present, so they never raise an unmeasured warning. `win_storage` is unavailable with a reason when Windows returns no physical disks, and a failed pool or virtual disk query appears as an unknown health sample whose `reason` label says which query failed. A `thermalctl` status stamped in the future by more than 5 seconds, or one that becomes older than 60 seconds after detection, makes that source unavailable with the reason.
+
 ## Windows PowerShell output encoding
 
 The Windows agent runs PowerShell with `-NoProfile -NonInteractive`, sets the console output encoding to UTF-8 at the start of every script, and decodes the output as UTF-8 with replacement. Event text in any language is kept, and an invalid byte appears as a replacement character instead of failing the cycle. No host setting is needed.
