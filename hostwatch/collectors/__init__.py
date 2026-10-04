@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from ..config import Config, parse_sensor_patterns
 from ..truenas.client import TruenasClient
+from ..windows import WindowsSeam
 from .base import Collector
 from .cpu import CpuCollector
 from .hwmon import HwmonCollector
@@ -18,9 +19,11 @@ from .truenas import TruenasCollector
 from .zfs import ZfsCollector
 
 
-def build_collectors(cfg: Config) -> list[Collector]:
+def build_collectors(cfg: Config, seam: WindowsSeam | None = None) -> list[Collector]:
+    """Build the collectors in gather order. The seam is carried on each collector so Windows
+    collectors, added in later slices, read through it; the Linux collectors ignore it."""
     s, p = cfg.sysfs, cfg.procfs
-    return [
+    built = [
         CpuCollector(s, p),
         MemoryCollector(s, p),
         RaplCollector(s, p),
@@ -33,3 +36,6 @@ def build_collectors(cfg: Config) -> list[Collector]:
         RpiCollector(s, p, cfg.rpi_throttled_path),
         ThermalctlCollector(s, p, cfg.thermalctl_status),
     ]
+    for c in built:
+        c.seam = seam
+    return built

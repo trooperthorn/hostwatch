@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 
 from ..schema import Sample
+from ..windows import WindowsSeam
 
 
 class Collector:
@@ -25,9 +26,12 @@ class Collector:
     # being unavailable for that cycle only. Local sysfs sources wait for re-detection.
     retry_each_cycle: bool = False
 
-    def __init__(self, sysfs: Path, procfs: Path) -> None:
+    def __init__(self, sysfs: Path | None = None, procfs: Path | None = None,
+                 seam: WindowsSeam | None = None) -> None:
+        # A Windows collector is built with a seam and needs no sysfs or procfs path.
         self.sysfs = sysfs
         self.procfs = procfs
+        self.seam = seam
 
     def detect(self) -> tuple[bool, str]:
         raise NotImplementedError

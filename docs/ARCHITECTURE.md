@@ -1184,6 +1184,31 @@ Linux (Debian 13 amd64) first. The Raspberry Pi (arm64), TrueNAS SCALE, and a
 native Windows agent follow once the Linux path passes its exit tests. Windows
 agents will push the same `Batch` schema.
 
+### Windows platform seam
+
+`hostwatch/windows/__init__.py` defines four small protocols that every Windows collector reads through, so
+no Windows collector needs a sysfs or procfs path: `EventLogReader` (newest-first events with id, provider,
+level, epoch time and message), `CimQuery` (one dict per CIM instance), `PipeStatusReader` (one JSON object
+from a named pipe) and `CommandRunner` (a program, an argument list and a timeout, never a shell). A
+`WindowsSeam` bundles one of each. `Collector.__init__` takes an optional `seam` and its `sysfs` and
+`procfs` arguments are now optional, `build_collectors(cfg, seam)` and `Agent(cfg, seam)` pass it along, and
+`detect_platform` returns `windows` when `sys.platform` is `win32` before it looks at any path.
+
+The real readers use only the standard library. `PowerShellEventLogReader` and `PowerShellCimQuery` build a
+`powershell.exe -NoProfile -NonInteractive` script around `Get-WinEvent` or `Get-CimInstance` that ends in
+`ConvertTo-Json`, run it through the `CommandRunner` with a timeout (30 seconds by default), and parse the
+output. The log name, class name, property names and namespace are checked against a strict pattern and
+event ids and times are formatted as numbers, so a caller value cannot add PowerShell syntax. A log with no
+matching events is an empty list, and any other failure raises `SeamError` with a reason that becomes the
+source's unavailable reason. Process-spawning is imported inside `SubprocessRunner.run`, and no Windows-only
+module is imported at module import time, so the package imports and is tested on Linux. `real_seam()` builds
+the real set and is called only by the Windows agent entry point, which a later slice adds.
+
+Tests use `tests/fakes_windows.py`, which loads `tests/fixtures/windows/seam.json` into fake readers and a
+recording fake runner, and `tests/test_windows_seam.py` fails if a real reader is constructed. The pipe
+protocol of the fan controller service and the PowerShell output shape are unconfirmed on Windows; see
+`UNVERIFIED.md`. No wire schema field changed.
+
 ## Hub validation
 
 `Sample.ts` and `Event.ts` accept only finite numbers. A batch carrying NaN or

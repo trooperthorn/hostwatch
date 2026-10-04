@@ -79,6 +79,14 @@ or set `HOSTWATCH_THERMALCTL_STATUS` to another path. A host without the control
 source as not present, and a controller that has stopped is reported unavailable once its file
 is older than 60 seconds.
 
+## Windows agents (not deployable yet)
+
+A native Windows agent is being built in stages. So far only the platform seam exists in the code:
+the interfaces and PowerShell-backed readers a Windows agent will use, tested with fakes. There is no
+Windows collector, installer or service yet, so nothing needs deploying on Windows and this guide has no
+Windows steps. The agent will push the same wire schema to the hub, so the hub settings in step 1 will
+apply unchanged.
+
 ## 3. TrueNAS-SVR
 
 A pool seen by both the kstat and API sources appears once on the hub, at the worse of the two states. The TrueNAS API client does not use proxy environment variables.

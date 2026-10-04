@@ -1,0 +1,18 @@
+{
+  "events": {
+    "System": [
+      {"id": 41, "provider": "Microsoft-Windows-Kernel-Power", "level": 1, "time": 1790000000,
+       "message": "The system has rebooted without cleanly shutting down first."},
+      {"id": 6008, "provider": "EventLog", "level": 2, "time": 1789999000,
+       "message": "The previous system shutdown was unexpected."}
+    ]
+  },
+  "cim": {
+    "Win32_OperatingSystem": [
+      {"Caption": "Microsoft Windows 11 Pro", "FreePhysicalMemory": 8000000, "TotalVisibleMemorySize": 16000000}
+    ]
+  },
+  "pipes": {
+    "ThermalControlSvc": {"ts": 1790000000, "zones": []}
+  }
+}

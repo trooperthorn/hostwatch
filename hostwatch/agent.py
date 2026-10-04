@@ -14,6 +14,7 @@ from collections.abc import Callable
 import logging
 import platform as _platform
 import ssl
+import sys
 import threading
 import time
 import uuid
@@ -31,6 +32,7 @@ from .events.rasdaemon import RasdaemonReader
 from .events.thresholds import ThresholdEngine
 from .outbox import OUTBOX_FILE, Outbox
 from .schema import Batch, Event, SourceStatus
+from .windows import WindowsSeam
 
 log = logging.getLogger("hostwatch.agent")
 MAX_QUEUE = 240  # one hour at the default 15s interval
@@ -43,7 +45,10 @@ MAX_SEEN_KEYS = 10000
 EventSource = Callable[[], tuple[SourceStatus, list[Event]]]
 
 
-def detect_platform(sysfs: Path) -> str:
+def detect_platform(sysfs: Path | None = None) -> str:
+    # Checked first so a Windows host never touches sysfs or procfs paths.
+    if sys.platform == "win32":
+        return "windows"
     model = Path("/proc/device-tree/model")
     try:
         if model.read_text().startswith("Raspberry Pi"):
@@ -54,9 +59,10 @@ def detect_platform(sysfs: Path) -> str:
 
 
 class Agent:
-    def __init__(self, cfg: Config) -> None:
+    def __init__(self, cfg: Config, seam: WindowsSeam | None = None) -> None:
         self.cfg = cfg
-        self.collectors = build_collectors(cfg)
+        self.seam = seam
+        self.collectors = build_collectors(cfg, seam)
         self.platform = detect_platform(cfg.sysfs)
         self.status: dict[str, SourceStatus] = {}
         self.outbox = Outbox(cfg.data_dir / OUTBOX_FILE, MAX_QUEUE)
