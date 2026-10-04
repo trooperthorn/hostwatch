@@ -12,6 +12,7 @@ Current phase: **7 (hardening and release)**, code and documents complete and no
 |---|---|
 | `hostwatch/schema.py` | Agent-to-hub wire schema, version 1, with an optional events list |
 | `hostwatch/collectors/` | One module per source: `cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `zfs`, `scrutiny`, `nut`, `truenas`, `rpi`, `thermalctl`, plus the Windows-only `win_cpu`, `win_memory`, `win_storage` (which holds the `win_storage` and `win_smartctl` sources) and `win_thermalsuite` |
+| `hostwatch/windows/service.py`, `deploy/windows/` | The Windows agent run mode (`python -m hostwatch windows run`), the `hostwatch-agent` service host (pywin32 imported lazily) and the install and uninstall scripts |
 | `hostwatch/windows/` | Windows platform seam: protocols for the event log, CIM, a status pipe and a command runner, with real readers that run PowerShell (`Get-WinEvent`, `Get-CimInstance`, `ConvertTo-Json`) under a timeout using only the standard library; tests use the fakes in `tests/fakes_windows.py` and never construct a real reader. `hostwatch/events/winevent.py` classifies Windows boots and crashes from the System event log (Kernel-Power 41, EventLog 6006 and 6008, BugCheck 1001) and turns WHEA-Logger records into `hardware_error` events. `hostwatch/collectors/win_cpu.py` and `win_memory.py` collect CPU utilization and memory on Windows through the seam, replacing the Linux `cpu` and `memory` collectors only when the platform is Windows. `hostwatch/collectors/win_storage.py` adds Windows physical disk, Storage Spaces pool and virtual disk health (with reliability counters when the host exposes them) and optional `smartctl -j` readings, which are absent when smartctl is not installed; a degraded or unhealthy one raises a threshold event. No installer or service exists yet |
 | `hostwatch/agent.py` | Detect, collect, push to hub; durable outbox while the hub is down; writes the boot heartbeat |
 | `hostwatch/outbox.py` | Durable agent outbox (`outbox.db` in the data directory): batches stay until the hub answers 2xx, 400 and 422 dead-letter the batch, a 5xx never dead-letters and the batch waits with capped backoff, an undecodable row is dead-lettered with its error, a corrupt `outbox.db` is renamed to `outbox.db.corrupt-<timestamp>` and a fresh outbox started, overflow drops the oldest samples first and keeps events, and source progress markers commit in the same transaction as the batch |
@@ -430,6 +431,17 @@ start with a message naming the variable. The alternative is an `ignore` line in
 `/etc/sensors.d/` (for example `ignore temp7` inside a `chip "nct6779-*"` block), which hides the
 input from the `sensors` tool; that does not change what the kernel exposes in sysfs, so use the
 hostwatch variable for the agent.
+
+## Windows agent (Phase 8)
+
+A native Windows host runs the agent as the `hostwatch-agent` service, with no container. It is the same agent loop as on Linux, wired to the Windows seam, the Event Log reader and the Windows collectors, and it pushes the unchanged wire schema to a receiver URL. Today that receiver is the hostwatch hub. The destination is only a setting (`HOSTWATCH_HUB_URL`), and it is expected to move to watchpost later, which will ingest this same schema, so nothing agent-side depends on the hub.
+
+```
+python -m hostwatch windows run                # foreground, for a console check
+.\deploy\windows\install.ps1 -HubUrl https://hub.example.lan:8090   # elevated; add -DryRun to preview
+```
+
+The durable outbox lives in `C:/ProgramData/hostwatch` (`HOSTWATCH_DATA_DIR`), so batches survive a restart or a hub outage and replay oldest first. The credential is the same `HOSTWATCH_INGEST_KEY` (a host-bound key, preferred) or `HOSTWATCH_INGEST_TOKEN` as on Linux. The installer reads it as a secure string, never prints it, and writes it to `agent.env` in the data directory with an ACL that grants only SYSTEM and Administrators. The service runs as LocalSystem, starts after boot, restarts after a failure (after 5, 30 and 60 seconds, with the count reset after a day), and on a clean stop makes one last delivery attempt so queued batches are not left behind. The `pywin32` package is declared only as the Windows-marked `windows` extra and is not in `requirements.lock`. None of this has run on a real Windows host yet; see `UNVERIFIED.md`.
 
 ## Web UI
 

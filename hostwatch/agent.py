@@ -59,11 +59,12 @@ def detect_platform(sysfs: Path | None = None) -> str:
 
 
 class Agent:
-    def __init__(self, cfg: Config, seam: WindowsSeam | None = None) -> None:
+    def __init__(self, cfg: Config, seam: WindowsSeam | None = None, platform: str | None = None) -> None:
         self.cfg = cfg
         self.seam = seam
-        self.collectors = build_collectors(cfg, seam)
-        self.platform = detect_platform(cfg.sysfs)
+        # The platform is a parameter so the Windows agent can be built and tested on Linux.
+        self.platform = platform or detect_platform(cfg.sysfs)
+        self.collectors = build_collectors(cfg, seam, platform=self.platform)
         self.status: dict[str, SourceStatus] = {}
         self.outbox = Outbox(cfg.data_dir / OUTBOX_FILE, MAX_QUEUE)
         # None means detection has never run. A numeric zero would compare

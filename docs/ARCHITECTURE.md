@@ -1202,7 +1202,7 @@ event ids and times are formatted as numbers, so a caller value cannot add Power
 matching events is an empty list, and any other failure raises `SeamError` with a reason that becomes the
 source's unavailable reason. Process-spawning is imported inside `SubprocessRunner.run`, and no Windows-only
 module is imported at module import time, so the package imports and is tested on Linux. `real_seam()` builds
-the real set and is called only by the Windows agent entry point, which a later slice adds.
+the real set and is called only by the Windows agent entry point in `hostwatch/windows/service.py`.
 
 Tests use `tests/fakes_windows.py`, which loads `tests/fixtures/windows/seam.json` into fake readers and a
 recording fake runner, and `tests/test_windows_seam.py` fails if a real reader is constructed. The pipe
@@ -1369,3 +1369,35 @@ The source is unavailable when the read times out or fails, the payload is not t
 is unknown, the service has not completed a control pass (`passAgeSeconds` is null), or the last pass is more than 60
 seconds old. It is not present only when the pipe does not exist. No wire schema field changed; the new metrics and
 labels are additive. Nothing here is verified against a running service; see `UNVERIFIED.md`.
+
+### Windows agent run mode and service (Phase 8)
+
+`hostwatch/windows/service.py` builds the Windows agent and hosts it as the `hostwatch-agent` service. `build_agent` constructs the ordinary `Agent` with
+`platform="windows"` (a new optional constructor argument, so the Windows collector set can be built on Linux in tests),
+drops the Linux-only event sources (`pstore`, `rasdaemon`, `journal` and `truenas_alerts`) and registers the
+`WinEventReader` as the `winevent` source. The Linux boot id and heartbeat check is skipped, because Windows boot and
+crash classification comes from the Event Log. The outbox is the same SQLite file in the data directory, by default
+`C:/ProgramData/hostwatch`, and delivery, backoff, dead-lettering and credentials are unchanged: the batch is the same
+wire schema and the bearer is `HOSTWATCH_INGEST_KEY` or `HOSTWATCH_INGEST_TOKEN`.
+
+`python -m hostwatch windows run` (in `cli.py`, which does not open the hub database for this command) loads the
+optional `agent.env` file from the data directory, forces the agent role, validates the configuration and runs the loop
+in the foreground. File values never override variables already set, only `HOSTWATCH_` names are accepted, and a bad
+line is reported by number without printing it.
+
+`AgentHost` runs the agent and, when the loop ends for any reason, makes one more delivery attempt. A failure there is
+logged and the batches stay in the outbox for the next start. The service class is built inside `service_class()` and
+`main()`, which import pywin32 (`win32serviceutil`, `win32service` and `servicemanager`) only when called, so the module
+imports on Linux and the tests never need pywin32. `SvcStop` only sets the stop flag, and `SvcDoRun` returns after the
+flush. An exception ends the process non-zero so the recovery actions restart it. Logs go to a rotating
+`agent.log` in the data directory.
+
+`deploy/windows/install.ps1` creates a venv, installs the checkout with the `windows` extra, writes `agent.env` after
+locking its ACL to SYSTEM and Administrators (by SID), registers the service with `--startup delayed`, sets LocalSystem
+and the restart recovery actions, and starts it. It supports `-DryRun` and asks before acting. `uninstall.ps1` removes
+the service and the venv and keeps the data directory unless `-RemoveData` is given. Tests check the scripts as text
+and with the PowerShell parser when one is present, and never run them.
+
+Destination: the agent only needs a URL that accepts the wire schema. The hostwatch hub and web view are expected to be
+retired in favour of watchpost, which will ingest the same schema, so the agent is kept free of any hub dependency and
+the schema changes only additively. Pointing the agent at watchpost will be a change to `HOSTWATCH_HUB_URL` and the key.

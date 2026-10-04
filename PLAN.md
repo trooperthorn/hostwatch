@@ -172,3 +172,13 @@ capabilities, and writable host mounts are not added.
 
 Exit test on MediaIn-SVR: a watchdog hang, a clean reboot, a power pull, and a
 test-array `mdadm --fail` each produce the correct event. ai-pi is deferred.
+
+## Phase 8 status
+
+Code complete and unit-tested with fakes; not verified on a Windows host. The agent runs as the `hostwatch-agent`
+service or with `python -m hostwatch windows run`, keeps its outbox under `C:/ProgramData/hostwatch`, and pushes the
+unchanged wire schema. The remaining exit test is the Phase 2 scenarios on a real Windows host (see `UNVERIFIED.md`).
+
+The hostwatch hub and web view are expected to be retired in favour of watchpost, which will ingest this same wire
+schema. Agent-side work therefore stays independent of the hub, and the schema changes only additively. When watchpost
+is ready, the Windows agent moves by changing its receiver URL and key.

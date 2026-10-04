@@ -6,8 +6,10 @@
   python -m hostwatch source forget HOST SOURCE
   python -m hostwatch event ack ID
   python -m hostwatch cert bind SUBJECT USER | list | revoke SUBJECT
+  python -m hostwatch windows run [--data-dir DIR] [--env-file FILE]
 
-These commands open the database directly, so they are for someone who already
+These commands open the database directly (except `windows run`, which runs the agent and
+only uses its outbox), so they are for someone who already
 has shell access to the data directory. That is the trust boundary: they are not
 reachable over the network. Passwords are read with getpass on a terminal or one
 line from stdin otherwise, and are never taken from arguments, echoed or logged.
@@ -30,7 +32,7 @@ from . import auth
 from .config import Config
 from .store import Store
 
-COMMANDS = {"user", "key", "cert", "source", "event", "boot", "bootstrap-admin"}
+COMMANDS = {"user", "key", "cert", "source", "event", "boot", "bootstrap-admin", "windows"}
 MIN_PASSWORD_LEN = 12
 
 
@@ -68,6 +70,11 @@ def _parser() -> argparse.ArgumentParser:
     reassess = bootp.add_parser("reassess", help="ask the power witnesses again about an unclean boot")
     reassess.add_argument("host")
     reassess.add_argument("boot_id")
+    win = sub.add_parser("windows", help="run the native Windows agent").add_subparsers(dest="action", required=True)
+    run_win = win.add_parser("run", help="run the agent loop in the foreground with the outbox in the data directory")
+    run_win.add_argument("--data-dir", default=None,
+                         help="agent data directory (default: HOSTWATCH_DATA_DIR or C:/ProgramData/hostwatch)")
+    run_win.add_argument("--env-file", default=None, help="settings file (default: agent.env in the data directory)")
     return p
 
 
@@ -97,6 +104,10 @@ def _fmt(ts: float | None) -> str:
 
 def run(argv: list[str], cfg: Config) -> int:
     args = _parser().parse_args(argv)
+    if args.command == "windows":
+        # The agent keeps its own outbox and never opens the hub database.
+        from .windows.service import run_foreground
+        return run_foreground(args.data_dir, args.env_file)
     store = Store(cfg.data_dir / "hostwatch.db")
     actor = _actor()
     label = args.command + (" " + args.action if getattr(args, "action", None) else "")

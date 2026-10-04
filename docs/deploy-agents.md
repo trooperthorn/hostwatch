@@ -79,15 +79,31 @@ or set `HOSTWATCH_THERMALCTL_STATUS` to another path. A host without the control
 source as not present, and a controller that has stopped is reported unavailable once its file
 is older than 60 seconds.
 
-## Windows agents (not deployable yet)
+## Windows agents
 
-A native Windows agent is being built in stages. So far only the platform seam exists in the code:
-the interfaces and PowerShell-backed readers a Windows agent will use, tested with fakes. There is no
-Windows installer or service yet (the Event Log boot and crash reader and the CPU, memory, disk health, smartctl and Thermal Control Suite collectors exist in the code but nothing runs them), so nothing needs deploying on Windows and this guide has no
-Windows steps. The agent will push the same wire schema to the hub, so the hub settings in step 1 will
-apply unchanged.
+A Windows host runs the native agent as the `hostwatch-agent` service. It is not verified on a real Windows host yet
+(see `UNVERIFIED.md`). It pushes the same wire schema as the other agents, so the hub settings in step 1 apply
+unchanged: create a key bound to the Windows host name with `python -m hostwatch key create --scopes ingest --host <name>`.
+The destination is only the `HOSTWATCH_HUB_URL` setting, and it is expected to move from the hostwatch hub to watchpost
+later, which will ingest the same schema.
 
-When the agent does run on a Windows host that has the Thermal Control Suite service, the
+On the Windows host, from an elevated PowerShell in a checkout of this repository (Python 3.11 or newer is needed):
+
+```
+.\deploy\windows\install.ps1 -HubUrl https://hub.example.lan:8090 -DryRun   # preview, changes nothing
+.\deploy\windows\install.ps1 -HubUrl https://hub.example.lan:8090           # asks, then prompts for the key
+```
+
+`deploy/windows/install.ps1` creates a virtual environment under `C:\Program Files\hostwatch`, installs the package with
+the `windows` extra (which brings in pywin32 on Windows only), writes `C:\ProgramData\hostwatch\agent.env` with an ACL
+limited to SYSTEM and Administrators, registers the service as LocalSystem with restart-on-failure recovery, and starts
+it. The key is read as a secure string and is never printed. The outbox and `agent.log` live in
+`C:\ProgramData\hostwatch`. Stopping the service makes one last delivery attempt, and anything not accepted stays queued
+for the next start. For a console check without the service, run `python -m hostwatch windows run` with the same
+settings in the environment or in `agent.env`. `deploy/windows/uninstall.ps1` removes the service and the virtual
+environment and keeps the data directory unless `-RemoveData` is given.
+
+On a Windows host that has the Thermal Control Suite service, the
 `win_thermalsuite` source needs no setting and no file mount. It connects to the service pipe
 `ThermalControlSuite.Ipc`, which any local user may query, and asks only for the read-only status.
 A host without the service reports the source as not present, and a service whose last control pass
