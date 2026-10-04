@@ -389,3 +389,13 @@ def test_allowlist_with_one_usable_entry_among_useless_ones_passes():
 def test_broadcast_or_multicast_bind_is_refused(bind):
     with pytest.raises(ValueError, match="multicast or broadcast"):
         _cfg(hub_bind=bind, allowed_clients="10.0.0.5").validate()
+
+
+@pytest.mark.parametrize("value", [0, -1, 4.9])
+def test_interval_below_the_minimum_is_refused(value):
+    with pytest.raises(ValueError, match="HOSTWATCH_INTERVAL must be at least 5"):
+        _cfg(interval_s=value).validate()
+
+
+def test_the_minimum_interval_is_accepted():
+    _cfg(interval_s=5.0).validate()

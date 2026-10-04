@@ -288,7 +288,7 @@ from a recorded run, so treat small differences in wording as normal and report 
    `HOSTWATCH_TLS_CERT` and `HOSTWATCH_TLS_KEY` as described below.
 
    Expected: a sign-in form, then a page listing this host with the worst status first. Within a
-   few collection intervals (`HOSTWATCH_INTERVAL`, default 15 seconds) the sources show values or
+   few collection intervals (`HOSTWATCH_INTERVAL`, default 15 seconds, minimum 5) the sources show values or
    an "unavailable" reason; they never show a made-up zero.
 
 ### Troubleshooting

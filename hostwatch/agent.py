@@ -42,6 +42,8 @@ DEAD_LETTER_STATUSES = {400, 422}
 MAX_BACKOFF_S = 300.0
 MAX_SEEN_KEYS = 10000
 
+# A send that is slow must not hold a stop request for long.
+SEND_TIMEOUT_S = 5.0
 EventSource = Callable[[], tuple[SourceStatus, list[Event]]]
 
 
@@ -394,16 +396,28 @@ class Agent:
         self.status["agent"] = SourceStatus(source="agent", available=True, reason="")
         return True
 
-    def flush(self, client: httpx.Client) -> None:
+    def flush(self, client: httpx.Client, deadline: float | None = None, honour_stop: bool = True) -> None:
         """Send queued batches oldest first. A batch leaves the outbox only after
         a 2xx answer. A 400 or 422 can never succeed and is dead-lettered so the
         head is not blocked. Any other failure, including every 5xx, raises and
-        the batch stays queued: those describe the hub, not the batch."""
+        the batch stays queued: those describe the hub, not the batch.
+
+        Each send times out after SEND_TIMEOUT_S seconds. A stop request ends the loop between sends
+        (unless honour_stop is False, as in the final flush), and a monotonic deadline caps the total
+        time. Unsent batches stay in the outbox either way."""
         while (head := self.outbox.peek()) is not None:
+            if honour_stop and self._stop.is_set():
+                return
+            timeout = SEND_TIMEOUT_S
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    raise TimeoutError("delivery time budget used up")
+                timeout = min(timeout, remaining)
             seq, batch = head
             r = client.post(f"{self.cfg.hub_url}/internal/v1/ingest", content=batch.model_dump_json(),
                             headers={"Authorization": f"Bearer {self.cfg.agent_credential}",
-                                     "Content-Type": "application/json"}, timeout=10)
+                                     "Content-Type": "application/json"}, timeout=timeout)
             if r.status_code in DEAD_LETTER_STATUSES:
                 self.outbox.dead_letter(seq, r.status_code)
                 continue

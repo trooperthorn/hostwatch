@@ -84,6 +84,10 @@ def sensor_matches(patterns, chip: str, sensor: str) -> bool:
     return any(fnmatchcase(key, p) for p in patterns)
 
 
+# A shorter collection interval would hammer the host and the receiver, and zero or less would spin.
+MIN_INTERVAL_S = 5.0
+
+
 @dataclass(frozen=True)
 class Config:
     role: str = field(default_factory=lambda: _env("HOSTWATCH_ROLE", "all"))
@@ -173,6 +177,8 @@ class Config:
         parse_sensor_patterns("HOSTWATCH_HWMON_IGNORE", self.hwmon_ignore)
         parse_sensor_patterns("HOSTWATCH_HWMON_CPU_SENSORS", self.hwmon_cpu_sensors)
         parse_sensor_patterns("HOSTWATCH_HWMON_REQUIRED_FANS", self.hwmon_required_fans)
+        if not self.interval_s >= MIN_INTERVAL_S:
+            raise ValueError(f"HOSTWATCH_INTERVAL must be at least {MIN_INTERVAL_S:g} seconds (got {self.interval_s})")
         if self.audit_retention_days < 0:
             raise ValueError("HOSTWATCH_AUDIT_RETENTION_DAYS must be 0 (keep forever) or a positive number of days")
         if self.role not in {"all", "hub", "agent"}:

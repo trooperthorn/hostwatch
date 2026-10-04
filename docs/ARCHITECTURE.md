@@ -1206,6 +1206,14 @@ source's unavailable reason. Process-spawning is imported inside `SubprocessRunn
 module is imported at module import time, so the package imports and is tested on Linux. `real_seam()` builds
 the real set and is called only by the Windows agent entry point in `hostwatch/windows/service.py`.
 
+The service class is built lazily and exposed as the module attribute `HostwatchAgentService` through a module level
+`__getattr__`, because pywin32 loads a registered service by its dotted class string and the module must still
+import without pywin32. `HandleCommandLine` receives that string. `install.ps1` stores `-DataDir` in the service
+parameter `DataDir`, which `service_data_dir()` reads before `HOSTWATCH_DATA_DIR` and the default. `Agent.flush`
+sends with a 5 second timeout, stops between sends once a stop is requested, and takes an optional deadline; the final
+flush in `AgentHost.flush_outbox` uses a 10 second deadline, so a stop is honoured promptly and unsent batches stay in
+the outbox. `Config.validate` rejects a `HOSTWATCH_INTERVAL` below 5 seconds.
+
 Tests use `tests/fakes_windows.py`, which loads `tests/fixtures/windows/seam.json` into fake readers and a
 recording fake runner, and `tests/test_windows_seam.py` fails if a real reader is constructed. The pipe
 protocol of the fan controller service and the PowerShell output shape are unconfirmed on Windows; see

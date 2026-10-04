@@ -98,8 +98,13 @@ On the Windows host, from an elevated PowerShell in a checkout of this repositor
 the `windows` extra (which brings in pywin32 on Windows only), writes `C:\ProgramData\hostwatch\agent.env` with an ACL
 limited to SYSTEM and Administrators, registers the service as LocalSystem with restart-on-failure recovery, and starts
 it. The key is read as a secure string and is never printed. The outbox and `agent.log` live in
-`C:\ProgramData\hostwatch`. Stopping the service makes one last delivery attempt, and anything not accepted stays queued
-for the next start. For a console check without the service, run `python -m hostwatch windows run` with the same
+`C:\ProgramData\hostwatch`, or the folder given with `-DataDir`: the installer records that folder in the service
+parameter `DataDir` under `HKLM\SYSTEM\CurrentControlSet\Services\hostwatch-agent\Parameters`, and the service reads it
+before it looks for `agent.env`. The service is registered with its full class string
+`hostwatch.windows.service.HostwatchAgentService` so pywin32 can load it from the virtual environment. Each send times
+out after 5 seconds, a stop request ends delivery between sends, and the one last delivery attempt on stop is limited to
+10 seconds in total. Anything not accepted stays queued for the next start. `HOSTWATCH_INTERVAL` must be at least 5
+seconds; zero or a negative value is refused at start. For a console check without the service, run `python -m hostwatch windows run` with the same
 settings in the environment or in `agent.env`. `deploy/windows/uninstall.ps1` removes the service and the virtual
 environment and keeps the data directory unless `-RemoveData` is given.
 

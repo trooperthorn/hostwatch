@@ -101,6 +101,12 @@ finally {
 
 Step 'Registering the service'
 Invoke-Native $VenvPython @('-m', 'hostwatch.windows.service', '--startup', 'delayed', 'install')
+Step 'Recording the data folder for the service'
+# The service must know its data folder before it can find agent.env, so the choice is stored as a
+# service parameter that the service reads at start.
+$ParamKey = "HKLM:\SYSTEM\CurrentControlSet\Services\$ServiceName\Parameters"
+if (-not (Test-Path $ParamKey)) { New-Item -Path $ParamKey -Force | Out-Null }
+Set-ItemProperty -Path $ParamKey -Name 'DataDir' -Value $DataDir -Type String
 Invoke-Native 'sc.exe' @('config', $ServiceName, 'obj=', 'LocalSystem')
 Invoke-Native 'sc.exe' @('failure', $ServiceName, 'reset=', '86400', 'actions=', 'restart/5000/restart/30000/restart/60000')
 Invoke-Native 'sc.exe' @('failureflag', $ServiceName, '1')

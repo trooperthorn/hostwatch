@@ -29,6 +29,7 @@ import os
 import re
 import signal
 import sys
+import time
 from collections.abc import Callable, Mapping, MutableMapping
 from pathlib import Path
 from typing import Any
@@ -44,6 +45,17 @@ SERVICE_NAME = "hostwatch-agent"
 SERVICE_DISPLAY_NAME = "hostwatch agent"
 SERVICE_DESCRIPTION = "Collects host health and sends it to the configured hostwatch receiver."
 DEFAULT_DATA_DIR = Path("C:/ProgramData/hostwatch")
+SERVICE_MODULE = "hostwatch.windows.service"
+SERVICE_CLASS_NAME = "HostwatchAgentService"
+# The full dotted class string pywin32 stores in the service registration. It must name a module level
+# attribute, which `__getattr__` below provides without importing pywin32 at import time.
+SERVICE_CLASS_STRING = f"{SERVICE_MODULE}.{SERVICE_CLASS_NAME}"
+# The installer writes the chosen data folder here, and the service reads it before it can find agent.env.
+REGISTRY_PARAMETERS_KEY = r"SYSTEM\CurrentControlSet\Services\hostwatch-agent\Parameters"
+REGISTRY_DATA_DIR_VALUE = "DataDir"
+# The final delivery attempt after a stop request may take this long in total, so the service control
+# manager never has to kill the process. Whatever is not sent stays in the outbox for the next start.
+FINAL_FLUSH_BOUND_S = 10.0
 ENV_FILE_NAME = "agent.env"
 LOG_FILE_NAME = "agent.log"
 # Event sources that read Linux journals and kernel stores. They do not exist on Windows, and the
@@ -96,6 +108,29 @@ def load_env_file(path: Path, environ: MutableMapping[str, str] | None = None) -
     return applied
 
 
+def registry_data_dir(reader: Callable[[str, str], str | None] | None = None) -> Path | None:
+    """The data folder the installer recorded in the service parameters, or None when it is absent. The
+    reader takes a key path and value name and returns the string value or None; the default reads
+    HKEY_LOCAL_MACHINE with winreg, which is imported here so Linux never needs it."""
+    if reader is None:
+        def reader(key: str, name: str) -> str | None:
+            import winreg
+            try:
+                with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, key) as handle:
+                    value, _kind = winreg.QueryValueEx(handle, name)
+            except OSError:
+                return None
+            return value if isinstance(value, str) else None
+    value = reader(REGISTRY_PARAMETERS_KEY, REGISTRY_DATA_DIR_VALUE)
+    return Path(value) if value else None
+
+
+def service_data_dir(reader: Callable[[str, str], str | None] | None = None) -> Path:
+    """The data folder the service uses: the installer's registry parameter, else HOSTWATCH_DATA_DIR,
+    else the default."""
+    return registry_data_dir(reader) or Path(os.environ.get("HOSTWATCH_DATA_DIR") or DEFAULT_DATA_DIR)
+
+
 def build_config(data_dir: str | Path | None = None, env_file: str | Path | None = None) -> Config:
     """The agent Config, read from os.environ after the settings file is loaded. The data directory is
     the argument, else HOSTWATCH_DATA_DIR, else the default. The role is always agent."""
@@ -122,17 +157,18 @@ class AgentHost:
         """Ask the loop to end. It only sets a flag, so a service control handler may call it."""
         self.agent.stop()
 
-    def flush_outbox(self) -> bool:
-        """One last delivery attempt. Batches the receiver does not accept stay queued on disk for the
-        next start, so a failure here loses nothing. Returns True when the outbox is empty."""
+    def flush_outbox(self, bound_s: float = FINAL_FLUSH_BOUND_S) -> bool:
+        """One last delivery attempt, bounded to bound_s seconds in total. Batches the receiver does not
+        accept in time stay queued on disk for the next start, so a failure here loses nothing. Returns
+        True when the outbox is empty."""
         try:
             with self._client_factory() as client:
-                self.agent.flush(client)
+                self.agent.flush(client, deadline=time.monotonic() + bound_s, honour_stop=False)
         except Exception as exc:
             log.warning("final delivery failed (%s); %d batch(es) stay queued for the next start",
                         type(exc).__name__, self.agent.outbox.depth())
             return False
-        return True
+        return self.agent.outbox.depth() == 0
 
     def run(self) -> None:
         """Block until stop() is called, then flush the outbox. The flush also runs if the loop fails."""
@@ -173,6 +209,27 @@ def run_foreground(data_dir: str | None = None, env_file: str | None = None,
     return 0
 
 
+def service_exe_name(prefix: str | Path | None = None) -> str | None:
+    """The pythonservice.exe that belongs to this environment's pywin32, so a venv install does not
+    register the base interpreter's copy. None leaves the choice to pywin32 when the file is absent."""
+    base = Path(sys.prefix if prefix is None else prefix)
+    candidate = base / "Lib" / "site-packages" / "win32" / "pythonservice.exe"
+    return str(candidate) if candidate.is_file() else None
+
+
+_service_class_cache: list[type] = []
+
+
+def __getattr__(name: str):
+    """Module level access to the service class for pywin32, which loads the registered class by its
+    dotted string. The class is built on first use so importing this module never needs pywin32."""
+    if name == SERVICE_CLASS_NAME:
+        if not _service_class_cache:
+            _service_class_cache.append(service_class())
+        return _service_class_cache[0]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+
+
 def service_class():
     """Build the pywin32 service class. pywin32 is imported here so nothing else needs it."""
     import servicemanager
@@ -183,6 +240,7 @@ def service_class():
         _svc_name_ = SERVICE_NAME
         _svc_display_name_ = SERVICE_DISPLAY_NAME
         _svc_description_ = SERVICE_DESCRIPTION
+        _exe_name_ = service_exe_name()
 
         def __init__(self, args):
             super().__init__(args)
@@ -196,7 +254,7 @@ def service_class():
                 self.host.stop()
 
         def SvcDoRun(self):
-            data_dir = Path(os.environ.get("HOSTWATCH_DATA_DIR") or DEFAULT_DATA_DIR)
+            data_dir = service_data_dir()
             try:
                 configure_logging(data_dir, to_file=True)
                 self.host = AgentHost(build_config(data_dir))
@@ -220,13 +278,13 @@ def main(argv: list[str] | None = None) -> int:
     import win32serviceutil
 
     argv = sys.argv if argv is None else argv
-    cls = service_class()
+    cls = getattr(sys.modules[__name__], SERVICE_CLASS_NAME)
     if len(argv) == 1:
         servicemanager.Initialize()
         servicemanager.PrepareToHostSingle(cls)
         servicemanager.StartServiceCtrlDispatcher()
         return 0
-    win32serviceutil.HandleCommandLine(cls, argv=argv)
+    win32serviceutil.HandleCommandLine(cls, serviceClassString=SERVICE_CLASS_STRING, argv=argv)
     return 0
 
 

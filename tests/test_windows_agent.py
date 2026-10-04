@@ -135,7 +135,7 @@ def test_flush_runs_even_when_the_loop_raises(tmp_path):
         def run(self):
             raise RuntimeError("loop failed")
 
-        def flush(self, client):
+        def flush(self, client, **kwargs):
             calls.append("flush")
 
         def stop(self):
@@ -304,3 +304,104 @@ def test_docs_name_real_commands_files_and_no_em_dashes():
     assert "python -m hostwatch windows run" in guide
     assert "pywin32" in (ROOT / "UNVERIFIED.md").read_text(encoding="utf-8")
     assert svc.SERVICE_NAME in guide
+
+
+def test_the_registered_class_string_imports_to_the_service_class(monkeypatch):
+    import importlib
+    import types
+
+    class Framework:
+        def __init__(self, args):
+            self.args = args
+
+    util = types.SimpleNamespace(ServiceFramework=Framework)
+    for name, mod in (("win32serviceutil", util), ("win32service", types.SimpleNamespace()),
+                      ("servicemanager", types.SimpleNamespace())):
+        monkeypatch.setitem(sys.modules, name, mod)
+    monkeypatch.setattr(svc, "_service_class_cache", [])
+    module_name, _, class_name = svc.SERVICE_CLASS_STRING.rpartition(".")
+    cls = getattr(importlib.import_module(module_name), class_name)
+    assert module_name == "hostwatch.windows.service" and issubclass(cls, Framework)
+    assert cls._svc_name_ == svc.SERVICE_NAME and cls.__module__ == module_name
+    with pytest.raises(AttributeError):
+        svc.not_a_service_class  # noqa: B018
+    assert "HandleCommandLine(cls, serviceClassString=SERVICE_CLASS_STRING" in Path(svc.__file__).read_text(encoding="utf-8")
+
+
+def test_service_exe_name_prefers_the_environment_copy(tmp_path):
+    assert svc.service_exe_name(tmp_path) is None
+    exe = tmp_path / "Lib" / "site-packages" / "win32" / "pythonservice.exe"
+    exe.parent.mkdir(parents=True)
+    exe.write_bytes(b"")
+    assert svc.service_exe_name(tmp_path) == str(exe)
+
+
+def test_a_custom_data_dir_round_trips_from_the_install_script_to_the_service(tmp_path, monkeypatch):
+    text = (DEPLOY / "install.ps1").read_text(encoding="utf-8")
+    key = re.search(r'\$ParamKey = "HKLM:[\\]+(.+?)"', text).group(1).replace("$ServiceName", svc.SERVICE_NAME)
+    name = re.search(r"Set-ItemProperty -Path \$ParamKey -Name '(\w+)' -Value \$DataDir", text).group(1)
+    assert (key, name) == (svc.REGISTRY_PARAMETERS_KEY, svc.REGISTRY_DATA_DIR_VALUE)
+    chosen = tmp_path / "custom data"
+    registry = {(key, name): str(chosen)}
+    monkeypatch.delenv("HOSTWATCH_DATA_DIR", raising=False)
+    assert svc.service_data_dir(lambda k, n: registry.get((k, n))) == chosen
+    monkeypatch.setenv("HOSTWATCH_DATA_DIR", str(tmp_path / "env"))
+    assert svc.service_data_dir(lambda k, n: None) == tmp_path / "env"
+    monkeypatch.delenv("HOSTWATCH_DATA_DIR")
+    assert svc.service_data_dir(lambda k, n: None) == svc.DEFAULT_DATA_DIR
+    (chosen).mkdir()
+    (chosen / svc.ENV_FILE_NAME).write_text(f"HOSTWATCH_HUB_URL=http://hub.test\nHOSTWATCH_INGEST_KEY={KEY}\n")
+    monkeypatch.delenv("HOSTWATCH_HUB_URL", raising=False)
+    monkeypatch.delenv("HOSTWATCH_INGEST_KEY", raising=False)
+    cfg = svc.build_config(svc.service_data_dir(lambda k, n: registry.get((k, n))))
+    assert cfg.data_dir == chosen and cfg.hub_url == "http://hub.test"
+
+
+class SlowClient:
+    """A client whose sends wait for their timeout and then fail, like a hub that never answers."""
+
+    def __init__(self) -> None:
+        self.timeouts: list[float] = []
+
+    def post(self, url, content=None, headers=None, timeout=None):
+        import threading
+        self.timeouts.append(timeout)
+        threading.Event().wait(timeout)
+        raise httpx.ReadTimeout("slow")
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+
+def _queue_batches(host, count):
+    host.agent.detect()
+    for _ in range(count):
+        host.agent.safe_cycle()
+    assert host.agent.outbox.depth() == count
+
+
+def test_stop_during_a_slow_send_returns_within_the_bound_and_keeps_the_batch(tmp_path):
+    import time
+    client = SlowClient()
+    host = svc.AgentHost(agent_cfg(tmp_path), seam(), client_factory=lambda: client)
+    _queue_batches(host, 3)
+    host.stop()
+    started = time.monotonic()
+    assert host.flush_outbox(bound_s=0.4) is False
+    assert time.monotonic() - started < 2.0
+    assert host.agent.outbox.depth() == 3
+    assert client.timeouts and all(t <= 0.4 for t in client.timeouts)
+
+
+def test_a_stop_ends_the_normal_flush_between_sends(tmp_path):
+    hub = FakeHub()
+    host = svc.AgentHost(agent_cfg(tmp_path), seam(), client_factory=hub.client)
+    _queue_batches(host, 2)
+    host.stop()
+    host.agent.flush(hub.client())
+    assert hub.batches == [] and host.agent.outbox.depth() == 2
+    from hostwatch.agent import SEND_TIMEOUT_S
+    assert 0 < SEND_TIMEOUT_S <= 5 and 0 < svc.FINAL_FLUSH_BOUND_S <= 10
