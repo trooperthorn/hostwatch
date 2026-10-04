@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import json
 
+import pytest
+
 from fakes_windows import FakeCimQuery, FakeCommandRunner, FakeEventLogReader, FakePipeStatusReader
 
 from hostwatch.events import boot, winevent
@@ -159,3 +161,80 @@ def test_module_imports_no_windows_only_modules():
     tree = ast.parse(Path(winevent.__file__).read_text(encoding="utf-8"))
     names = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     assert not names & {"win32evtlog", "win32api", "winreg", "ctypes", "pywintypes"}
+
+
+def _agent_with_reader(tmp_path, logs, clock):
+    import sqlite3  # noqa: F401
+    from test_outbox import make_cfg
+
+    from hostwatch.agent import Agent
+    agent = Agent(make_cfg(tmp_path))
+    r = WinEventReader(seam_for(logs), tmp_path / "data", clock=clock, markers=agent.outbox)
+    agent.event_sources = {"winevent": r.read}
+    return agent, r
+
+
+def _drain(agent):
+    out = []
+    while (item := agent.outbox.peek()) is not None:
+        out.extend(item[1].events)
+        agent.outbox.ack(item[0])
+    return out
+
+
+def test_failed_send_then_retry_re_emits_the_same_events_once(tmp_path):
+    import sqlite3
+    logs = [whea(19, T0 + i, "A corrected hardware error has occurred.") for i in range(3)]
+    agent, _ = _agent_with_reader(tmp_path, logs, lambda: NOW)
+    real = agent.outbox.enqueue
+    agent.outbox.enqueue = lambda b: (_ for _ in ()).throw(sqlite3.OperationalError("disk full"))
+    assert agent.safe_cycle() is False
+    assert winevent.load_bookmark(tmp_path / "data" / "winevent") is None
+    agent.outbox.enqueue = real
+    assert agent.safe_cycle() is True
+    first = _drain(agent)
+    assert len([e for e in first if e.source == "winevent"]) == 3
+    assert agent.safe_cycle() is True
+    assert [e for e in _drain(agent) if e.source == "winevent"] == []
+
+
+def test_1200_events_are_all_delivered_across_cycles_in_order(tmp_path):
+    logs = [whea(19, T0 + i, "A corrected hardware error has occurred.") for i in range(1200)]
+    agent, _ = _agent_with_reader(tmp_path, logs, lambda: NOW)
+    got = []
+    for _ in range(6):
+        assert agent.safe_cycle() is True
+        got.extend(e for e in _drain(agent) if e.source == "winevent")
+    assert [e.ts for e in got] == [T0 + i for i in range(1200)]
+    assert len({e.dedup_key for e in got}) == 1200
+
+
+def test_capped_read_in_the_reader_alone_advances_only_to_the_newest_returned(tmp_path):
+    logs = [whea(19, T0 + i, "A corrected hardware error has occurred.") for i in range(700)]
+    r = reader(tmp_path, logs)
+    _, first = r.read()
+    assert len(first) == winevent.MAX_EVENTS
+    assert winevent.load_bookmark(tmp_path / "winevent") == T0 + winevent.MAX_EVENTS - 1
+    _, second = r.read()
+    assert [e.ts for e in second] == [T0 + i for i in range(winevent.MAX_EVENTS, 700)]
+
+
+@pytest.mark.parametrize("bad", [NOW + 10 * 86400, float("nan"), float("inf"), 1e300, -5.0, 0])
+def test_corrupt_bookmark_recovers_with_a_lookback(tmp_path, bad, caplog):
+    import logging
+    state = tmp_path / "winevent"
+    state.mkdir()
+    (state / winevent.BOOKMARK_FILE).write_text(json.dumps({"log": "System", "ts": bad}), encoding="utf-8")
+    r = reader(tmp_path, [whea(19, T0, "A corrected hardware error has occurred.")])
+    with caplog.at_level(logging.WARNING, logger="hostwatch.events.winevent"):
+        status, events = r.read()
+        r.read()
+    assert status.available and len(events) == 1
+    assert r.seam.events.calls[0][2] == NOW - winevent.FIRST_RUN_LOOKBACK_S
+    assert len([x for x in caplog.records if "bookmark" in x.getMessage()]) == 1
+    assert winevent.load_bookmark(state) == T0
+
+
+def test_clean_shutdown_then_bugcheck_600s_later_are_two_events(tmp_path):
+    _, events = reader(tmp_path, [el6006(T0), kp41(T0 + 600), bc1001(T0 + 620)]).read()
+    assert [e.kind for e in events] == ["boot.clean_shutdown", "boot.kernel_panic"]

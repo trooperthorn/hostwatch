@@ -116,3 +116,7 @@ A pool seen by both the kstat and API sources appears once on the hub, at the wo
 
 Follow `docs/deploy-truenas.md`. Add the TrueNAS-SVR address to `HOSTWATCH_ALLOWED_CLIENTS`
 on the hub and use its own ingest key, as in step 1 above.
+
+## Windows event log bookmark
+
+The Windows agent keeps its Event Log position in the outbox database (`outbox.db` in the data directory), so the position moves forward only when the batch carrying the events is stored. If a cycle fails, the next cycle reads the same records again. A burst of more than 500 records is delivered over several cycles, oldest first. If the stored position is damaged or lies in the future, the agent logs one warning and reads back seven days; the hub drops repeats by their dedup key, so this does not duplicate events.

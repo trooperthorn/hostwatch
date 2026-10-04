@@ -68,7 +68,7 @@ def build_agent(cfg: Config, seam: WindowsSeam | None = None) -> Agent:
     agent = WindowsAgent(cfg, seam, platform="windows")
     for name in LINUX_ONLY_EVENT_SOURCES:
         agent.event_sources.pop(name, None)
-    agent.event_sources["winevent"] = WinEventReader(seam, cfg.data_dir).read
+    agent.event_sources["winevent"] = WinEventReader(seam, cfg.data_dir, markers=agent.outbox).read
     return agent
 
 

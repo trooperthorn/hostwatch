@@ -19,13 +19,13 @@ class FakeEventLogReader:
     def __init__(self, logs: dict[str, list[dict[str, Any]]]) -> None:
         self.logs, self.calls = logs, []
 
-    def read(self, log_name, event_ids=None, since=None, max_events=100):
+    def read(self, log_name, event_ids=None, since=None, max_events=100, oldest_first=False):
         self.calls.append((log_name, event_ids, since, max_events))
         if log_name not in self.logs:
             raise SeamError(f"no such log: {log_name}")
         found = [e for e in self.logs[log_name]
                  if (not event_ids or e["id"] in event_ids) and (since is None or e["time"] >= since)]
-        return sorted(found, key=lambda e: -e["time"])[:max_events]
+        return sorted(found, key=lambda e: e["time"] if oldest_first else -e["time"])[:max_events]
 
 
 class FakeCimQuery:

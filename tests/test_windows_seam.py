@@ -161,3 +161,8 @@ def test_the_guard_really_blocks_real_readers():
         win.PowerShellCimQuery(FakeCommandRunner())
     with pytest.raises(AssertionError):
         win.real_seam()
+
+
+def test_event_log_script_reads_oldest_first_only_when_asked():
+    assert "-Oldest" in win.event_log_script("System", [41], None, 50, oldest_first=True)
+    assert "-Oldest" not in win.event_log_script("System", [41], None, 50)

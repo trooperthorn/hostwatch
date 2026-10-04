@@ -1222,10 +1222,16 @@ shutdown, and a group is classified only once it has been quiet for 15 minutes, 
 arrive after the Kernel-Power one. WHEA records become `hardware_error` events with `table`, `err_type` and
 `err_msg` in the detail, as rasdaemon events have, from source `winevent`.
 
-The bookmark is the time of the newest finished record, stored in `winevent/winevent_bookmark.json` under the
-data directory. Keys of records already reported are stored with `load_classified` and `save_classified` in the
-same directory, so a restart does not repeat an event. State is saved before the events are returned, so a crash
-in between loses events rather than duplicating them. The first read looks back seven days. A log that cannot be
+The bookmark is the time of the newest finished record. In the agent it and the keys of records already
+reported are staged as outbox markers (`winevent.bookmark` and `winevent.keys`), so they become durable only
+with the batch that carries the events, and a failed cycle re-reads the same records. Without an outbox they are
+files under `winevent/` in the data directory, saved before the events are returned. The read is oldest first
+(`Get-WinEvent -Oldest`) and capped at 500 records. A full window moves the bookmark only to the newest record
+returned and treats that record as the present when settling shutdown groups, so the rest is read next cycle.
+A bookmark that is not finite, not positive or more than five minutes in the future is corrupt: it is logged
+once and replaced by the seven day lookback. A 6006 record closes its shutdown group when the next record is
+more than two minutes later, so a clean shutdown followed by a crash is two events. The first read looks back
+seven days. A log that cannot be
 read makes the source unavailable with the reason. Nothing wires this reader into the agent yet. No wire schema
 field changed. See `UNVERIFIED.md` for the unconfirmed record shapes.
 

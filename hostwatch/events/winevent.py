@@ -15,27 +15,38 @@ told apart without an outside witness.
 The bookmark is the time of the newest record that is finished with, kept in winevent_bookmark.json.
 The keys of records already turned into events are kept with load_classified and save_classified from
 the boot module, in a data directory of their own, so a restart does not repeat an event. State is
-written before the events are returned, so a crash between the two loses events instead of
-duplicating them. A log that cannot be read makes the source unavailable with the reason.
+staged in the agent outbox, so they become durable together with the batch that carries the events. A
+failed cycle discards them and the next cycle reads the same records again. Without an outbox they are
+written to files before the events are returned. A read is oldest first and capped at MAX_EVENTS; a full
+window moves the bookmark only to the newest record returned, and the rest is read next cycle. A bookmark
+that is not finite, not positive or later than now plus CLOCK_SKEW_S is corrupt: it is logged once and
+replaced by the first run lookback. A log that cannot be read makes the source unavailable with the reason.
 """
 
 from __future__ import annotations
 
 import json
+import logging
+import math
 import os
 import time
 from pathlib import Path
 from typing import Any, Callable
 
+from ..outbox import Markers
 from ..schema import Event, SourceStatus
 from ..windows import SeamError, WindowsSeam
 from . import boot
+
+log = logging.getLogger(__name__)
 
 SOURCE = "winevent"
 LOG_NAME = "System"
 KIND = "hardware_error"
 BOOKMARK_FILE = "winevent_bookmark.json"
 STATE_SUBDIR = "winevent"
+BOOKMARK_MARKER = "winevent.bookmark"
+KEYS_MARKER = "winevent.keys"
 
 PROVIDER_POWER = "Microsoft-Windows-Kernel-Power"
 PROVIDER_EVENTLOG = "EventLog"
@@ -49,6 +60,8 @@ READ_IDS = sorted(set(BOOT_IDS) | set(WHEA_IDS))
 SETTLE_S = 900.0
 FIRST_RUN_LOOKBACK_S = 7 * 86400.0
 MAX_EVENTS = 500
+CLOCK_SKEW_S = 300.0
+CLEAN_SPLIT_S = 120.0
 
 
 def _is_boot_record(rec: dict[str, Any]) -> bool:
@@ -115,10 +128,15 @@ def classify_windows_boot(records: list[dict[str, Any]], now: float | None = Non
 
 
 def group_boot_records(records: list[dict[str, Any]], gap_s: float = SETTLE_S) -> list[list[dict[str, Any]]]:
-    """Group boot records whose neighbours are within gap_s of each other, oldest group first."""
+    """Group boot records whose neighbours are within gap_s of each other, oldest group first. A clean
+    shutdown record (6006) closes its group when the next record is more than CLEAN_SPLIT_S later, so a
+    crash that follows a clean shutdown is a separate event and not a contradiction."""
     groups: list[list[dict[str, Any]]] = []
     for rec in sorted(records, key=lambda r: r["time"]):
-        if groups and rec["time"] - groups[-1][-1]["time"] <= gap_s:
+        last = groups[-1][-1] if groups else None
+        closed = (last is not None and last.get("id") == 6006 and last.get("provider") == PROVIDER_EVENTLOG
+                  and rec["time"] - last["time"] > CLEAN_SPLIT_S)
+        if groups and not closed and rec["time"] - groups[-1][-1]["time"] <= gap_s:
             groups[-1].append(rec)
         else:
             groups.append([rec])
@@ -156,7 +174,12 @@ def load_bookmark(state_dir: Path) -> float | None:
         value = json.loads((state_dir / BOOKMARK_FILE).read_text(encoding="utf-8"))["ts"]
     except (OSError, ValueError, KeyError, TypeError):
         return None
-    return float(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None
+    if not isinstance(value, (int, float)) or isinstance(value, bool):
+        return None
+    try:
+        return float(value)
+    except OverflowError:
+        return math.inf
 
 
 def save_bookmark(state_dir: Path, ts: float) -> None:
@@ -167,42 +190,89 @@ def save_bookmark(state_dir: Path, ts: float) -> None:
 
 
 class WinEventReader:
-    def __init__(self, seam: WindowsSeam, data_dir: Path, clock: Callable[[], float] = time.time) -> None:
+    def __init__(self, seam: WindowsSeam, data_dir: Path, clock: Callable[[], float] = time.time,
+                 markers: Markers | None = None) -> None:
+        """With markers (the agent outbox) the bookmark and the classified keys are staged and become
+        durable with the batch that carries the events. Without markers they are saved to files at once."""
         self.seam = seam
         self.state_dir = data_dir / STATE_SUBDIR
         self.clock = clock
+        self.markers = markers
+        self._warned_bookmark = False
+
+    def _load_state(self) -> tuple[float | None, set[str]]:
+        if self.markers is None:
+            return load_bookmark(self.state_dir), boot.load_classified(self.state_dir)
+        raw = self.markers.get(BOOKMARK_MARKER)
+        bookmark: float | None = None
+        if raw is None:
+            bookmark = load_bookmark(self.state_dir)
+        else:
+            try:
+                value = json.loads(raw)
+                if isinstance(value, (int, float)) and not isinstance(value, bool):
+                    bookmark = float(value)
+            except (ValueError, OverflowError):
+                bookmark = math.inf
+        raw_keys = self.markers.get(KEYS_MARKER)
+        if raw_keys is None:
+            return bookmark, boot.load_classified(self.state_dir)
+        try:
+            parsed = json.loads(raw_keys)
+            keys = {k for k in parsed if isinstance(k, str)} if isinstance(parsed, list) else set()
+        except ValueError:
+            keys = set()
+        return bookmark, keys
+
+    def _save_state(self, mark: float, keys: set[str]) -> None:
+        if self.markers is None:
+            boot.save_classified(self.state_dir, keys)
+            save_bookmark(self.state_dir, mark)
+            return
+        self.markers.stage(KEYS_MARKER, json.dumps(sorted(keys)[-boot.MAX_CLASSIFIED:]))
+        self.markers.stage(BOOKMARK_MARKER, json.dumps(mark))
 
     def read(self) -> tuple[SourceStatus, list[Event]]:
         now = self.clock()
-        bookmark = load_bookmark(self.state_dir)
+        bookmark, done = self._load_state()
+        corrupt = False
+        if bookmark is not None and not (math.isfinite(bookmark) and 0 < bookmark <= now + CLOCK_SKEW_S):
+            if not self._warned_bookmark:
+                log.warning("event log bookmark %r is not usable; reading back %d days instead",
+                            bookmark, int(FIRST_RUN_LOOKBACK_S // 86400))
+                self._warned_bookmark = True
+            bookmark, corrupt = None, True
         since = bookmark if bookmark is not None else now - FIRST_RUN_LOOKBACK_S
         try:
-            raw = self.seam.events.read(LOG_NAME, READ_IDS, since, MAX_EVENTS)
+            raw = self.seam.events.read(LOG_NAME, READ_IDS, since, MAX_EVENTS, oldest_first=True)
         except SeamError as exc:
             return SourceStatus(source=SOURCE, available=False,
                                 reason=f"cannot read the {LOG_NAME} event log: {exc}"), []
-        records = [r for r in raw if _valid(r)]
+        capped = len(raw) >= MAX_EVENTS
+        records = sorted((r for r in raw if _valid(r)), key=lambda r: r["time"])
         skipped = len(raw) - len(records)
-        done = boot.load_classified(self.state_dir)
         fresh = [r for r in records if record_key(r) not in done]
         events: list[Event] = []
         new_keys: set[str] = set()
-        for rec in sorted((r for r in fresh if _is_whea_record(r)), key=lambda r: r["time"]):
+        for rec in (r for r in fresh if _is_whea_record(r)):
             events.append(whea_event(rec))
             new_keys.add(record_key(rec))
+        seen = float(records[-1]["time"]) if records else None
+        # A full window may end in the middle of a shutdown, so its newest record stands in for now.
+        horizon = seen if capped and seen is not None else now
         holdback: float | None = None
         for group in group_boot_records([r for r in fresh if _is_boot_record(r)]):
-            if now - group[-1]["time"] < SETTLE_S:
+            if horizon - group[-1]["time"] < SETTLE_S:
                 holdback = group[0]["time"] if holdback is None else min(holdback, group[0]["time"])
                 continue
             events.append(boot.boot_event(classify_windows_boot(group, now), now))
             new_keys.update(record_key(r) for r in group)
-        seen = max((float(r["time"]) for r in records), default=None)
         mark = holdback if holdback is not None else seen
+        if mark is None and corrupt:
+            mark = since
         if mark is not None:
             if holdback is None and bookmark is not None:
                 mark = max(mark, bookmark)
-            boot.save_classified(self.state_dir, done | new_keys)
-            save_bookmark(self.state_dir, mark)
+            self._save_state(mark, done | new_keys)
         reason = f"{skipped} record(s) skipped because they were malformed" if skipped else ""
         return SourceStatus(source=SOURCE, available=True, reason=reason), events

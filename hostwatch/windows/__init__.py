@@ -56,8 +56,9 @@ class CommandRunner(Protocol):
 @runtime_checkable
 class EventLogReader(Protocol):
     def read(self, log_name: str, event_ids: list[int] | None = None, since: float | None = None,
-             max_events: int = 100) -> list[dict[str, Any]]:
-        """Return newest-first events as dicts with id, provider, level, time (epoch seconds) and message."""
+             max_events: int = 100, oldest_first: bool = False) -> list[dict[str, Any]]:
+        """Return events as dicts with id, provider, level, time (epoch seconds) and message, newest first
+        unless oldest_first is set. The cap keeps the first max_events of that order."""
 
 
 @runtime_checkable
@@ -93,7 +94,7 @@ def _check(value: str, pattern: re.Pattern[str], what: str) -> str:
 
 
 def event_log_script(log_name: str, event_ids: list[int] | None, since: float | None,
-                     max_events: int) -> str:
+                     max_events: int, oldest_first: bool = False) -> str:
     _check(log_name, _NAME, "event log name")
     filt = [f"LogName='{log_name}'"]
     if event_ids:
@@ -103,7 +104,7 @@ def event_log_script(log_name: str, event_ids: list[int] | None, since: float | 
     count = max(1, min(int(max_events), 1000))
     return (
         "$ErrorActionPreference='Stop'; "
-        f"try {{ $e = @(Get-WinEvent -FilterHashtable @{{{'; '.join(filt)}}} -MaxEvents {count}) }} "
+        f"try {{ $e = @(Get-WinEvent -FilterHashtable @{{{'; '.join(filt)}}} -MaxEvents {count}{' -Oldest' if oldest_first else ''}) }} "
         "catch { if ($_.FullyQualifiedErrorId -like 'NoMatchingEventsFound*') { $e = @() } else { throw } }; "
         "ConvertTo-Json -Compress -Depth 3 -InputObject @($e | ForEach-Object { [ordered]@{ "
         "id=$_.Id; record=$_.RecordId; provider=$_.ProviderName; level=$_.Level; "
@@ -168,8 +169,8 @@ class PowerShellEventLogReader:
         self.runner, self.timeout_s = runner, timeout_s
 
     def read(self, log_name: str, event_ids: list[int] | None = None, since: float | None = None,
-             max_events: int = 100) -> list[dict[str, Any]]:
-        script = event_log_script(log_name, event_ids, since, max_events)
+             max_events: int = 100, oldest_first: bool = False) -> list[dict[str, Any]]:
+        script = event_log_script(log_name, event_ids, since, max_events, oldest_first)
         return parse_json_list(run_powershell(self.runner, script, self.timeout_s))
 
 
