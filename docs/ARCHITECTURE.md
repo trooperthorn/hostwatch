@@ -1283,3 +1283,23 @@ The hub summary adds a `pi_throttling` component: under-voltage now is critical,
 The `thermalctl` collector reads one JSON file, `/run/thermalctl/status.json` by default or the path in `HOSTWATCH_THERMALCTL_STATUS`, which the thermalctl service in the thermal-control-linux repo writes atomically each cycle. It emits `zone_temp` (C) and `zone_load` (%) per zone with a `zone` label, and for each header a `fan_duty` (%) and a `fan` (RPM) sample. The header samples carry the labels `chip=thermalctl`, `sensor=<header id>`, `state`, `mode` and `reasons` (the failsafe reasons joined with commas), so they land in the Fans group beside the hwmon fans without any schema change. A value the controller could not measure is a sample with no value, never zero.
 
 The source is unavailable, with a reason, when the file cannot be read, is not a JSON object, has no numeric timestamp, or its timestamp is more than 60 seconds old, since a stopped controller leaves its last file behind. It is reported not present only on positive evidence: the directory that would hold the file is readable and the file is missing, or the directory is missing from a readable parent, which is the normal case on a host that never ran thermalctl. The summary shows a header whose state label is `failsafe` as a warning with the controller's reasons; the controller drives the fan at full speed in that state, so it is a warning and not a fan fault.
+
+### Windows CPU and memory collectors
+
+`hostwatch/collectors/win_cpu.py` and `win_memory.py` read through the seam's `CimQuery` and keep the source ids `cpu`
+and `memory` and the metric names of the Linux collectors, so the hub and the dashboard need no change. On a Windows
+platform `build_collectors` builds them in place of the Linux pair, because two sources must not share an id; on any
+other platform they are not built. The platform comes from the new optional `platform` argument, which defaults from
+`sys.platform`.
+
+`WinCpuCollector` reads the `_Total` instance of `Win32_PerfRawData_PerfOS_Processor`. Its counters are cumulative, so
+`utilization_pct` is 100 times one minus the change in `PercentIdleTime` over the change in `Timestamp_Sys100NS`,
+clamped to 0 to 100. The first call returns nothing. A counter that goes backwards (a wrap or a reset) or a timestamp
+that does not advance returns nothing for that cycle and becomes the new baseline, since a guessed value would be
+worse than none. 64-bit counters may arrive from PowerShell JSON as strings and are converted.
+
+`WinMemoryCollector` reports `mem_total` from `Win32_OperatingSystem.TotalVisibleMemorySize` (KiB converted to bytes),
+and `mem_available`, plus the Windows-only `commit_limit` and `commit_used`, from `Win32_PerfFormattedData_PerfOS_Memory`
+(`AvailableBytes`, `CommitLimit`, `CommittedBytes`). A figure the host does not report is left out. A seam failure
+makes the source unavailable with the reason. No wire schema field changed; the counter shapes are listed in
+`UNVERIFIED.md`.

@@ -83,7 +83,7 @@ is older than 60 seconds.
 
 A native Windows agent is being built in stages. So far only the platform seam exists in the code:
 the interfaces and PowerShell-backed readers a Windows agent will use, tested with fakes. There is no
-Windows collector, installer or service yet (the Event Log boot and crash reader exists in the code but nothing runs it), so nothing needs deploying on Windows and this guide has no
+Windows installer or service yet (the Event Log boot and crash reader and the CPU and memory collectors exist in the code but nothing runs them), so nothing needs deploying on Windows and this guide has no
 Windows steps. The agent will push the same wire schema to the hub, so the hub settings in step 1 will
 apply unchanged.
 

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import sys
+
 from ..config import Config, parse_sensor_patterns
 from ..truenas.client import TruenasClient
 from ..windows import WindowsSeam
@@ -16,16 +18,23 @@ from .rpi import RpiCollector
 from .scrutiny import ScrutinyCollector
 from .thermalctl import ThermalctlCollector
 from .truenas import TruenasCollector
+from .win_cpu import WinCpuCollector
+from .win_memory import WinMemoryCollector
 from .zfs import ZfsCollector
 
 
-def build_collectors(cfg: Config, seam: WindowsSeam | None = None) -> list[Collector]:
+def build_collectors(cfg: Config, seam: WindowsSeam | None = None,
+                     platform: str | None = None) -> list[Collector]:
     """Build the collectors in gather order. The seam is carried on each collector so Windows
-    collectors, added in later slices, read through it; the Linux collectors ignore it."""
+    collectors read through it; the Linux collectors ignore it. On Windows the CPU and memory
+    collectors are the seam-backed ones, which keep the source ids `cpu` and `memory`, so no host
+    has two sources with one id. `platform` defaults from `sys.platform`; tests pass it to build
+    the Windows set on Linux."""
     s, p = cfg.sysfs, cfg.procfs
+    windows = (platform or ("windows" if sys.platform == "win32" else "")) == "windows"
     built = [
-        CpuCollector(s, p),
-        MemoryCollector(s, p),
+        WinCpuCollector(s, p) if windows else CpuCollector(s, p),
+        WinMemoryCollector(s, p) if windows else MemoryCollector(s, p),
         RaplCollector(s, p),
         HwmonCollector(s, p, parse_sensor_patterns("HOSTWATCH_HWMON_IGNORE", cfg.hwmon_ignore)),
         MdRaidCollector(s, p),
