@@ -3,11 +3,13 @@
 A result waits in a SQLite file in the control data directory until watchpost answers 2xx, so a
 network outage or a restart delays the report but does not lose it. The outbox is separate from the
 collector's batch outbox and holds nothing but results. A command id appears at most once, and the first result queued for it
-wins, so a later refusal of a replayed command can never overwrite the report of what really happened.
+wins, so a later refusal of a replayed command can never overwrite the report of what really happened. The
+one exception is a queued refusal, which a later result of a command that really ran replaces.
 
 Overflow: when more than `max_results` results wait, the oldest is dropped and counted, because an
 unbounded file on a host whose watchpost stays away for days is worse than a missing old report
-(watchpost shows a command with no result as unknown, never as done).
+(watchpost shows a command with no result as unknown, never as done). The running count is available from
+`dropped_total()` and the daemon sends it with every result as `outbox_dropped`.
 
 A file that SQLite reports as not a database is renamed aside with a timestamp and a fresh outbox
 starts; any other database error is raised and the file is left alone.
@@ -33,6 +35,14 @@ CREATE TABLE IF NOT EXISTS results (
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 """
 _CORRUPT = ("file is not a database", "malformed", "file is encrypted")
+
+
+def _status_of(text: str) -> object:
+    try:
+        data = json.loads(text)
+    except ValueError:
+        return None
+    return data.get("status") if isinstance(data, dict) else None
 
 
 class ResultOutbox:
@@ -80,7 +90,13 @@ class ResultOutbox:
         """Queue a result. The row is durable when this returns."""
         text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         with self._lock, self._db:
-            self._db.execute("INSERT OR IGNORE INTO results (command_id, payload) VALUES (?, ?)", (command_id, text))
+            row = self._db.execute("SELECT seq, payload FROM results WHERE command_id=?", (command_id,)).fetchone()
+            if row is None:
+                self._db.execute("INSERT INTO results (command_id, payload) VALUES (?, ?)", (command_id, text))
+            elif payload.get("status") != "refused" and _status_of(row[1]) == "refused":
+                # A refusal can come from a forged command that borrowed a real id. The report of a command
+                # that really ran replaces a queued refusal; it never replaces another real result.
+                self._db.execute("UPDATE results SET payload=? WHERE seq=?", (text, row[0]))
             over = self._db.execute("SELECT COUNT(*) FROM results").fetchone()[0] - self.max_results
             if over > 0:
                 self._db.execute("DELETE FROM results WHERE seq IN "

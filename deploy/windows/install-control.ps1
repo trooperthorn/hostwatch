@@ -63,6 +63,7 @@ if (-not $ConfigFile -and -not (Test-Path $ConfigPath)) {
 Write-Host 'This will:'
 Write-Host "  - create a virtual environment in $Venv and install hostwatch with the windows and control extras"
 Write-Host "  - write $EnvFile and lock $ConfigPath so only SYSTEM and Administrators can read or change them"
+Write-Host "  - leave the ACL of $DataDir alone if it already exists (it is shared with the agent); lock it only when this script creates it"
 Write-Host "  - register the $ServiceName service as LocalSystem, start it on boot, and restart it after a failure"
 Write-Host "  - let $WatchpostUrl ask this host to run actions that control.toml allows"
 if ($DryRun) { Write-Host 'Dry run: nothing was changed.'; return }
@@ -81,8 +82,13 @@ Invoke-Native $VenvPython @('-m', 'pip', 'install', "$SourcePath[windows,control
 Invoke-Native $VenvPython @((Join-Path $Venv 'Scripts\pywin32_postinstall.py'), '-install')
 
 Step 'Locking the allowlist and writing the protected settings file'
+$dataDirExisted = Test-Path -LiteralPath $DataDir
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-Invoke-Native 'icacls.exe' @($DataDir, '/inheritance:r', '/grant:r', "${SidSystem}:(OI)(CI)F", "${SidAdmins}:(OI)(CI)F")
+if ($dataDirExisted) {
+    Write-Host "  $DataDir already exists and is shared with the agent, so its ACL is left as it is."
+} else {
+    Invoke-Native 'icacls.exe' @($DataDir, '/inheritance:r', '/grant:r', "${SidSystem}:(OI)(CI)F", "${SidAdmins}:(OI)(CI)F")
+}
 if ($ConfigFile) { Copy-Item -LiteralPath $ConfigFile -Destination $ConfigPath -Force }
 Invoke-Native 'icacls.exe' @($ConfigPath, '/inheritance:r', '/grant:r', "${SidSystem}:F", "${SidAdmins}:F")
 if (Test-Path $EnvFile) { Remove-Item -LiteralPath $EnvFile -Force }

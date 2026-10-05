@@ -309,14 +309,32 @@ def test_results_posted_while_offline_are_replayed_after_a_restart(env):
     assert second.outbox.depth() == 0 and len(exe.calls) == 1
 
 
-def test_a_result_watchpost_can_never_accept_is_dropped_so_it_does_not_block_the_queue(env, caplog):
+@pytest.mark.parametrize("status", [400, 404, 422, 500])
+def test_results_stay_queued_when_the_route_is_missing_or_rejects(env, status):
     exe = FakeExecutor()
     env.wp.add(env.signer, id="a", seq=1, action="service.restart", params={"name": "hostwatch-agent"})
-    env.wp.results_status = 422
+    env.wp.results_status = status
     daemon = env.build(exe)
-    with caplog.at_level(logging.ERROR, logger="hostwatch.control"):
+    with pytest.raises(d.DeliveryError):
         daemon.cycle()
-    assert daemon.outbox.depth() == 0 and "dropping it" in caplog.text
+    assert daemon.outbox.depth() == 1 and len(exe.calls) == 1
+
+
+def test_a_409_means_watchpost_has_the_result_and_the_copy_is_dropped(env):
+    env.wp.add(env.signer, id="a", seq=1, action="service.restart", params={"name": "hostwatch-agent"})
+    env.wp.results_status = 409
+    daemon = env.build(FakeExecutor())
+    daemon.cycle()
+    assert daemon.outbox.depth() == 0
+
+
+def test_a_flush_error_is_not_replaced_by_a_pull_error(env):
+    daemon = env.build(FakeExecutor())
+    daemon.outbox.add("x", {"id": "x", "status": "done"})
+    env.wp.results_status = 503
+    env.wp.pull_status = 502
+    with pytest.raises(d.DeliveryError, match="result post answered HTTP 503"):
+        daemon.cycle()
 
 
 def test_pull_failures_are_delivery_errors_and_the_key_is_never_logged(env, caplog):
@@ -481,6 +499,17 @@ def test_outbox_survives_reopening_and_keeps_the_first_result_per_command(tmp_pa
     assert payload["status"] == "done"
     again.ack(seq)
     assert again.peek()[1]["id"] == "b"
+
+
+def test_a_real_result_replaces_a_queued_refusal_but_not_another_real_result(tmp_path):
+    box = ResultOutbox(tmp_path / "o.db")
+    box.add("a", {"id": "a", "status": "refused"})
+    box.add("a", {"id": "a", "status": "done"})
+    box.add("a", {"id": "a", "status": "failed"})
+    box.add("b", {"id": "b", "status": "done"})
+    box.add("b", {"id": "b", "status": "refused"})
+    assert box.depth() == 2
+    assert box.peek()[1]["status"] == "done"
 
 
 def test_outbox_cap_drops_the_oldest_and_counts_it(tmp_path):

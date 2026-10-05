@@ -1190,9 +1190,9 @@ length-prefixed JSON exchange on a daemon thread with a timeout, the same way th
 `daemon.py` holds `ControlDaemon`, `outbox.py` the results outbox and `service.py` the Windows service host. The
 daemon only dials out and opens no port. Each cycle does these steps in order:
 
-1. Replay queued results oldest first. A result leaves the outbox after a 2xx answer, or after a 400, 404, 409 or 422
-   (watchpost can never accept it, or already has it). Any other failure leaves it queued and the cycle reports a
-   delivery error.
+1. Replay queued results oldest first. A result leaves the outbox after a 2xx answer, or after a 409
+   (watchpost already has it). Any other failure, including 400, 404 and 422, leaves it queued and the cycle reports a
+   delivery error, so nothing is lost while the results route is missing.
 2. `GET /api/v1/control/commands?host=<host from control.toml>` with `Authorization: Bearer <wpc key>`. A 401 or 403 is
    reported as a rejected key, never with the key. The answer is `{"commands": [{"command": {...}, "signature": "..."}]}`.
 3. Sort by `seq` and handle at most 20 commands, one at a time. Each goes through `CommandVerifier`, then the platform
@@ -1201,11 +1201,11 @@ daemon only dials out and opens no port. Each cycle does these steps in order:
    reported as `failed`. A command with no usable id cannot be reported and is only logged.
 
 A result is `{"v":1,"id","host","action","seq","status","ok","reason","output","received_at","started_at",
-"finished_at"}`. `status` is `done`, `scheduled`, `cancelled`, `failed` or `refused`, and a refusal's `reason` is the
+"finished_at","outbox_dropped"}`. `status` is `done`, `scheduled`, `cancelled`, `failed` or `refused`, and a refusal's `reason` is the
 code from `verify.py`. Output is masked for key shapes, bearer tokens and password settings and clipped to 2000
 characters; this is a courtesy and not a guarantee that no secret is present. The outbox keeps the first result per
-command id (a refusal of a replay is not queued while the real result waits) and holds at most 200 results, dropping the
-oldest and counting it, because watchpost shows a command with no result as `unknown`. A corrupt outbox file is renamed
+command id (a refusal of a replay is not queued while the real result waits, and a queued refusal is replaced by the result of a command that really ran) and holds at most 200 results, dropping the
+oldest and counting it (the count is sent as `outbox_dropped`), because watchpost shows a command with no result as `unknown`. A corrupt outbox file is renamed
 aside and a fresh one started.
 
 Verification records a command before it runs (at most once). A crash between execution and the outbox write therefore

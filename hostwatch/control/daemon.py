@@ -13,7 +13,8 @@ clipped and has recognisable secrets masked, but masking is a courtesy and not a
 
 Results are posted as JSON:
   {"v":1, "id", "host", "action", "seq", "status", "ok", "reason", "output",
-   "received_at", "started_at", "finished_at"}
+   "received_at", "started_at", "finished_at", "outbox_dropped"}
+`outbox_dropped` is the number of results this host lost to the outbox cap so far, so watchpost can see a gap.
 `status` is done, scheduled, cancelled, failed or refused. For a refusal `reason` is the stable code
 from `verify.py`. The watchpost results route is not built yet, so this shape is this daemon's
 proposal and is listed in UNVERIFIED.md.
@@ -61,9 +62,10 @@ MAX_INTERVAL_S = 300.0
 MAX_BACKOFF_S = 60.0
 HTTP_TIMEOUT_S = 10.0
 MAX_PER_PULL = 20
-# A result answered with one of these can never succeed, so it leaves the outbox instead of blocking it.
-# 409 means watchpost already has a result for that command id.
-DROP_STATUSES = frozenset({400, 404, 409, 422})
+# Only 409 is final: it means watchpost already has a result for that command id. Every other failure,
+# including 400, 404 and 422, keeps the result queued, because the results route may not exist yet or may
+# be misconfigured, and a result that reports a real reboot or restart must never be discarded silently.
+DROP_STATUSES = frozenset({409})
 LINUX_DATA_DIR = Path("/var/lib/hostwatch-control")
 LINUX_CONFIG = Path("/etc/hostwatch/control.toml")
 WINDOWS_DATA_DIR = Path("C:/ProgramData/hostwatch")
@@ -182,7 +184,7 @@ class ControlDaemon:
 
     def flush(self) -> None:
         """Send queued results oldest first. A result leaves the outbox only after a 2xx answer, or after
-        an answer that says it can never succeed. Any other failure raises and the result stays queued."""
+        a 409 (watchpost already has it). Any other failure raises and the result stays queued."""
         while (head := self.outbox.peek()) is not None:
             if self.stop_event.is_set():
                 return
@@ -196,8 +198,8 @@ class ControlDaemon:
                 log.info("result for command %s delivered (%s)", payload.get("id"), payload.get("status"))
                 self.outbox.ack(seq)
             elif r.status_code in DROP_STATUSES:
-                log.error("watchpost answered HTTP %d for the result of command %s; dropping it",
-                          r.status_code, payload.get("id"))
+                log.warning("watchpost answered HTTP %d for the result of command %s; it already has one, "
+                            "so this copy is dropped", r.status_code, payload.get("id"))
                 self.outbox.ack(seq)
             else:
                 raise DeliveryError(f"result post answered HTTP {r.status_code}")
@@ -212,7 +214,8 @@ class ControlDaemon:
                 "action": action if isinstance(action, str) else "",
                 "seq": seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
                 "status": status, "ok": ok, "reason": reason, "output": redact(output),
-                "received_at": int(received), "started_at": int(started), "finished_at": int(self.clock())}
+                "received_at": int(received), "started_at": int(started), "finished_at": int(self.clock()),
+                "outbox_dropped": self.outbox.dropped_total()}
 
     def handle(self, item: object) -> dict | None:
         """Verify and execute one pulled command and return its result, or None when it has no usable id."""
@@ -251,7 +254,14 @@ class ControlDaemon:
             self.flush()
         except DeliveryError as exc:
             problem = exc
-        items = sorted(self.pull(), key=_seq_of)
+        try:
+            pulled = self.pull()
+        except DeliveryError as exc:
+            if problem is not None:
+                log.warning("%s", exc)  # the earlier flush error is the one raised; keep both in the log
+                raise problem from exc
+            raise
+        items = sorted(pulled, key=_seq_of)
         for item in items[:MAX_PER_PULL]:
             if self.stop_event.is_set():
                 break
