@@ -1056,6 +1056,12 @@ def test_a_config_host_with_a_domain_matches_the_short_machine_name(env, monkeyp
     assert ident.check(cfg) == ""
 
 
+def test_a_config_host_in_one_domain_is_refused_on_the_same_short_name_in_another(env, monkeypatch):
+    cfg = cfgmod.parse({"host": "MediaIn-SVR.lan", "observe_public_key": "ed25519:" + "A" * 43 + "="})
+    _names(monkeypatch, "mediain-svr", "mediain-svr.other")
+    assert "refusing" in ident.check(cfg)
+
+
 def test_a_machine_id_match_is_accepted_when_the_names_differ(env, monkeypatch):
     _set_toml(env, 'machine_id = "ABC-123"\n')
     _names(monkeypatch, "other-name")

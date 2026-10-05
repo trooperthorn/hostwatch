@@ -50,6 +50,17 @@ def local_machine_id() -> str:
         return ""
 
 
+def _matches(host: str, names: set[str]) -> bool:
+    """A short host name matches the short form of any machine name. A dotted host name matches the
+    same full name, or a machine that knows only its short name, but never the same short name in
+    another domain, so mediain-svr.lan is refused on mediain-svr.other."""
+    short = host.split(".")[0]
+    if "." not in host:
+        return short in {n.split(".")[0] for n in names}
+    return host in names or (short in names and not any(
+        n.split(".")[0] == short and "." in n and n != host for n in names))
+
+
 def check(config: ControlConfig) -> str:
     """An empty string when this machine is the one control.toml is for, otherwise the reason it is not."""
     if config.machine_id:
@@ -60,7 +71,7 @@ def check(config: ControlConfig) -> str:
                 "refusing to act for another machine")
     host = config.host.strip().lower()
     names = machine_names()
-    if host in names or host.split(".")[0] in {n.split(".")[0] for n in names}:
+    if _matches(host, names):
         return ""
     return (f"control.toml is for host {config.host!r} but this machine is "
             f"{socket.gethostname()!r}; refusing to act under another machine's name. "
