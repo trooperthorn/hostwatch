@@ -40,6 +40,7 @@ ROOT = Path(__file__).resolve().parent.parent
 DEPLOY = ROOT / "deploy"
 URL = "http://watchpost.test"
 KEY = "wpc_" + "k3yvalue" * 4
+RESULT_FIELDS = {"id", "state", "output", "started_at", "finished_at"}
 
 
 @pytest.fixture
@@ -58,6 +59,8 @@ class FakeWatchpost:
         self.online = True
         self.results_status = 200
         self.pull_status = 200
+        self.cancel: list[str] = []
+        self.pulled: list[str] = []
         self.on_request = None
 
     def add(self, signer, **over):
@@ -77,15 +80,18 @@ class FakeWatchpost:
             assert request.url.params["host"] == HOST
             if self.pull_status != 200:
                 return httpx.Response(self.pull_status)
-            return httpx.Response(200, json={"host": HOST, "commands": list(self.queue)})
+            self.pulled += [i["command"]["id"] for i in self.queue if isinstance(i, dict) and "id" in i["command"]]
+            return httpx.Response(200, json={"host": HOST, "commands": list(self.queue), "cancel": list(self.cancel)})
         if request.method == "POST" and request.url.path == d.RESULTS_PATH:
             body = json.loads(request.content)
+            assert set(body) == RESULT_FIELDS, "the body must match the watchpost ResultBody exactly"
             self.attempts.append(body)
             status = self.results_status(body) if callable(self.results_status) else self.results_status
             if status != 200:
                 return httpx.Response(status)
             self.results.append(body)
-            self.queue = [i for i in self.queue if i["command"]["id"] != body["id"]]
+            if body["state"] != "scheduled":
+                self.queue = [i for i in self.queue if i["command"]["id"] != body["id"]]
             return httpx.Response(200, json={"ok": True})
         return httpx.Response(404)
 
@@ -96,6 +102,11 @@ class FakeWatchpost:
 class FakeExecutor:
     def __init__(self, result=None, error=None):
         self.calls, self.result, self.error = [], result or ActionResult(True, "done", "ok"), error
+        self.cancels = 0
+
+    def cancel_reboot(self):
+        self.cancels += 1
+        return ActionResult(True, "cancelled", "scheduled reboot cancelled")
 
     def execute(self, command):
         self.calls.append(command)
@@ -145,10 +156,8 @@ def test_a_command_is_pulled_verified_executed_and_its_result_posted(env, tmp_pa
     assert ran == [["/usr/bin/systemctl", "restart", "hostwatch-agent"]]
     assert len(env.wp.results) == 1
     result = env.wp.results[0]
-    assert result["id"] == cmd["id"] and result["host"] == HOST and result["action"] == "service.restart"
-    assert result["status"] == "done" and result["ok"] is True and result["reason"] == ""
-    assert result["output"] == "restarted" and result["seq"] == cmd["seq"]
-    assert result["received_at"] <= result["started_at"] <= result["finished_at"]
+    assert result["id"] == cmd["id"] and result["state"] == "done" and result["output"] == "restarted"
+    assert result["started_at"] <= result["finished_at"]
     pull = env.wp.requests[0]
     assert pull.method == "GET" and pull.url.path == d.COMMANDS_PATH and pull.headers["authorization"] == f"Bearer {KEY}"
     assert daemon.outbox.depth() == 0
@@ -161,7 +170,7 @@ def test_a_fan_command_writes_overrides_through_the_real_executor_with_a_fake_ru
                            use_sudo=False, overrides_path=tmp_path / "overrides.toml")
     env.wp.add(env.signer)
     env.build(actions).cycle()
-    assert env.wp.results[0]["status"] == "done"
+    assert env.wp.results[0]["state"] == "done"
     assert "min_duty = 25" in (tmp_path / "overrides.toml").read_text(encoding="utf-8")
     assert any(a[:2] == ["/opt/thermalctl/venv/bin/thermalctl", "check-config"] for a in ran)
 
@@ -190,8 +199,9 @@ def test_an_executor_that_raises_is_reported_failed_and_the_next_command_still_r
     env.wp.add(env.signer, id="b", seq=2, action="service.restart", params={"name": "hostwatch-agent"})
     env.build(exe).cycle()
     by_id = {r["id"]: r for r in env.wp.results}
-    assert by_id["a"]["status"] == "failed" and by_id["a"]["reason"] == "action_failed" and "boom" in by_id["a"]["output"]
-    assert by_id["b"]["status"] == "done"
+    assert by_id["a"]["state"] == "failed" and by_id["a"]["output"].startswith("action_failed: ")
+    assert "boom" in by_id["a"]["output"]
+    assert by_id["b"]["state"] == "done"
 
 
 def test_a_failed_action_reports_its_output_and_reason(env):
@@ -199,7 +209,7 @@ def test_a_failed_action_reports_its_output_and_reason(env):
     env.wp.add(env.signer)
     env.build(exe).cycle()
     r = env.wp.results[0]
-    assert (r["status"], r["ok"], r["reason"]) == ("failed", False, "action_failed")
+    assert r["state"] == "failed" and r["output"].startswith("action_failed: ")
     assert "rejected" in r["output"]
 
 
@@ -236,11 +246,10 @@ def test_a_refused_command_is_not_run_and_reports_its_reason(env, reason):
     assert exe.calls == []
     assert len(env.wp.results) == 1
     r = env.wp.results[0]
-    assert (r["status"], r["ok"], r["reason"]) == ("refused", False, reason)
-    assert r["id"]
+    assert r["state"] == "refused" and r["output"].startswith(f"{reason}: ".rstrip(" :")) and r["id"]
 
 
-def test_a_replayed_command_is_refused_and_the_state_survives_a_restart(env):
+def test_a_replayed_command_does_not_run_again_and_the_state_survives_a_restart(env):
     exe = FakeExecutor()
     cmd = env.wp.add(env.signer, action="service.restart", params={"name": "hostwatch-agent"})
     first = env.build(exe)
@@ -250,8 +259,8 @@ def test_a_replayed_command_is_refused_and_the_state_survives_a_restart(env):
     second = env.build(exe)
     second.cycle()
     assert len(exe.calls) == 1
-    assert [r["status"] for r in env.wp.results] == ["done", "refused"]
-    assert env.wp.results[1]["reason"] == "replayed_id"
+    assert [r["state"] for r in env.wp.results] == ["done", "done"]  # the stored result, not a refusal
+    assert env.wp.results[1]["output"] == env.wp.results[0]["output"]
 
 
 def test_a_replay_refusal_never_hides_a_result_that_is_still_queued(env):
@@ -266,7 +275,7 @@ def test_a_replay_refusal_never_hides_a_result_that_is_still_queued(env):
     assert len(exe.calls) == 1 and daemon.outbox.depth() == 1
     env.wp.results_status = 200
     daemon.cycle()
-    assert [r["status"] for r in env.wp.results] == ["done"] and env.wp.results[0]["id"] == cmd["id"]
+    assert [r["state"] for r in env.wp.results] == ["done"] and env.wp.results[0]["id"] == cmd["id"]
 
 
 def test_a_pulled_item_without_an_id_is_ignored(env):
@@ -283,7 +292,7 @@ def test_an_unreadable_state_file_refuses_every_command(env):
     exe = FakeExecutor()
     env.wp.add(env.signer, action="service.restart", params={"name": "hostwatch-agent"})
     env.build(exe).cycle()
-    assert exe.calls == [] and env.wp.results[0]["reason"] == v.STATE_UNAVAILABLE
+    assert exe.calls == [] and env.wp.results[0]["output"].startswith(v.STATE_UNAVAILABLE)
 
 
 # --- offline results ----------------------------------------------------------------------
@@ -308,7 +317,7 @@ def test_results_posted_while_offline_are_replayed_after_a_restart(env):
     second = env.build(exe)  # a new process: new verifier, new outbox object, same files
     assert second.outbox.depth() == 1
     second.cycle()
-    assert [r["id"] for r in env.wp.results] == [cmd["id"]] and env.wp.results[0]["status"] == "done"
+    assert [r["id"] for r in env.wp.results] == [cmd["id"]] and env.wp.results[0]["state"] == "done"
     assert second.outbox.depth() == 0 and len(exe.calls) == 1
 
 
@@ -829,3 +838,171 @@ def test_canonical_json_is_what_the_fake_watchpost_signs(signer):
     cmd = make_cmd()
     raw = base64.b64decode(sign(signer, cmd))
     signer.public_key().verify(raw, canonical_json(cmd))
+
+
+# --- the watchpost control plugin contract ------------------------------------------------
+
+class SchedulingExecutor(FakeExecutor):
+    """Reports a reboot as scheduled, like the real executors do."""
+
+    def execute(self, command):
+        self.calls.append(command)
+        if command["action"] == "host.reboot":
+            return ActionResult(True, "scheduled", "reboot in 60 second(s)")
+        return ActionResult(True, "done", "ok")
+
+
+class Clock:
+    def __init__(self, now=NOW):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+def _build_with_clock(env, actions, clock):
+    return d.build_daemon(env.settings, client=env.wp.client(), actions=actions, clock=clock)
+
+
+def test_the_result_body_is_exactly_what_the_plugin_results_route_validates(env):
+    pydantic = pytest.importorskip("pydantic")
+
+    # A copy of watchpost_control.ResultBody (extra fields are forbidden, output is at most 262144 chars).
+    class ResultBody(pydantic.BaseModel):
+        model_config = pydantic.ConfigDict(extra="forbid")
+        id: str = pydantic.Field(min_length=1, max_length=64)
+        state: str = pydantic.Field(min_length=1, max_length=16)
+        output: str = pydantic.Field(default="", max_length=262_144)
+        started_at: float | None = pydantic.Field(default=None, allow_inf_nan=False)
+        finished_at: float | None = pydantic.Field(default=None, allow_inf_nan=False)
+
+    plugin_states = {"done", "failed", "refused", "scheduled", "cancelled"}
+    env.wp.add(env.signer, id="ok", seq=1, action="service.restart", params={"name": "hostwatch-agent"})
+    env.wp.add(env.signer, id="bad", seq=2, action="service.restart", params={"name": "sshd"})
+    exe = FakeExecutor(ActionResult(True, "done", "x" * 20_000))
+    env.build(exe).cycle()
+    assert {r["id"] for r in env.wp.results} == {"ok", "bad"}
+    for body in env.wp.results:
+        model = ResultBody.model_validate_json(json.dumps(body))
+        assert model.state in plugin_states
+        assert model.started_at is not None and model.finished_at is not None
+        assert len(model.output) <= d.MAX_OUTPUT_CHARS
+    assert d.wire_body({"id": "i", "status": "done", "output": "o", "started_at": 5, "finished_at": 3}) == {
+        "id": "i", "state": "done", "output": "o", "started_at": 5.0, "finished_at": 5.0}
+
+
+def test_a_reboot_reports_scheduled_then_a_cancel_id_in_the_pull_cancels_it_locally(env):
+    exe = SchedulingExecutor()
+    cmd = env.wp.add(env.signer, id="r1", action="host.reboot", params={})
+    daemon = env.build(exe)
+    daemon.cycle()
+    assert [(r["id"], r["state"]) for r in env.wp.results] == [("r1", "scheduled")]
+    env.wp.cancel = [cmd["id"]]
+    daemon.cycle()
+    assert exe.cancels == 1
+    assert [(r["id"], r["state"]) for r in env.wp.results] == [("r1", "scheduled"), ("r1", "cancelled")]
+    assert daemon.outbox.scheduled() == {}
+    daemon.cycle()
+    assert exe.cancels == 1 and len(env.wp.results) == 2  # nothing is cancelled or reported twice
+
+
+def test_a_cancel_id_for_a_command_this_host_never_scheduled_is_ignored(env):
+    exe = SchedulingExecutor()
+    env.wp.cancel = ["never-pulled", "", 7]
+    env.build(exe).cycle()
+    assert exe.cancels == 0 and env.wp.results == []
+
+
+def test_a_scheduled_reboot_is_reported_done_after_the_daemon_restarts_past_its_due_time(env):
+    clock = Clock()
+    env.wp.add(env.signer, id="r1", action="host.reboot", params={})
+    first = _build_with_clock(env, SchedulingExecutor(), clock)
+    first.cycle()
+    assert [r["state"] for r in env.wp.results] == ["scheduled"]
+    first.close()
+    clock.now = NOW + 61 + d.RESOLVE_GRACE_S
+    second = _build_with_clock(env, SchedulingExecutor(), clock)  # the service came back after the reboot
+    second.cycle()
+    assert [r["state"] for r in env.wp.results] == ["scheduled", "done"]
+
+
+def test_a_scheduled_reboot_that_never_happened_is_reported_failed(env):
+    clock = Clock()
+    env.wp.add(env.signer, id="r1", action="host.reboot", params={})
+    daemon = _build_with_clock(env, SchedulingExecutor(), clock)
+    daemon.cycle()
+    clock.now = NOW + 61 + d.RESOLVE_GRACE_S
+    daemon.cycle()
+    assert [r["state"] for r in env.wp.results] == ["scheduled", "failed"]
+    assert env.wp.results[1]["output"].startswith("reboot_not_seen")
+    assert daemon.outbox.scheduled() == {}
+
+
+def test_a_command_executed_before_a_lost_result_is_re_reported_with_its_stored_result(env):
+    exe = FakeExecutor(ActionResult(True, "done", "restarted"))
+    cmd = env.wp.add(env.signer, id="a", action="service.restart", params={"name": "hostwatch-agent"})
+    env.wp.results_status = 500
+    first = env.build(exe)
+    with pytest.raises(d.DeliveryError):
+        first.cycle()
+    first.outbox.ack(first.outbox.peek()[0])  # the queued copy is lost, as after an outbox overflow
+    first.close()
+    env.wp.results_status = 200
+    second = env.build(exe)
+    second.cycle()
+    assert len(exe.calls) == 1
+    assert [(r["id"], r["state"], r["output"]) for r in env.wp.results] == [(cmd["id"], "done", "restarted")]
+
+
+def test_an_accepted_command_with_no_stored_result_is_reported_failed_not_refused(env):
+    exe = FakeExecutor()
+    cmd = env.wp.add(env.signer, id="a", action="service.restart", params={"name": "hostwatch-agent"})
+    first = env.build(exe)
+    first.verifier.check(cmd, env.wp.queue[0]["signature"])  # accepted and recorded, then the process died
+    first.close()
+    env.build(exe).cycle()
+    assert exe.calls == []
+    assert env.wp.results[0]["state"] == "failed" and env.wp.results[0]["output"].startswith("result_lost")
+
+
+def test_results_are_only_posted_for_commands_this_host_pulled(env):
+    exe = SchedulingExecutor()
+    env.wp.add(env.signer, id="p1", seq=1, action="service.restart", params={"name": "hostwatch-agent"})
+    env.wp.add(env.signer, id="p2", seq=2, action="host.reboot", params={})
+    env.wp.cancel = ["p2", "stranger"]
+    daemon = env.build(exe)
+    daemon.cycle()
+    daemon.cycle()
+    assert {r["id"] for r in env.wp.results} <= set(env.wp.pulled) == {"p1", "p2"}
+    assert "stranger" not in {r["id"] for r in env.wp.attempts}
+
+
+def test_a_404_that_says_no_such_command_parks_the_result(env):
+    env.wp.add(env.signer, id="a", action="service.restart", params={"name": "hostwatch-agent"})
+    handler = env.wp.handler
+
+    def answer(request):
+        if request.method == "POST":
+            return httpx.Response(404, json={"detail": d.NO_SUCH_COMMAND})
+        return handler(request)
+
+    daemon = d.build_daemon(env.settings, client=httpx.Client(transport=httpx.MockTransport(answer)),
+                            actions=FakeExecutor(), clock=lambda: NOW)
+    daemon.cycle()
+    assert daemon.outbox.parked() == [("a", "watchpost answered HTTP 404")] and daemon.outbox.depth() == 0
+
+
+def test_an_old_outbox_with_one_row_per_command_is_migrated(tmp_path):
+    import sqlite3
+    path = tmp_path / "old.db"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE results (seq INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL UNIQUE, "
+               "payload TEXT NOT NULL)")
+    db.execute("INSERT INTO results (command_id, payload) VALUES ('a', ?)", (json.dumps({"id": "a", "status": "done"}),))
+    db.commit()
+    db.close()
+    box = ResultOutbox(path)
+    assert box.peek() == (1, {"id": "a", "status": "done"})
+    box.add("a", {"id": "a", "status": "failed"})
+    assert box.depth() == 1  # the first final result still wins
+    box.close()

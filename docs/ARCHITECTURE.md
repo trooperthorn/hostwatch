@@ -1202,27 +1202,48 @@ length-prefixed JSON exchange on a daemon thread with a timeout, the same way th
 daemon only dials out and opens no port. Each cycle does these steps in order:
 
 1. Replay queued results oldest first. A result leaves the queue after a 2xx answer, after a 409
-   (watchpost already has it), or when it is parked. A permanent 4xx answer (any 4xx except 401, 403, 404, 408, 425, 429
-   and 409, so in practice 400, 413 and 422) parks the result with the reason in the outbox's `parked` table and the next
-   result goes on; a parked result is kept for the owner to inspect and is never sent again. Every other failure,
-   including 401, 403, 404 and any 5xx, leaves the result queued and the cycle reports a delivery error, so nothing is
-   lost while the results route is missing.
+   (watchpost already has a final result), or when it is parked. A permanent 4xx answer (any 4xx except 401, 403, 404,
+   408, 425, 429 and 409, so in practice 400, 413 and 422, plus a 404 whose detail is `no such command for this host`)
+   parks the result with the reason in the outbox's `parked` table and the next result goes on; a parked result is kept
+   for the owner to inspect and is never sent again. Every other failure, including 401, 403, any other 404 and any 5xx,
+   leaves the result queued and the cycle reports a delivery error, so nothing is lost while the results route is
+   missing.
 2. `GET /api/v1/control/commands?host=<host from control.toml>` with `Authorization: Bearer <wpc key>`. A 401 or 403 is
-   reported as a rejected key, never with the key. The answer is `{"commands": [{"command": {...}, "signature": "..."}]}`.
+   reported as a rejected key, never with the key. The answer is `{"commands": [{"command": {...}, "signature": "..."}], "cancel": [command ids]}`, where `cancel`
+   lists this host's scheduled commands that an admin cancelled.
+   After the pull the daemon resolves due reboots, then cancels every listed id it holds a pending reboot for (see
+   below). An id it never scheduled is ignored, so a result is only ever posted for a command this host pulled.
 3. Sort by `seq` and handle at most 20 commands, one at a time. Each goes through `CommandVerifier`, then the platform
    executor (`LinuxActions` or `WindowsActions`, chosen by `sys.platform`, the Windows module imported only there). The
    result is written to the outbox and delivery is tried before the next command starts. An executor that raises is
    reported as `failed`. A command with no usable id cannot be reported and is only logged.
 
-A result is `{"v":1,"id","host","action","seq","status","ok","reason","output","received_at","started_at",
-"finished_at","outbox_dropped"}`. `status` is `done`, `scheduled`, `cancelled`, `failed` or `refused`, and a refusal's `reason` is the
-code from `verify.py`. Output is masked and then clipped to 2000 characters (`redact.py`; masking runs on the whole
+The body posted to `POST /api/v1/control/results` is exactly the model the watchpost results route validates, which
+refuses any other field: `{"id","state","output","started_at","finished_at"}` with the two times as floats. `state` is
+`done`, `failed`, `refused`, `scheduled` or `cancelled`. A refusal or failure puts its stable reason code from
+`verify.py` at the start of `output` (`unit_not_allowed: ...`). The outbox keeps the richer record (`v`, `host`,
+`action`, `seq`, `status`, `ok`, `reason`, `received_at`, `outbox_dropped`) and `wire_body` in `daemon.py` cuts it down
+at send time; output is clipped to 4096 characters, the amount watchpost keeps.
+
+A `host.reboot` that sets its timer is reported `scheduled`, and the outbox records the promise in its `scheduled`
+table with the due time. Later the same id is reported `done` when the daemon started after the due time (the host went
+down and the service came back), `failed` (`reboot_not_seen`) when the due time plus 30 s passed and the same daemon
+process is still running, or `cancelled` when a pull lists the id in `cancel`: the daemon runs the platform executor's
+`cancel_reboot`, and a cancel that fails is logged and tried again on the next pull. A local `control cancel` is not
+seen by the daemon and later shows as `failed`. A command that is pulled again after it was accepted (watchpost has not
+recorded its outcome) is never refused as `replayed_id`: the daemon re-sends its stored result from the outbox's
+`executed` table (the latest result of the last 1000 commands that ran), or reports `failed` (`result_lost`) when the
+result is gone, and it sends nothing while the result is still queued or the reboot is still pending. A `host.reboot`
+may carry a `confirm_host` text in its signed params, which is ignored; any other extra parameter is refused as
+`bad_params`.
+
+Output is masked and then clipped to 2000 characters (`redact.py`; masking runs on the whole
 text first, and an executor's own output is masked before its clip, so a secret cut by the clip is never half shown). The
 masked shapes are `wpc_`, `wpi_`, `wpf_` and `hw_` keys, bearer tokens, Authorization headers, `password`, `passwd`,
 `secret`, `token` and `api_key` pairs (bare or quoted), PEM blocks (also an unterminated one), hex runs of 32 or more
-characters and mixed-case base64 runs of 40 or more. This is a courtesy and not a guarantee that no secret is present. The outbox keeps the first result per
-command id (a refusal of a replay is not queued while the real result waits, and a queued refusal is replaced by the result of a command that really ran) and holds at most 200 results, dropping the
-oldest and counting it (the count is sent as `outbox_dropped`), because watchpost shows a command with no result as `unknown`. A corrupt outbox file is renamed
+characters and mixed-case base64 runs of 40 or more. This is a courtesy and not a guarantee that no secret is present. The outbox keeps one row per
+command id and status, with the first final result winning (a refusal is not queued when anything real is known about the id, and a queued refusal is replaced by the result of a command that really ran) and holds at most 200 results, dropping the
+oldest and counting it (kept in the local record, not sent), because watchpost shows a command with no result as `unknown`. A corrupt outbox file is renamed
 aside and a fresh one started.
 
 Verification records a command before it runs (at most once). A crash between execution and the outbox write therefore

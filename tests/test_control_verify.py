@@ -503,3 +503,12 @@ def test_missing_cryptography_is_reported_not_swallowed():
             "try:\n verify_signature({}, 'AA==', bytes(32))\nexcept SigningUnavailable: print('unavailable')\n")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
     assert out.stdout.strip() == "unavailable", out.stderr
+
+
+def test_a_reboot_ignores_only_a_confirm_host_text_and_refuses_any_other_extra_param(make, signer):
+    assert run(make(), signer, action="host.reboot", params={"confirm_host": HOST}).ok
+    other = run(make(), signer, id="b", seq=2, action="host.reboot", params={"confirm_host": HOST, "force": "1"})
+    assert other.reason == v.BAD_PARAMS
+    wrong_type = run(make(), signer, id="c", seq=3, action="host.reboot", params={"confirm_host": 1})
+    assert wrong_type.reason == v.BAD_PARAMS
+    assert run(make(), signer, id="d", seq=4, action="host.reboot", params={"delay": "0"}).reason == v.BAD_PARAMS

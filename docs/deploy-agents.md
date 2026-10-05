@@ -173,7 +173,10 @@ To run it by hand on either platform: `python -m hostwatch control run`, with `H
 `HOSTWATCH_CONTROL_KEY` set, and optionally `--config`, `--data-dir` and `--env-file`. `python -m hostwatch control cancel`
 cancels a scheduled reboot on this host without watchpost; this works for the whole delay. The reboot delay in
 `control.toml` (`[reboot] delay_s`, default 60) has a minimum of 30 seconds, and a smaller value, including 0, is raised
-to 30. On Linux it is a systemd timer named `hostwatch-reboot` and is exact to the second. Results that watchpost refuses
+to 30. On Linux it is a systemd timer named `hostwatch-reboot` and is exact to the second. A reboot is reported to
+watchpost as `scheduled`, then `done` or `failed` for the same command id, and an admin cancel in watchpost reaches the
+host on its next pull (the pull answer lists the cancelled ids) and cancels the pending reboot here, reported as
+`cancelled`. A command whose result was lost is re-sent, not refused as a replay. Results that watchpost refuses
 with a permanent 4xx answer are parked in `control-outbox.db` in the data directory, with the reason, and the results
 behind them are still sent. The settings are `HOSTWATCH_CONTROL_URL`,
 `HOSTWATCH_CONTROL_KEY`, `HOSTWATCH_CONTROL_CONFIG`, `HOSTWATCH_CONTROL_DATA_DIR` (state, results outbox and logs) and

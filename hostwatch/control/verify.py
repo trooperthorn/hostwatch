@@ -7,8 +7,8 @@ in the replay state, and it is recorded before it is returned, so a crash during
 cannot let the same command run twice (at most once, never at least once). A command refused
 by the allowlist is not recorded and uses up no sequence number.
 
-Parameters are matched exactly: a missing, extra or wrongly typed parameter is a refusal,
-because the executors must never see a field the allowlist did not look at. An unreadable or
+Parameters are matched exactly: a missing, extra or wrongly typed parameter is a refusal (host.reboot
+alone tolerates a confirm_host text, which is ignored), because the executors must never see a field the allowlist did not look at. An unreadable or
 corrupt state file refuses every command (fail closed).
 """
 
@@ -46,6 +46,9 @@ REBOOT_NOT_ALLOWED = "reboot_not_allowed"
 STATE_UNAVAILABLE = "state_unavailable"
 
 ACTIONS = ("fan.set_floor", "fan.set_mode", "service.restart", "host.reboot")
+# watchpost checks the typed host name before it signs a reboot. Older plugin builds copied it into the
+# signed params as confirm_host; it is accepted and ignored. Any other extra parameter is a refusal.
+REBOOT_IGNORED_PARAMS = frozenset({"confirm_host"})
 _FIELDS = {"v": int, "id": str, "host": str, "action": str, "params": dict,
            "requested_by": str, "issued_at": int, "expires_at": int, "seq": int}
 
@@ -119,8 +122,9 @@ def check_allowlist(config: ControlConfig, command: dict) -> Decision:
             return _refuse(UNIT_NOT_ALLOWED, f"unit {params['name']!r} is not listed")
         return Decision(True, command=command)
 
-    if params:
-        return _refuse(BAD_PARAMS, "host.reboot takes no parameters")
+    extra = set(params) - REBOOT_IGNORED_PARAMS
+    if extra or not all(isinstance(params[k], str) for k in params):
+        return _refuse(BAD_PARAMS, "host.reboot takes no parameters other than a confirm_host text")
     if not config.reboot.allow:
         return _refuse(REBOOT_NOT_ALLOWED, "reboot.allow is false")
     return Decision(True, command=command)

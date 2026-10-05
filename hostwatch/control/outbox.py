@@ -2,9 +2,15 @@
 
 A result waits in a SQLite file in the control data directory until watchpost answers 2xx, so a
 network outage or a restart delays the report but does not lose it. The outbox is separate from the
-collector's batch outbox and holds nothing but results. A command id appears at most once, and the first result queued for it
-wins, so a later refusal of a replayed command can never overwrite the report of what really happened. The
-one exception is a queued refusal, which a later result of a command that really ran replaces.
+collector's batch outbox and holds nothing but results. A command id has at most one queued row per
+status and at most one final one (done, failed or cancelled): the first final result queued for it wins, so
+a later report can never overwrite the report of what really happened. A scheduled reboot queues a
+`scheduled` row first and its final row later, in that order. A refusal is queued only when nothing else is
+known about the id, and a queued refusal is replaced by a later result of a command that really ran.
+
+Besides the queue the file keeps two small tables: `executed` holds the latest result of every command that
+ran (capped), so a command that is pulled again after its report was lost is answered with the stored
+result, and `scheduled` holds the reboots this host has promised and not yet resolved.
 
 Overflow: when more than `max_results` results wait, the oldest is dropped and counted, because an
 unbounded file on a host whose watchpost stays away for days is worse than a missing old report
@@ -32,10 +38,16 @@ log = logging.getLogger("hostwatch.control.outbox")
 
 OUTBOX_FILE = "control-outbox.db"
 MAX_RESULTS = 200
+EXECUTED_CAP = 1000
+FINAL_STATUSES = ("done", "failed", "cancelled")
 
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL, status TEXT NOT NULL DEFAULT '',
+  payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS executed (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS scheduled (command_id TEXT PRIMARY KEY, due_at REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS parked (
   seq INTEGER PRIMARY KEY, command_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL, reason TEXT NOT NULL,
   parked_at INTEGER NOT NULL);
@@ -82,12 +94,28 @@ class ResultOutbox:
         try:
             db.execute("PRAGMA synchronous=FULL")
             with db:
+                self._migrate(db)
                 db.executescript(_SCHEMA)
             db.execute("SELECT COUNT(*) FROM results").fetchone()
         except sqlite3.DatabaseError:
             db.close()
             raise
         return db
+
+    @staticmethod
+    def _migrate(db: sqlite3.Connection) -> None:
+        """An outbox from before results had a status column held one row per command id."""
+        columns = [r[1] for r in db.execute("PRAGMA table_info(results)").fetchall()]
+        if not columns or "status" in columns:
+            return
+        db.execute("ALTER TABLE results RENAME TO results_old")
+        db.execute("CREATE TABLE results (seq INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL, "
+                   "status TEXT NOT NULL DEFAULT '', payload TEXT NOT NULL)")
+        for seq, command_id, payload in db.execute(
+                "SELECT seq, command_id, payload FROM results_old ORDER BY seq").fetchall():
+            db.execute("INSERT INTO results (seq, command_id, status, payload) VALUES (?, ?, ?, ?)",
+                       (seq, command_id, str(_status_of(payload) or ""), payload))
+        db.execute("DROP TABLE results_old")
 
     def close(self) -> None:
         with self._lock:
@@ -96,16 +124,26 @@ class ResultOutbox:
     def add(self, command_id: str, payload: dict) -> None:
         """Queue a result. The row is durable when this returns."""
         text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
+        status = str(payload.get("status") or "")
         with self._lock, self._db:
             if self._db.execute("SELECT 1 FROM parked WHERE command_id=?", (command_id,)).fetchone():
                 return  # watchpost refused this command's result for good; a repeat cannot fare better
-            row = self._db.execute("SELECT seq, payload FROM results WHERE command_id=?", (command_id,)).fetchone()
-            if row is None:
-                self._db.execute("INSERT INTO results (command_id, payload) VALUES (?, ?)", (command_id, text))
-            elif payload.get("status") != "refused" and _status_of(row[1]) == "refused":
+            known = [r[0] for r in self._db.execute(
+                "SELECT status FROM results WHERE command_id=?", (command_id,)).fetchall()]
+            ran = self._db.execute("SELECT 1 FROM executed WHERE command_id=?", (command_id,)).fetchone()
+            if status == "refused":
+                if known or ran:
+                    return  # something real is already known about this id; a refusal must not hide it
+            else:
                 # A refusal can come from a forged command that borrowed a real id. The report of a command
                 # that really ran replaces a queued refusal; it never replaces another real result.
-                self._db.execute("UPDATE results SET payload=? WHERE seq=?", (text, row[0]))
+                self._db.execute("DELETE FROM results WHERE command_id=? AND status='refused'", (command_id,))
+                known = [k for k in known if k != "refused"]
+                if status in known or any(k in FINAL_STATUSES for k in known):
+                    return
+                self._remember(command_id, status, text)
+            self._db.execute("INSERT INTO results (command_id, status, payload) VALUES (?, ?, ?)",
+                             (command_id, status, text))
             over = self._db.execute("SELECT COUNT(*) FROM results").fetchone()[0] - self.max_results
             if over > 0:
                 self._db.execute("DELETE FROM results WHERE seq IN "
@@ -113,6 +151,43 @@ class ResultOutbox:
                 self._db.execute("INSERT INTO counters (name, value) VALUES ('dropped', ?) "
                                  "ON CONFLICT(name) DO UPDATE SET value = value + excluded.value", (over,))
                 log.warning("result outbox over its cap of %d: %d oldest result(s) dropped", self.max_results, over)
+
+    def _remember(self, command_id: str, status: str, text: str) -> None:
+        """Keep the latest result of a command that ran. A final result is never replaced by a scheduled one."""
+        row = self._db.execute("SELECT payload FROM executed WHERE command_id=?", (command_id,)).fetchone()
+        if row is not None and _status_of(row[0]) in FINAL_STATUSES and status not in FINAL_STATUSES:
+            return
+        self._db.execute("INSERT INTO executed (command_id, payload) VALUES (?, ?) "
+                         "ON CONFLICT(command_id) DO UPDATE SET payload=excluded.payload", (command_id, text))
+        over = self._db.execute("SELECT COUNT(*) FROM executed").fetchone()[0] - EXECUTED_CAP
+        if over > 0:
+            self._db.execute("DELETE FROM executed WHERE seq IN (SELECT seq FROM executed ORDER BY seq LIMIT ?)",
+                             (over,))
+
+    def stored(self, command_id: str) -> dict | None:
+        """The latest result of a command that ran on this host, or None."""
+        with self._lock:
+            row = self._db.execute("SELECT payload FROM executed WHERE command_id=?", (command_id,)).fetchone()
+        try:
+            data = json.loads(row[0]) if row else None
+        except ValueError:
+            return None
+        return data if isinstance(data, dict) else None
+
+    def schedule(self, command_id: str, due_at: float) -> None:
+        with self._lock, self._db:
+            self._db.execute("INSERT OR REPLACE INTO scheduled (command_id, due_at) VALUES (?, ?)",
+                             (command_id, due_at))
+
+    def unschedule(self, command_id: str) -> None:
+        with self._lock, self._db:
+            self._db.execute("DELETE FROM scheduled WHERE command_id=?", (command_id,))
+
+    def scheduled(self) -> dict[str, float]:
+        """Command id to the time its reboot was due, for every reboot not yet resolved."""
+        with self._lock:
+            rows = self._db.execute("SELECT command_id, due_at FROM scheduled ORDER BY rowid").fetchall()
+            return {r[0]: r[1] for r in rows}
 
     def has(self, command_id: str) -> bool:
         with self._lock:
