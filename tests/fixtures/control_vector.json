@@ -1,0 +1,22 @@
+{
+  "note": "Test vector for hostwatch-control. The private seed is bytes 0 to 31. Ed25519 is deterministic, so any correct signer reproduces the signature.",
+  "seed_hex": "000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f",
+  "public_key": "ed25519:A6EHv/POEL4dcN0Y50vAmWfk1jCbpQ1fHdyGZBJVMbg=",
+  "command": {
+    "v": 1,
+    "id": "0b0f7c5e-3a52-4d1e-9a58-6a1f2f3c9d10",
+    "host": "MediaIn-SVR",
+    "action": "fan.set_floor",
+    "params": {
+      "controller": "thermalctl",
+      "header": "pwm2",
+      "min_duty": 20
+    },
+    "requested_by": "sean",
+    "issued_at": 1759600000,
+    "expires_at": 1759600120,
+    "seq": 42
+  },
+  "canonical_json": "{\"action\":\"fan.set_floor\",\"expires_at\":1759600120,\"host\":\"MediaIn-SVR\",\"id\":\"0b0f7c5e-3a52-4d1e-9a58-6a1f2f3c9d10\",\"issued_at\":1759600000,\"params\":{\"controller\":\"thermalctl\",\"header\":\"pwm2\",\"min_duty\":20},\"requested_by\":\"sean\",\"seq\":42,\"v\":1}",
+  "signature": "PDG/VZmGdw4DMvs6dNkGHimkB1ynhQUkqPjeZfcYx2L7ZXHP1eaFIc1nbvOnmQSV4s/HKQVEU4GDFpwXOGD5Bw=="
+}

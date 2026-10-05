@@ -1116,6 +1116,26 @@ application layer only, as described above; it is not tamper-proof against
 someone with write access to the file, which is the same person who can run
 the CLI.
 
+## hostwatch-control verification
+
+The `hostwatch/control/` package is the verification half of the per-host command daemon in `docs/CONTROL.md` of
+the watchpost repository. It is not imported by the collector and has no entry point or service yet. Modules:
+
+- `config.py` loads `control.toml` into frozen dataclasses. On POSIX it refuses a file writable by group or others
+  (enforced). On Windows it cannot check the ACL without pywin32, so the install step must lock the file (advisory
+  until a Windows install exists). Service names are limited to plain characters because they reach a command line
+  later.
+- `signing.py` builds canonical JSON (sorted keys, no spaces, UTF-8 without ASCII escaping) and verifies the Ed25519
+  signature, sent as base64 beside the command, against the pinned key written as `ed25519:` plus base64. The
+  `cryptography` import happens only inside the check, and win32 modules are never imported.
+- `state.py` keeps the highest executed seq and the last 1000 ids in one JSON file, written to a temporary name,
+  flushed and renamed. A corrupt file is an error, never an empty state.
+- `verify.py` runs the checks in order and returns a `Decision` with a reason code on refusal. A command is recorded
+  only after the allowlist accepts it, and before it is handed back, so a crash cannot run it twice. A refusal by
+  the allowlist uses no seq. A state file that cannot be read or written refuses everything (fail closed).
+
+Parameters are matched exactly, so executors never see a field the allowlist did not check.
+
 ## Threat model and quick start documents
 
 `docs/THREAT-MODEL.md` lists assets, trust boundaries, threats and controls, and each control line

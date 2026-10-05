@@ -122,6 +122,13 @@ A pool seen by both the kstat and API sources appears once on the hub, at the wo
 Follow `docs/deploy-truenas.md`. Add the TrueNAS-SVR address to `HOSTWATCH_ALLOWED_CLIENTS`
 on the hub and use its own ingest key, as in step 1 above.
 
+## hostwatch-control (not deployable yet)
+
+The control daemon in `hostwatch/control/` has only its verification code so far. There is nothing to install: no
+entry point, no service, and no `control.toml` is shipped. When it is installed, `control.toml` must be root-owned
+and not writable by group or others on Linux (the loader refuses it otherwise), and writable only by SYSTEM and
+Administrators on Windows. The daemon needs the `control` extra and runs under its own account, not the collector's.
+
 ## Windows source reporting
 
 A Windows agent reports the Linux-only sources (`rapl`, `hwmon`, `mdraid`, `zfs`, `rpi` and `thermalctl` unless `HOSTWATCH_THERMALCTL_STATUS` is set) as not present, so they never raise an unmeasured warning. `win_storage` is unavailable with a reason when Windows returns no physical disks, and a failed pool or virtual disk query appears as an unknown health sample whose `reason` label says which query failed. A `thermalctl` status stamped in the future by more than 5 seconds, or one that becomes older than 60 seconds after detection, makes that source unavailable with the reason.

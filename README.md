@@ -443,6 +443,18 @@ python -m hostwatch windows run                # foreground, for a console check
 
 The durable outbox lives in `C:/ProgramData/hostwatch` (`HOSTWATCH_DATA_DIR`), so batches survive a restart or a hub outage and replay oldest first. The credential is the same `HOSTWATCH_INGEST_KEY` (a host-bound key, preferred) or `HOSTWATCH_INGEST_TOKEN` as on Linux. The installer reads it as a secure string, never prints it, and writes it to `agent.env` in the data directory with an ACL that grants only SYSTEM and Administrators. The service runs as LocalSystem, starts after boot, restarts after a failure (after 5, 30 and 60 seconds, with the count reset after a day), and on a clean stop makes one last delivery attempt so queued batches are not left behind. The `pywin32` package is declared only as the Windows-marked `windows` extra and is not in `requirements.lock`. None of this has run on a real Windows host yet; see `UNVERIFIED.md`.
 
+## hostwatch-control (in progress)
+
+`hostwatch/control/` is the start of the per-host control daemon from `docs/CONTROL.md` in the watchpost
+repository. It is separate from the read-only collector: the collector never imports it, and it needs the optional
+`control` extra (`pip install 'hostwatch[control]'`) for Ed25519. This slice holds only the verification half. It
+loads `control.toml` (the pinned watchpost public key, the host name and the fan, services and reboot allowlist),
+and on POSIX refuses a file that group or others can write. It then checks each signed command in this order:
+signature, host, expiry with 30 seconds of skew, id unseen, seq above the persisted one, and the local allowlist.
+Every refusal has a reason code, listed in `hostwatch/control/verify.py`. The replay state is written atomically and
+a corrupt state file refuses every command. Nothing executes commands or contacts watchpost yet, there is no entry
+point, and the daemon is not installed anywhere. The test vector is in `tests/fixtures/control_vector.json`.
+
 ## Web UI
 
 Open the hub address in a browser and sign in with a hub user. The page lists hosts with the worst
