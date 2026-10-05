@@ -1,0 +1,40 @@
+# hostwatch-control: the per-host command daemon, separate from the read-only collector.
+#
+# It runs as its own unprivileged account and dials out to watchpost only. It opens no port. Root-level
+# work goes through the sudo rules in hostwatch-control.sudoers, which list the exact commands allowed.
+# NoNewPrivileges is deliberately not set, because it would stop sudo from working.
+#
+# Install: see docs/deploy-agents.md. Create the account, the settings file and control.toml first.
+[Unit]
+Description=hostwatch control daemon
+Documentation=https://github.com/trooperthorn/hostwatch
+After=network-online.target
+Wants=network-online.target
+ConditionPathExists=/etc/hostwatch/control.toml
+
+[Service]
+Type=simple
+User=hostwatch-control
+Group=hostwatch-control
+# Holds HOSTWATCH_CONTROL_URL and HOSTWATCH_CONTROL_KEY. Owned by root, mode 0640, group hostwatch-control.
+EnvironmentFile=/etc/hostwatch/control.env
+ExecStart=/opt/hostwatch-control/venv/bin/python -m hostwatch control run
+Restart=on-failure
+RestartSec=10
+# Replay state and the result outbox live here, and nothing else is writable.
+StateDirectory=hostwatch-control
+StateDirectoryMode=0700
+Environment=HOSTWATCH_CONTROL_DATA_DIR=/var/lib/hostwatch-control
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictRealtime=true
+LockPersonality=true
+SystemCallArchitectures=native
+# Fan actions on thermalctl write /etc/thermalctl/overrides.toml, which thermalctl requires to be root
+# owned. This unit does not grant that write; see UNVERIFIED.md for the open owner decision.
+
+[Install]
+WantedBy=multi-user.target

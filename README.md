@@ -443,11 +443,11 @@ python -m hostwatch windows run                # foreground, for a console check
 
 The durable outbox lives in `C:/ProgramData/hostwatch` (`HOSTWATCH_DATA_DIR`), so batches survive a restart or a hub outage and replay oldest first. The credential is the same `HOSTWATCH_INGEST_KEY` (a host-bound key, preferred) or `HOSTWATCH_INGEST_TOKEN` as on Linux. The installer reads it as a secure string, never prints it, and writes it to `agent.env` in the data directory with an ACL that grants only SYSTEM and Administrators. The service runs as LocalSystem, starts after boot, restarts after a failure (after 5, 30 and 60 seconds, with the count reset after a day), and on a clean stop makes one last delivery attempt so queued batches are not left behind. The `pywin32` package is declared only as the Windows-marked `windows` extra and is not in `requirements.lock`. None of this has run on a real Windows host yet; see `UNVERIFIED.md`.
 
-## hostwatch-control (in progress)
+## hostwatch-control
 
 `hostwatch/control/` is the start of the per-host control daemon from `docs/CONTROL.md` in the watchpost
 repository. It is separate from the read-only collector: the collector never imports it, and it needs the optional
-`control` extra (`pip install 'hostwatch[control]'`) for Ed25519. This slice holds only the verification half. It
+`control` extra (`pip install 'hostwatch[control]'`) for Ed25519. It
 loads `control.toml` (the pinned watchpost public key, the host name and the fan, services and reboot allowlist),
 and on POSIX refuses a file that group or others can write. It then checks each signed command in this order:
 signature, host, expiry with 30 seconds of skew, id unseen, seq above the persisted one, and the local allowlist.
@@ -459,9 +459,20 @@ the previous file back if the check fails, then reload thermalctl with `systemct
 shell, for names that pass a strict pattern (letters, digits, `_`, `.`, `-`, no `@`, no `..`, no leading dash);
 `host.reboot` runs `shutdown -r +N` after `delay_s` (rounded up to whole minutes) and can be cancelled with
 `shutdown -c`, which is what the local `hostwatch-control cancel` runs. `deploy/hostwatch-control.sudoers` is the
-sudo rule for exactly those commands. Nothing contacts watchpost yet, there is no entry point or service, and the
-daemon is not installed anywhere. The Windows executors are in `hostwatch/control/actions_windows.py`: `fan.set_floor` reads the fan list from the Thermal Control Suite pipe (`GetFans`) and sends `SetFanMapping` with the same mapping and the new `MinDutyPercent`, reporting a refusal from the service as `refused`; `fan.set_mode` is refused with a plain reason because the Suite pipe has no request that changes dry run; `service.restart` runs `powershell.exe` with a fixed `Restart-Service` script and the service name as a separate argument, only for names in the local list that pass the same strict pattern; `host.reboot` runs `shutdown.exe /r /t <delay_s>` and `shutdown.exe /a` cancels it. The Windows executors are tested only with a fake pipe client and a fake runner. The test vector is in
+sudo rule for exactly those commands. The daemon loop is in `hostwatch/control/daemon.py`. The Windows executors are in `hostwatch/control/actions_windows.py`: `fan.set_floor` reads the fan list from the Thermal Control Suite pipe (`GetFans`) and sends `SetFanMapping` with the same mapping and the new `MinDutyPercent`, reporting a refusal from the service as `refused`; `fan.set_mode` is refused with a plain reason because the Suite pipe has no request that changes dry run; `service.restart` runs `powershell.exe` with a fixed `Restart-Service` script and the service name as a separate argument, only for names in the local list that pass the same strict pattern; `host.reboot` runs `shutdown.exe /r /t <delay_s>` and `shutdown.exe /a` cancels it. The Windows executors are tested only with a fake pipe client and a fake runner. The test vector is in
 `tests/fixtures/control_vector.json`.
+
+The daemon is started with `python -m hostwatch control run`. Every 5 seconds it asks watchpost for this host's commands
+(`GET /api/v1/control/commands?host=`, bearer `wpc_` key), handles them one at a time in `seq` order, and posts each
+result to `POST /api/v1/control/results`. A refused command is not run and its result carries the reason code. Results
+are written to a small durable outbox (`control-outbox.db` in the data directory) before they are sent, so a watchpost
+outage or a restart delays a report but does not lose it, and a replayed command can never overwrite the report of what
+really happened. Settings are `HOSTWATCH_CONTROL_URL`, `HOSTWATCH_CONTROL_KEY`, `HOSTWATCH_CONTROL_CONFIG`,
+`HOSTWATCH_CONTROL_DATA_DIR` and `HOSTWATCH_CONTROL_INTERVAL_S`. The daemon opens no listening port. On Linux it runs
+under its own account from `deploy/hostwatch-control.service` with the sudo rules in `deploy/hostwatch-control.sudoers`; on
+Windows it is the separate `hostwatch-control` service installed by `deploy/windows/install-control.ps1`. `python -m
+hostwatch control cancel` cancels a scheduled reboot locally. The pull, results and install paths are tested only against a
+fake watchpost and fake runners; see `UNVERIFIED.md`. The install steps are in `docs/deploy-agents.md`.
 
 ## Web UI
 

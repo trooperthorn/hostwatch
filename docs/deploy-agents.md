@@ -122,15 +122,56 @@ A pool seen by both the kstat and API sources appears once on the hub, at the wo
 Follow `docs/deploy-truenas.md`. Add the TrueNAS-SVR address to `HOSTWATCH_ALLOWED_CLIENTS`
 on the hub and use its own ingest key, as in step 1 above.
 
-## hostwatch-control (not deployable yet)
+## hostwatch-control
 
-The control daemon in `hostwatch/control/` has its verification code, the Linux executors and the Windows executors so far (the Windows ones call the Thermal Control Suite pipe, `Restart-Service` and `shutdown.exe`, and need a LocalSystem account when installed). There is nothing
-to install: no entry point, no service, and no `control.toml` is shipped. `deploy/hostwatch-control.sudoers` lists the
-only commands the control account may run as root on Linux; regenerate it from your `control.toml` with
-`render_sudoers` in `hostwatch/control/actions_linux.py` when the restart list changes, check it with `visudo -c -f`
-and install it in `/etc/sudoers.d/` with mode 0440. When it is installed, `control.toml` must be root-owned
-and not writable by group or others on Linux (the loader refuses it otherwise), and writable only by SYSTEM and
-Administrators on Windows. The daemon needs the `control` extra and runs under its own account, not the collector's.
+The control daemon is a separate program from the collector. It pulls signed commands from watchpost, checks them against
+the local allowlist `control.toml`, runs the allowed ones and reports the result. It only dials out and opens no port. It
+needs the `control` extra (`pip install 'hostwatch[control]'`) and runs under its own account, not the collector's. The
+collector works without it. None of the steps below has been run on a real host; see `UNVERIFIED.md`.
+
+Before installing, on both platforms:
+
+1. In watchpost, create a control key bound to this host: `--ingest-key-create HOST --ingest-key-scope wpc`. Keep the
+   `wpc_` value out of files you commit.
+2. Write `control.toml` with the watchpost public key (`ed25519:...`), the host name exactly as watchpost knows it, and
+   the fan, services and reboot allowlist. The format is in `CONTROL.md` in the docs folder of the watchpost repository. Everything
+   not listed is refused.
+
+Linux (systemd), as root:
+
+1. Create the account: `useradd --system --no-create-home --shell /usr/sbin/nologin hostwatch-control`.
+2. Install into its own environment: `python3 -m venv /opt/hostwatch-control/venv` and
+   `/opt/hostwatch-control/venv/bin/pip install '/path/to/hostwatch[control]'`.
+3. Put `control.toml` at `/etc/hostwatch/control.toml`, owned by root and not writable by group or others. The loader
+   refuses it otherwise.
+4. Copy `deploy/hostwatch-control.env.example` to `/etc/hostwatch/control.env`, set `HOSTWATCH_CONTROL_URL` and
+   `HOSTWATCH_CONTROL_KEY`, and set owner root, group `hostwatch-control`, mode 0640.
+5. Regenerate `deploy/hostwatch-control.sudoers` from your `control.toml` with `render_sudoers` in
+   `hostwatch/control/actions_linux.py` when the restart list changes, check it with `visudo -c -f`, and install it in
+   `/etc/sudoers.d/hostwatch-control` with mode 0440. It lists the only commands the account may run as root.
+6. Install `deploy/hostwatch-control.service` into `/etc/systemd/system/`, then `systemctl daemon-reload` and
+   `systemctl enable --now hostwatch-control`. Logs are in `journalctl -u hostwatch-control`.
+
+The unit leaves `NoNewPrivileges` off because `sudo` would stop working with it. Fan actions on thermalctl need to write
+`/etc/thermalctl/overrides.toml`, which thermalctl requires to be root owned. The unit does not grant that write, so those
+actions report a failure until the owner chooses how it is granted.
+
+Windows, from an elevated PowerShell (a separate service from `hostwatch-agent`):
+
+1. Put `control.toml` in `C:/ProgramData/hostwatch`, or pass its path as `-ConfigFile`.
+2. Run `deploy/windows/install-control.ps1 -WatchpostUrl https://watchpost.example.lan:8443 -DryRun` to read the steps,
+   then run it again without `-DryRun`. It asks for the `wpc_` key as a secure string and never prints it.
+3. It creates its own environment, writes `control.env`, locks `control.toml` and `control.env` to SYSTEM and
+   Administrators, and registers `hostwatch-control` as LocalSystem, which the Thermal Control Suite pipe needs. Logs are
+   in `control.log` in the data folder.
+4. Remove it with `deploy/windows/uninstall-control.ps1`. It keeps the control files unless `-RemoveControlData` is given.
+
+To run it by hand on either platform: `python -m hostwatch control run`, with `HOSTWATCH_CONTROL_URL` and
+`HOSTWATCH_CONTROL_KEY` set, and optionally `--config`, `--data-dir` and `--env-file`. `python -m hostwatch control cancel`
+cancels a scheduled reboot on this host without watchpost. The settings are `HOSTWATCH_CONTROL_URL`,
+`HOSTWATCH_CONTROL_KEY`, `HOSTWATCH_CONTROL_CONFIG`, `HOSTWATCH_CONTROL_DATA_DIR` (state, results outbox and logs) and
+`HOSTWATCH_CONTROL_INTERVAL_S` (5 to 300, default 5). Over plain HTTP on the LAN the signatures still protect the
+commands, but the key and results travel unencrypted, so TLS to watchpost is recommended.
 
 ## Windows source reporting
 

@@ -7,9 +7,11 @@
   python -m hostwatch event ack ID
   python -m hostwatch cert bind SUBJECT USER | list | revoke SUBJECT
   python -m hostwatch windows run [--data-dir DIR] [--env-file FILE]
+  python -m hostwatch control run [--config FILE] [--data-dir DIR] [--env-file FILE]
+  python -m hostwatch control cancel [--config FILE]
 
 These commands open the database directly (except `windows run`, which runs the agent and
-only uses its outbox), so they are for someone who already
+only uses its outbox, and `control`, the separate hostwatch-control daemon that never opens the hub database), so they are for someone who already
 has shell access to the data directory. That is the trust boundary: they are not
 reachable over the network. Passwords are read with getpass on a terminal or one
 line from stdin otherwise, and are never taken from arguments, echoed or logged.
@@ -32,7 +34,7 @@ from . import auth
 from .config import Config
 from .store import Store
 
-COMMANDS = {"user", "key", "cert", "source", "event", "boot", "bootstrap-admin", "windows"}
+COMMANDS = {"user", "key", "cert", "source", "event", "boot", "bootstrap-admin", "windows", "control"}
 MIN_PASSWORD_LEN = 12
 
 
@@ -75,6 +77,14 @@ def _parser() -> argparse.ArgumentParser:
     run_win.add_argument("--data-dir", default=None,
                          help="agent data directory (default: HOSTWATCH_DATA_DIR or C:/ProgramData/hostwatch)")
     run_win.add_argument("--env-file", default=None, help="settings file (default: agent.env in the data directory)")
+    ctl = sub.add_parser("control", help="the hostwatch-control command daemon").add_subparsers(
+        dest="action", required=True)
+    run_ctl = ctl.add_parser("run", help="pull and run signed commands from watchpost in the foreground")
+    run_ctl.add_argument("--config", default=None, help="control.toml (default: HOSTWATCH_CONTROL_CONFIG or the platform path)")
+    run_ctl.add_argument("--data-dir", default=None, help="state and outbox folder (default: HOSTWATCH_CONTROL_DATA_DIR)")
+    run_ctl.add_argument("--env-file", default=None, help="settings file (default: control.env in the data directory)")
+    cancel_ctl = ctl.add_parser("cancel", help="cancel a scheduled reboot on this host")
+    cancel_ctl.add_argument("--config", default=None, help="control.toml (default: HOSTWATCH_CONTROL_CONFIG or the platform path)")
     return p
 
 
@@ -108,6 +118,12 @@ def run(argv: list[str], cfg: Config) -> int:
         # The agent keeps its own outbox and never opens the hub database.
         from .windows.service import run_foreground
         return run_foreground(args.data_dir, args.env_file)
+    if args.command == "control":
+        # A separate daemon with its own account, data folder and outbox. The collector never imports it.
+        from .control import daemon
+        if args.action == "cancel":
+            return daemon.run_cancel(args.config)
+        return daemon.run_foreground(args.config, args.data_dir, args.env_file)
     store = Store(cfg.data_dir / "hostwatch.db")
     actor = _actor()
     label = args.command + (" " + args.action if getattr(args, "action", None) else "")

@@ -1119,7 +1119,8 @@ the CLI.
 ## hostwatch-control verification
 
 The `hostwatch/control/` package is the verification half of the per-host command daemon in `docs/CONTROL.md` of
-the watchpost repository. It is not imported by the collector and has no entry point or service yet. Modules:
+the watchpost repository. It is not imported by the collector at import time. The pull loop, results outbox and service
+files are described in the section after the executors. Modules:
 
 - `config.py` loads `control.toml` into frozen dataclasses. On POSIX it refuses a file writable by group or others
   (enforced). On Windows it cannot check the ACL without pywin32, so the install step must lock the file (advisory
@@ -1152,7 +1153,8 @@ the mode and the service name, all before any call.
   Whether every header is mapped before going active is enforced by `check-config`, not duplicated here.
 - Restart: `systemctl restart <unit>` or `docker restart <name>` for `docker:<name>`, only for names in the local list.
 - Reboot: `shutdown -r +N` with N the delay in whole minutes rounded up, capped at 999, and `shutdown -c` to cancel.
-  `main_cancel` is the body of the local `hostwatch-control cancel` command; the entry point is a later slice.
+  `main_cancel` is the older body of the local cancel command; `python -m hostwatch control cancel` now runs the
+  platform executor's `cancel_reboot` through `daemon.run_cancel`.
 - Privilege: a process that is not root prefixes the commands with `sudo -n`. `render_sudoers` produces the sudoers
   rule from the allowlist, and `deploy/hostwatch-control.sudoers` is its output for an example list. The only wildcard
   is the digit pattern in the shutdown delay. This is an enforced limit on what the account may run as root. The
@@ -1182,6 +1184,54 @@ length-prefixed JSON exchange on a daemon thread with a timeout, the same way th
   protection against a name being read as anything but one token.
 - `host.reboot` runs `shutdown.exe /r /t <delay_s>` (capped at the 10 year maximum of the tool) and `cancel_reboot`
   runs `shutdown.exe /a`.
+
+### Pull loop, results outbox and service files
+
+`daemon.py` holds `ControlDaemon`, `outbox.py` the results outbox and `service.py` the Windows service host. The
+daemon only dials out and opens no port. Each cycle does these steps in order:
+
+1. Replay queued results oldest first. A result leaves the outbox after a 2xx answer, or after a 400, 404, 409 or 422
+   (watchpost can never accept it, or already has it). Any other failure leaves it queued and the cycle reports a
+   delivery error.
+2. `GET /api/v1/control/commands?host=<host from control.toml>` with `Authorization: Bearer <wpc key>`. A 401 or 403 is
+   reported as a rejected key, never with the key. The answer is `{"commands": [{"command": {...}, "signature": "..."}]}`.
+3. Sort by `seq` and handle at most 20 commands, one at a time. Each goes through `CommandVerifier`, then the platform
+   executor (`LinuxActions` or `WindowsActions`, chosen by `sys.platform`, the Windows module imported only there). The
+   result is written to the outbox and delivery is tried before the next command starts. An executor that raises is
+   reported as `failed`. A command with no usable id cannot be reported and is only logged.
+
+A result is `{"v":1,"id","host","action","seq","status","ok","reason","output","received_at","started_at",
+"finished_at"}`. `status` is `done`, `scheduled`, `cancelled`, `failed` or `refused`, and a refusal's `reason` is the
+code from `verify.py`. Output is masked for key shapes, bearer tokens and password settings and clipped to 2000
+characters; this is a courtesy and not a guarantee that no secret is present. The outbox keeps the first result per
+command id (a refusal of a replay is not queued while the real result waits) and holds at most 200 results, dropping the
+oldest and counting it, because watchpost shows a command with no result as `unknown`. A corrupt outbox file is renamed
+aside and a fresh one started.
+
+Verification records a command before it runs (at most once). A crash between execution and the outbox write therefore
+loses the report and not the safety: watchpost shows `unknown` and the command is never run twice.
+
+After a failed cycle the wait grows from the interval (5 s by default, 5 to 300) in doubling steps to 60 s. The loop
+ends on SIGINT, SIGTERM or a service stop, and results still queued stay on disk for the next start. Startup fails with
+a plain message when the `control` extra is missing, `control.toml` is unreadable or writable by group or others, or the
+URL or key setting is missing or the key does not start with `wpc_`.
+
+Service files, with their labels:
+
+- `deploy/hostwatch-control.service` runs as `hostwatch-control`, a separate account from the collector, with a
+  private state directory, `ProtectSystem=strict` and no writable path except that directory. `NoNewPrivileges` is left
+  off on purpose because it would stop `sudo`. The root limit is the sudoers snippet (enforced by sudo). The rest of the
+  hardening is defence in depth, not authentication. The unit grants no write to `/etc/thermalctl`, so Linux fan
+  actions fail with a clear report until the owner decides how that file is written (see `UNVERIFIED.md`).
+- `deploy/windows/install-control.ps1` and `uninstall-control.ps1` register `hostwatch-control`, a service separate from
+  `hostwatch-agent`, with its own virtual environment, as LocalSystem with restart-on-failure. The installer locks
+  `control.toml` and `control.env` to SYSTEM and Administrators before the key is written. The data folder is the
+  installer's `DataDir` service parameter, as for the agent. The ACL is advisory until checked on a host.
+- `python -m hostwatch control run` runs the loop in the foreground on either platform.
+
+Import isolation is enforced by `tests/test_control_daemon.py`: a static scan of every module outside `control/` for an
+import of `hostwatch.control` that runs at import time, and a fresh interpreter that imports the collector entry points
+and checks that no `hostwatch.control` module is loaded.
 
 ## Threat model and quick start documents
 

@@ -1,0 +1,383 @@
+"""The hostwatch-control pull loop.
+
+Every cycle the daemon first replays any results that could not be sent earlier, then asks watchpost
+for the commands waiting for this host (`GET /api/v1/control/commands?host=`, bearer `wpc_` key) and
+handles them one at a time in `seq` order. Each command goes through `CommandVerifier` (signature,
+host, expiry, id, seq, local allowlist). An accepted command is executed by the platform executor and
+a refused one is not executed. Either way a result is written to the durable outbox first and then
+posted to `POST /api/v1/control/results`, so a network failure or a restart never loses the report.
+
+The daemon only ever dials out. It opens no listening port. The key is read from the environment or
+the protected settings file, is sent only as a bearer header and is never logged. Output sent back is
+clipped and has recognisable secrets masked, but masking is a courtesy and not a guarantee.
+
+Results are posted as JSON:
+  {"v":1, "id", "host", "action", "seq", "status", "ok", "reason", "output",
+   "received_at", "started_at", "finished_at"}
+`status` is done, scheduled, cancelled, failed or refused. For a refusal `reason` is the stable code
+from `verify.py`. The watchpost results route is not built yet, so this shape is this daemon's
+proposal and is listed in UNVERIFIED.md.
+
+Settings (environment, optionally seeded from a KEY=value file named control.env in the data directory):
+  HOSTWATCH_CONTROL_URL         watchpost base URL, for example https://watchpost.example.lan:8443
+  HOSTWATCH_CONTROL_KEY         the host's wpc_ control key
+  HOSTWATCH_CONTROL_CONFIG      path of control.toml (default /etc/hostwatch/control.toml, or control.toml in
+                                the data directory on Windows)
+  HOSTWATCH_CONTROL_DATA_DIR    replay state, result outbox and logs (default /var/lib/hostwatch-control,
+                                or C:/ProgramData/hostwatch on Windows)
+  HOSTWATCH_CONTROL_INTERVAL_S  poll interval, 5 to 300 (default 5)
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import re
+import signal
+import sys
+import threading
+import time
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Protocol
+
+import httpx
+
+from . import config as cfgmod
+from .actions_linux import ActionResult, _clip
+from .outbox import OUTBOX_FILE, ResultOutbox
+from .signing import SigningUnavailable
+from .state import STATE_FILE
+from .verify import REPLAYED_ID, CommandVerifier
+
+log = logging.getLogger("hostwatch.control")
+
+COMMANDS_PATH = "/api/v1/control/commands"
+RESULTS_PATH = "/api/v1/control/results"
+KEY_PREFIX = "wpc_"
+MIN_INTERVAL_S = 5.0
+MAX_INTERVAL_S = 300.0
+MAX_BACKOFF_S = 60.0
+HTTP_TIMEOUT_S = 10.0
+MAX_PER_PULL = 20
+# A result answered with one of these can never succeed, so it leaves the outbox instead of blocking it.
+# 409 means watchpost already has a result for that command id.
+DROP_STATUSES = frozenset({400, 404, 409, 422})
+LINUX_DATA_DIR = Path("/var/lib/hostwatch-control")
+LINUX_CONFIG = Path("/etc/hostwatch/control.toml")
+WINDOWS_DATA_DIR = Path("C:/ProgramData/hostwatch")
+ENV_FILE_NAME = "control.env"
+SIGNING_UNAVAILABLE = "signing_unavailable"
+
+_SECRETS = re.compile(r"\b(?:wpc|wpi|wpf|hw)_[A-Za-z0-9_-]{8,}|Bearer\s+\S+|"
+                      r"(?i:(?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*)\S+")
+
+
+class SettingsError(Exception):
+    """The daemon cannot start with the settings it was given."""
+
+
+def redact(text: str) -> str:
+    """Mask anything that looks like a key, a bearer token or a password setting, then clip."""
+    return _clip(_SECRETS.sub("[redacted]", text))
+
+
+@dataclass(frozen=True)
+class Settings:
+    url: str
+    key: str
+    config_path: Path
+    data_dir: Path
+    interval_s: float = MIN_INTERVAL_S
+
+    def __repr__(self) -> str:  # the key must never reach a log line through a repr
+        return f"Settings(url={self.url!r}, config_path={self.config_path!r}, data_dir={self.data_dir!r})"
+
+
+def default_data_dir(platform: str | None = None) -> Path:
+    return WINDOWS_DATA_DIR if (platform or sys.platform) == "win32" else LINUX_DATA_DIR
+
+
+def load_settings(environ: Mapping[str, str] | None = None, *, data_dir: str | Path | None = None,
+                  config_path: str | Path | None = None, platform: str | None = None) -> Settings:
+    env = os.environ if environ is None else environ
+    folder = Path(data_dir or env.get("HOSTWATCH_CONTROL_DATA_DIR") or default_data_dir(platform))
+    chosen = config_path or env.get("HOSTWATCH_CONTROL_CONFIG")
+    if chosen:
+        config = Path(chosen)
+    elif (platform or sys.platform) == "win32":
+        config = folder / "control.toml"
+    else:
+        config = LINUX_CONFIG
+    url = (env.get("HOSTWATCH_CONTROL_URL") or "").strip().rstrip("/")
+    if not re.match(r"^https?://[^/\s]+", url):
+        raise SettingsError("HOSTWATCH_CONTROL_URL must be the watchpost base URL, starting with http:// or https://")
+    key = (env.get("HOSTWATCH_CONTROL_KEY") or "").strip()
+    if not key.startswith(KEY_PREFIX) or len(key) <= len(KEY_PREFIX):
+        raise SettingsError(f"HOSTWATCH_CONTROL_KEY must be a control key starting with {KEY_PREFIX}")
+    raw = env.get("HOSTWATCH_CONTROL_INTERVAL_S")
+    try:
+        interval = float(raw) if raw else MIN_INTERVAL_S
+    except ValueError as exc:
+        raise SettingsError("HOSTWATCH_CONTROL_INTERVAL_S must be a number") from exc
+    if not MIN_INTERVAL_S <= interval <= MAX_INTERVAL_S:
+        raise SettingsError(f"HOSTWATCH_CONTROL_INTERVAL_S must be from {MIN_INTERVAL_S:g} to {MAX_INTERVAL_S:g}")
+    return Settings(url, key, config, folder, interval)
+
+
+class Executor(Protocol):
+    def execute(self, command: dict) -> ActionResult: ...
+
+
+def build_actions(config: cfgmod.ControlConfig, platform: str | None = None) -> Any:
+    """The platform executor. The Windows module is imported only on Windows."""
+    if (platform or sys.platform) == "win32":
+        from .actions_windows import WindowsActions
+        return WindowsActions(config)
+    from .actions_linux import LinuxActions
+    return LinuxActions(config)
+
+
+class DeliveryError(Exception):
+    """watchpost could not be reached or answered with a failure."""
+
+
+def _seq_of(item: object) -> int:
+    command = item.get("command") if isinstance(item, dict) else None
+    seq = command.get("seq") if isinstance(command, dict) else None
+    return seq if isinstance(seq, int) and not isinstance(seq, bool) else 0
+
+
+class ControlDaemon:
+    def __init__(self, settings: Settings, config: cfgmod.ControlConfig, verifier: CommandVerifier,
+                 actions: Executor, outbox: ResultOutbox, client: httpx.Client,
+                 clock: Callable[[], float] = time.time) -> None:
+        self.settings, self.config = settings, config
+        self.verifier, self.actions, self.outbox, self.client, self.clock = verifier, actions, outbox, client, clock
+        self.stop_event = threading.Event()
+        self._failures = 0
+        self._headers = {"Authorization": f"Bearer {settings.key}"}
+
+    # network ----------------------------------------------------------------------------------
+
+    def pull(self) -> list:
+        try:
+            r = self.client.get(self.settings.url + COMMANDS_PATH, params={"host": self.config.host},
+                                headers=self._headers, timeout=HTTP_TIMEOUT_S)
+        except httpx.HTTPError as exc:
+            raise DeliveryError(f"pull failed: {type(exc).__name__}") from exc
+        if r.status_code in (401, 403):
+            raise DeliveryError(f"watchpost refused the control key (HTTP {r.status_code}); check "
+                                "HOSTWATCH_CONTROL_KEY and that it is bound to this host name")
+        if not r.is_success:
+            raise DeliveryError(f"pull answered HTTP {r.status_code}")
+        try:
+            items = r.json()["commands"]
+        except (ValueError, KeyError, TypeError) as exc:
+            raise DeliveryError("pull answer is not a command list") from exc
+        if not isinstance(items, list):
+            raise DeliveryError("pull answer is not a command list")
+        return items
+
+    def flush(self) -> None:
+        """Send queued results oldest first. A result leaves the outbox only after a 2xx answer, or after
+        an answer that says it can never succeed. Any other failure raises and the result stays queued."""
+        while (head := self.outbox.peek()) is not None:
+            if self.stop_event.is_set():
+                return
+            seq, payload = head
+            try:
+                r = self.client.post(self.settings.url + RESULTS_PATH, json=payload,
+                                     headers=self._headers, timeout=HTTP_TIMEOUT_S)
+            except httpx.HTTPError as exc:
+                raise DeliveryError(f"result post failed: {type(exc).__name__}") from exc
+            if r.is_success:
+                log.info("result for command %s delivered (%s)", payload.get("id"), payload.get("status"))
+                self.outbox.ack(seq)
+            elif r.status_code in DROP_STATUSES:
+                log.error("watchpost answered HTTP %d for the result of command %s; dropping it",
+                          r.status_code, payload.get("id"))
+                self.outbox.ack(seq)
+            else:
+                raise DeliveryError(f"result post answered HTTP {r.status_code}")
+
+    # one command ------------------------------------------------------------------------------
+
+    def _result(self, command: dict, received: float, started: float, ok: bool, status: str,
+                reason: str, output: str) -> dict:
+        action = command.get("action")
+        seq = command.get("seq")
+        return {"v": 1, "id": command["id"], "host": self.config.host,
+                "action": action if isinstance(action, str) else "",
+                "seq": seq if isinstance(seq, int) and not isinstance(seq, bool) else None,
+                "status": status, "ok": ok, "reason": reason, "output": redact(output),
+                "received_at": int(received), "started_at": int(started), "finished_at": int(self.clock())}
+
+    def handle(self, item: object) -> dict | None:
+        """Verify and execute one pulled command and return its result, or None when it has no usable id."""
+        received = self.clock()
+        command = item.get("command") if isinstance(item, dict) else None
+        signature = item.get("signature") if isinstance(item, dict) else None
+        if not isinstance(command, dict) or not isinstance(command.get("id"), str) or not command["id"]:
+            log.error("a pulled command has no usable id and cannot be reported; ignored")
+            return None
+        try:
+            decision = self.verifier.check(command, signature)
+        except SigningUnavailable as exc:
+            return self._result(command, received, received, False, "refused", SIGNING_UNAVAILABLE, str(exc))
+        if not decision:
+            log.warning("command %s refused: %s %s", command["id"], decision.reason, decision.detail)
+            return self._result(command, received, received, False, "refused", decision.reason, decision.detail)
+        started = self.clock()
+        log.info("executing command %s (%s, seq %s, requested by %s)", command["id"], command["action"],
+                 command["seq"], command["requested_by"])
+        try:
+            done = self.actions.execute(command)
+        except Exception as exc:  # an executor bug must be reported, not end the loop
+            log.exception("executor failed on command %s", command["id"])
+            return self._result(command, received, started, False, "failed", "action_failed",
+                                f"{type(exc).__name__}: {exc}")
+        reason = "" if done.ok else ("action_refused" if done.status == "refused" else "action_failed")
+        return self._result(command, received, started, done.ok, done.status, reason, done.output)
+
+    # the loop ---------------------------------------------------------------------------------
+
+    def cycle(self) -> None:
+        """One pass: replay unsent results, pull, and handle each command to completion in seq order.
+        Raises DeliveryError when watchpost could not be reached, after doing everything it still could."""
+        problem: DeliveryError | None = None
+        try:
+            self.flush()
+        except DeliveryError as exc:
+            problem = exc
+        items = sorted(self.pull(), key=_seq_of)
+        for item in items[:MAX_PER_PULL]:
+            if self.stop_event.is_set():
+                break
+            result = self.handle(item)
+            if result is None:
+                continue
+            if result["reason"] == REPLAYED_ID and self.outbox.has(result["id"]):
+                continue  # the real result is still queued; a refusal of the replay must not hide it
+            self.outbox.add(result["id"], result)
+            try:
+                self.flush()
+            except DeliveryError as exc:
+                problem = exc
+        if problem is not None:
+            raise problem
+
+    def _backoff(self) -> float:
+        return min(self.settings.interval_s * (2 ** min(self._failures, 6)), MAX_BACKOFF_S)
+
+    def run(self) -> None:
+        log.info("hostwatch-control started for host %s, polling %s every %gs", self.config.host,
+                 self.settings.url, self.settings.interval_s)
+        while not self.stop_event.is_set():
+            started = time.monotonic()
+            wait = self.settings.interval_s
+            try:
+                self.cycle()
+                self._failures = 0
+            except DeliveryError as exc:
+                self._failures += 1
+                wait = self._backoff()
+                log.warning("%s; %d result(s) queued, next attempt in %gs", exc, self.outbox.depth(), wait)
+            except Exception:  # last resort: nothing may end the loop
+                log.exception("unexpected error in the control loop; continuing")
+            self.stop_event.wait(max(0.0, wait - (time.monotonic() - started)))
+        log.info("hostwatch-control stopped; %d result(s) remain queued", self.outbox.depth())
+
+    def stop(self) -> None:
+        """Ask the loop to end. It only sets a flag, so a signal handler or a service control handler may call it."""
+        self.stop_event.set()
+
+    def close(self) -> None:
+        self.outbox.close()
+        self.client.close()
+
+
+def build_daemon(settings: Settings, *, client: httpx.Client | None = None, actions: Any = None,
+                 clock: Callable[[], float] = time.time) -> ControlDaemon:
+    """Load control.toml and open the state and outbox. Anything unsafe or missing stops the daemon here."""
+    try:
+        import cryptography  # noqa: F401
+    except ImportError as exc:
+        raise SettingsError("the control extra is not installed: pip install 'hostwatch[control]'") from exc
+    try:
+        config = cfgmod.load(settings.config_path)
+    except cfgmod.ConfigError as exc:
+        raise SettingsError(str(exc)) from exc
+    settings.data_dir.mkdir(parents=True, exist_ok=True)
+    verifier = CommandVerifier(config, settings.data_dir / STATE_FILE, clock=clock)
+    if verifier.state is None:
+        log.error("the replay state is unusable (%s); every command will be refused until it is fixed",
+                  verifier.state_error)
+    return ControlDaemon(settings, config, verifier, actions if actions is not None else build_actions(config),
+                         ResultOutbox(settings.data_dir / OUTBOX_FILE), client or httpx.Client(), clock)
+
+
+def configure_logging(data_dir: Path | None = None) -> None:
+    """Console logging, or a rotating file in the data directory when one is given (the Windows service)."""
+    import logging.handlers
+    handlers: list[logging.Handler] = [logging.StreamHandler()]
+    if data_dir is not None:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        handlers = [logging.handlers.RotatingFileHandler(data_dir / "control.log", maxBytes=5_000_000,
+                                                         backupCount=3, encoding="utf-8")]
+    logging.basicConfig(level=logging.INFO, handlers=handlers, force=True,
+                        format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+
+
+def settings_from_files(data_dir: str | Path | None = None, config_path: str | Path | None = None,
+                        env_file: str | Path | None = None) -> Settings:
+    """Settings from the environment after the optional control.env file is loaded. The file never
+    overrides a variable that is already set."""
+    folder = Path(data_dir or os.environ.get("HOSTWATCH_CONTROL_DATA_DIR") or default_data_dir())
+    path = Path(env_file) if env_file else folder / ENV_FILE_NAME
+    if path.is_file():
+        from ..windows.service import load_env_file
+        try:
+            load_env_file(path)
+        except ValueError as exc:
+            raise SettingsError(str(exc)) from exc
+    return load_settings(data_dir=folder, config_path=config_path)
+
+
+def run_foreground(config_path: str | None = None, data_dir: str | None = None, env_file: str | None = None,
+                   daemon_factory: Callable[[Settings], ControlDaemon] = build_daemon) -> int:
+    """`python -m hostwatch control run`. SIGINT or SIGTERM ends the loop cleanly."""
+    try:
+        settings = settings_from_files(data_dir, config_path, env_file)
+        daemon = daemon_factory(settings)
+    except (SettingsError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    for name in ("SIGINT", "SIGTERM", "SIGBREAK"):
+        number = getattr(signal, name, None)
+        if number is not None:
+            try:
+                signal.signal(number, lambda *_: daemon.stop())
+            except ValueError:
+                pass  # not the main thread
+    try:
+        daemon.run()
+    finally:
+        daemon.close()
+    return 0
+
+
+def run_cancel(config_path: str | None = None,
+               actions_factory: Callable[[cfgmod.ControlConfig], Any] = build_actions) -> int:
+    """`python -m hostwatch control cancel`: cancel a scheduled reboot on this host without watchpost."""
+    path = config_path or os.environ.get("HOSTWATCH_CONTROL_CONFIG") or (
+        str(WINDOWS_DATA_DIR / "control.toml") if sys.platform == "win32" else str(LINUX_CONFIG))
+    try:
+        config = cfgmod.load(path)
+    except cfgmod.ConfigError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    result = actions_factory(config).cancel_reboot()
+    print(result.output)
+    return 0 if result.ok else 1
