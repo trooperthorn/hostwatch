@@ -120,6 +120,8 @@ def parse(data: dict) -> ControlConfig:
     raw_key = data.get("observe_public_key")
     if raw_key is None:
         raw_key = data.get(LEGACY_KEY_NAME)
+    elif LEGACY_KEY_NAME in data and data[LEGACY_KEY_NAME] != raw_key:
+        raise ConfigError("the allowlist holds two different public keys; remove the old key name")
     key = parse_public_key(raw_key)
 
     fan = None

@@ -519,3 +519,14 @@ def test_an_allowlist_written_with_the_previous_key_name_still_loads():
     raw = {"host": HOST, legacy: pub_text(Ed25519PrivateKey.generate())}
     assert cfgmod.parse(raw).host == HOST
     assert cfgmod.parse({"host": HOST, "observe_public_key": raw[legacy]}).host == HOST
+
+
+def test_an_allowlist_holding_two_different_key_names_with_different_keys_is_refused():
+    legacy = "watch" + "post" + "_public_key"
+    raw = {
+        "host": HOST,
+        legacy: pub_text(Ed25519PrivateKey.generate()),
+        "observe_public_key": pub_text(Ed25519PrivateKey.generate()),
+    }
+    with pytest.raises(cfgmod.ConfigError):
+        cfgmod.parse(raw)
