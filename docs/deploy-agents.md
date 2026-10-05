@@ -135,7 +135,11 @@ Before installing, on both platforms:
    `wpc_` value out of files you commit.
 2. Write `control.toml` with the watchpost public key (`ed25519:...`), the host name exactly as watchpost knows it, and
    the fan, services and reboot allowlist. The format is in `CONTROL.md` in the docs folder of the watchpost repository. Everything
-   not listed is refused.
+   not listed is refused. The `host` must also be this machine's own name (full or short, any case): the daemon refuses
+   to start on any other machine, and refuses each command with reason `wrong_machine` if the name changes later. If the
+   operating system name differs from the watchpost name, add `machine_id = "<contents of /etc/machine-id>"` (the
+   MachineGuid on Windows) and that id is checked instead. The agent logs one warning when `HOSTWATCH_HOST_NAME`
+   differs from the machine name, which is normal in a container and does not stop it.
 
 Linux (systemd), as root:
 

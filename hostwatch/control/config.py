@@ -64,6 +64,7 @@ class ControlConfig:
     fan: FanPolicy | None = None
     restart: tuple[str, ...] = ()
     reboot: RebootPolicy = field(default_factory=RebootPolicy)
+    machine_id: str = ""
 
 
 def parse_public_key(text: object) -> bytes:
@@ -146,7 +147,12 @@ def parse(data: dict) -> ControlConfig:
             raise ConfigError("reboot.delay_s must not be negative")
         reboot = RebootPolicy(_bool(reboot_t, "allow", False), effective_reboot_delay(delay))
 
-    return ControlConfig(public_key=key, host=host.strip(), fan=fan, restart=restart, reboot=reboot)
+    machine_id = data.get("machine_id", "")
+    if not isinstance(machine_id, str):
+        raise ConfigError("machine_id must be a string")
+
+    return ControlConfig(public_key=key, host=host.strip(), fan=fan, restart=restart, reboot=reboot,
+                         machine_id=machine_id.strip())
 
 
 # Owners accepted for control.toml on POSIX. Tests widen this to the test user.

@@ -28,6 +28,7 @@ from hostwatch import cli  # noqa: E402
 from hostwatch.config import Config  # noqa: E402
 from hostwatch.control import config as cfgmod  # noqa: E402
 from hostwatch.control import daemon as d  # noqa: E402
+from hostwatch.control import identity as ident  # noqa: E402
 from hostwatch.control import service as csvc  # noqa: E402
 from hostwatch.control import verify as v  # noqa: E402
 from hostwatch.control.actions_linux import ActionResult, LinuxActions, RunResult  # noqa: E402
@@ -41,6 +42,16 @@ DEPLOY = ROOT / "deploy"
 URL = "http://watchpost.test"
 KEY = "wpc_" + "k3yvalue" * 4
 RESULT_FIELDS = {"id", "state", "output", "started_at", "finished_at"}
+
+
+REAL_MACHINE_NAMES = ident.machine_names
+
+
+@pytest.fixture(autouse=True)
+def _this_machine_is_the_host(monkeypatch):
+    """The tests run on any machine, so the machine is made to be the host the config names."""
+    monkeypatch.setattr(ident, "machine_names", lambda: {HOST.lower()})
+    monkeypatch.setattr(ident, "local_machine_id", lambda: "")
 
 
 @pytest.fixture
@@ -1006,3 +1017,92 @@ def test_an_old_outbox_with_one_row_per_command_is_migrated(tmp_path):
     box.add("a", {"id": "a", "status": "failed"})
     assert box.depth() == 1  # the first final result still wins
     box.close()
+
+
+# --- host identity guard --------------------------------------------------------------------
+
+def _names(monkeypatch, *names):
+    monkeypatch.setattr(ident, "machine_names", lambda: set(names))
+
+
+def _set_toml(env, extra=""):
+    path = env.settings.config_path
+    path.write_text(extra + path.read_text(encoding="utf-8"), encoding="utf-8")
+
+
+def test_a_mismatched_name_refuses_to_start_and_names_both(env, monkeypatch):
+    _names(monkeypatch, "ai-pi")
+    monkeypatch.setattr(ident.socket, "gethostname", lambda: "ai-pi")
+    with pytest.raises(d.SettingsError) as err:
+        env.build()
+    assert "MediaIn-SVR" in str(err.value) and "ai-pi" in str(err.value)
+
+
+@pytest.mark.parametrize("names", [("mediain-svr",), ("mediain-svr", "mediain-svr.lan"), ("mediain-svr.lan",)])
+def test_short_fqdn_and_case_variants_are_accepted(env, monkeypatch, names):
+    _names(monkeypatch, *names)
+    env.build().close()
+
+
+def test_the_name_set_holds_short_and_lower_case_forms(monkeypatch):
+    monkeypatch.setattr(ident.socket, "gethostname", lambda: "MediaIn-SVR.Lan")
+    monkeypatch.setattr(ident.socket, "getfqdn", lambda: "MediaIn-SVR.Lan")
+    assert {"mediain-svr.lan", "mediain-svr"} <= REAL_MACHINE_NAMES()
+
+
+def test_a_config_host_with_a_domain_matches_the_short_machine_name(env, monkeypatch):
+    cfg = cfgmod.parse({"host": "MediaIn-SVR.lan", "watchpost_public_key": "ed25519:" + "A" * 43 + "="})
+    _names(monkeypatch, "mediain-svr")
+    assert ident.check(cfg) == ""
+
+
+def test_a_machine_id_match_is_accepted_when_the_names_differ(env, monkeypatch):
+    _set_toml(env, 'machine_id = "ABC-123"\n')
+    _names(monkeypatch, "other-name")
+    monkeypatch.setattr(ident, "local_machine_id", lambda: "abc-123")
+    env.build().close()
+
+
+def test_a_machine_id_mismatch_is_refused_even_when_the_names_match(env, monkeypatch):
+    _set_toml(env, 'machine_id = "abc-123"\n')
+    monkeypatch.setattr(ident, "local_machine_id", lambda: "zzz-999")
+    with pytest.raises(d.SettingsError, match="machine_id"):
+        env.build()
+
+
+def test_machine_id_must_be_a_string():
+    with pytest.raises(cfgmod.ConfigError):
+        cfgmod.parse({"host": "h", "watchpost_public_key": "ed25519:" + "A" * 43 + "=", "machine_id": 5})
+
+
+def test_a_name_change_between_commands_refuses_before_the_action(env, signer, monkeypatch):
+    actions = FakeExecutor()
+    daemon = env.build(actions)
+    env.wp.add(signer, id="c1", seq=1, action="service.restart", params={"name": "hostwatch-agent"})
+    _names(monkeypatch, "renamed-box")
+    daemon.cycle()
+    assert actions.calls == []
+    assert env.wp.results[0]["state"] == "refused"
+    assert env.wp.results[0]["output"].startswith(ident.WRONG_MACHINE)
+    daemon.close()
+
+
+def test_the_agent_warns_once_when_the_host_name_differs(tmp_path, monkeypatch, caplog):
+    from hostwatch.agent import Agent
+    monkeypatch.setattr("hostwatch.agent.socket.gethostname", lambda: "real-machine")
+    monkeypatch.setenv("HOSTWATCH_DATA_DIR", str(tmp_path))
+    cfg = Config(host_name="Other-Name")
+    with caplog.at_level(logging.WARNING, logger="hostwatch.agent"):
+        Agent(cfg, platform="x86").finish()
+    warned = [r for r in caplog.records if "HOSTWATCH_HOST_NAME" in r.getMessage()]
+    assert len(warned) == 1
+    assert "Other-Name" in warned[0].getMessage() and "real-machine" in warned[0].getMessage()
+
+
+def test_the_agent_stays_quiet_when_the_names_match(tmp_path, monkeypatch, caplog):
+    from hostwatch.agent import Agent
+    monkeypatch.setattr("hostwatch.agent.socket.gethostname", lambda: "Real-Machine.lan")
+    monkeypatch.setenv("HOSTWATCH_DATA_DIR", str(tmp_path))
+    with caplog.at_level(logging.WARNING, logger="hostwatch.agent"):
+        Agent(Config(host_name="real-machine"), platform="x86").finish()
+    assert not [r for r in caplog.records if "HOSTWATCH_HOST_NAME" in r.getMessage()]

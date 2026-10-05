@@ -1127,6 +1127,13 @@ files are described in the section after the executors. Modules:
   that the owner is SYSTEM or Administrators only when pywin32 is installed; otherwise the install step must lock the
   file (advisory until a Windows install exists). Service names are limited to plain characters because they reach a command line
   later.
+- `identity.py` compares the `host` in `control.toml` with the machine's own name (`socket.gethostname()` and the
+  FQDN, each with its short form, lower case, plus COMPUTERNAME on Windows). A different name stops the daemon at
+  start with an error naming both. A host whose operating system name differs from its watchpost name sets
+  `machine_id` in `control.toml`, which must equal `/etc/machine-id` or the Windows MachineGuid, and then only the id
+  decides. The daemon repeats the check before every command, so a renamed or cloned disk answers `refused` with
+  reason `wrong_machine` and runs nothing. The agent only warns once when `HOSTWATCH_HOST_NAME` differs from the
+  machine name, because containers often differ.
 - `signing.py` builds canonical JSON (sorted keys, no spaces, UTF-8 without ASCII escaping) and verifies the Ed25519
   signature, sent as base64 beside the command, against the pinned key written as `ed25519:` plus base64. The
   `cryptography` import happens only inside the check, and win32 modules are never imported.

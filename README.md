@@ -449,7 +449,10 @@ The durable outbox lives in `C:/ProgramData/hostwatch` (`HOSTWATCH_DATA_DIR`), s
 repository. It is separate from the read-only collector: the collector never imports it, and it needs the optional
 `control` extra (`pip install 'hostwatch[control]'`) for Ed25519. It
 loads `control.toml` (the pinned watchpost public key, the host name and the fan, services and reboot allowlist),
-and on POSIX refuses a file that group or others can write. It then checks each signed command in this order:
+and on POSIX refuses a file that group or others can write. The daemon also refuses to start when the `host` in
+`control.toml` is not this machine's own name (full or short name, any case, or COMPUTERNAME on Windows), unless
+`machine_id` in `control.toml` matches `/etc/machine-id` or the Windows MachineGuid. The same check runs before every
+command and a failure is reported as `refused` with reason `wrong_machine`. It then checks each signed command in this order:
 signature, host, expiry with 30 seconds of skew, id unseen, seq above the persisted one, and the local allowlist.
 Every refusal has a reason code, listed in `hostwatch/control/verify.py`. The replay state is written atomically and
 a corrupt state file refuses every command. The Linux executors are in `hostwatch/control/actions_linux.py`: `fan.set_floor` and `fan.set_mode` write

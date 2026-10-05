@@ -13,6 +13,7 @@ import json
 from collections.abc import Callable
 import logging
 import platform as _platform
+import socket
 import ssl
 import sys
 import threading
@@ -64,6 +65,7 @@ class Agent:
     def __init__(self, cfg: Config, seam: WindowsSeam | None = None, platform: str | None = None) -> None:
         self.cfg = cfg
         self.seam = seam
+        self._warn_if_name_differs()
         # The platform is a parameter so the Windows agent can be built and tested on Linux.
         self.platform = platform or detect_platform(cfg.sysfs)
         self.collectors = build_collectors(cfg, seam, platform=self.platform)
@@ -447,6 +449,15 @@ class Agent:
         else:
             self._flush_failures, self._next_flush = 0, 0.0
             self._stall_since = None
+
+    def _warn_if_name_differs(self) -> None:
+        """One warning, never a stop: a container often reports a name other than its host's."""
+        own = socket.gethostname()
+        wanted = self.cfg.host_name.strip().lower()
+        if wanted and wanted not in {own.lower(), own.lower().split(".")[0]}:
+            log.warning("HOSTWATCH_HOST_NAME is %r but this machine is named %r; batches are reported under "
+                        "%r. Check that this is the host you meant, unless this is a container.",
+                        self.cfg.host_name, own, self.cfg.host_name)
 
     def run(self) -> None:
         """The loop. It writes the clean-shutdown flag itself when it exits, so a

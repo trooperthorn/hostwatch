@@ -50,6 +50,7 @@ from typing import Any, Protocol
 import httpx
 
 from . import config as cfgmod
+from . import identity
 from .actions_linux import ActionResult
 from .outbox import OUTBOX_FILE, ResultOutbox
 from .redact import redact
@@ -271,6 +272,10 @@ class ControlDaemon:
         if not isinstance(command, dict) or not isinstance(command.get("id"), str) or not command["id"]:
             log.error("a pulled command has no usable id and cannot be reported; ignored")
             return None
+        wrong = identity.check(self.config)
+        if wrong:
+            log.error("command %s refused: %s", command["id"], wrong)
+            return self._result(command, received, received, False, "refused", identity.WRONG_MACHINE, wrong)
         try:
             decision = self.verifier.check(command, signature)
         except SigningUnavailable as exc:
@@ -435,6 +440,9 @@ def build_daemon(settings: Settings, *, client: httpx.Client | None = None, acti
         config = cfgmod.load(settings.config_path)
     except cfgmod.ConfigError as exc:
         raise SettingsError(str(exc)) from exc
+    wrong = identity.check(config)
+    if wrong:
+        raise SettingsError(wrong)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     verifier = CommandVerifier(config, settings.data_dir / STATE_FILE, clock=clock)
     if verifier.state is None:
