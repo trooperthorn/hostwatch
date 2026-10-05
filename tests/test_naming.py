@@ -18,10 +18,6 @@ def test_the_former_app_name_appears_nowhere_in_tracked_files():
         path = ROOT / name
         if not path.is_file():
             continue
-        try:
-            text = path.read_text(encoding="utf-8")
-        except (UnicodeDecodeError, OSError):
-            continue
-        if FORMER_NAME in text.lower():
+        if FORMER_NAME.encode() in path.read_bytes().lower():
             hits.append(name)
     assert hits == []

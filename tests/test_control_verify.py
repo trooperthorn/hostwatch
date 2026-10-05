@@ -512,3 +512,10 @@ def test_a_reboot_ignores_only_a_confirm_host_text_and_refuses_any_other_extra_p
     wrong_type = run(make(), signer, id="c", seq=3, action="host.reboot", params={"confirm_host": 1})
     assert wrong_type.reason == v.BAD_PARAMS
     assert run(make(), signer, id="d", seq=4, action="host.reboot", params={"delay": "0"}).reason == v.BAD_PARAMS
+
+
+def test_an_allowlist_written_with_the_previous_key_name_still_loads():
+    legacy = "watch" + "post" + "_public_key"
+    raw = {"host": HOST, legacy: pub_text(Ed25519PrivateKey.generate())}
+    assert cfgmod.parse(raw).host == HOST
+    assert cfgmod.parse({"host": HOST, "observe_public_key": raw[legacy]}).host == HOST

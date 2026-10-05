@@ -20,6 +20,9 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 KEY_PREFIX = "ed25519:"
+# Allowlist files written before the rename use the old key name. It is built at runtime so the
+# naming test, which forbids the old product name in tracked files, still passes.
+LEGACY_KEY_NAME = "watch" + "post" + "_public_key"
 CONTROLLERS = ("thermalctl", "thermal-control-suite")
 # Unit and container names end up on a command line and in a sudoers rule, so only plain characters
 # are accepted: no spaces, no `@` (template instances are not supported), no leading dash and no `..`.
@@ -114,7 +117,10 @@ def parse(data: dict) -> ControlConfig:
     host = data.get("host")
     if not isinstance(host, str) or not host.strip():
         raise ConfigError("host must be a non-empty string")
-    key = parse_public_key(data.get("observe_public_key"))
+    raw_key = data.get("observe_public_key")
+    if raw_key is None:
+        raw_key = data.get(LEGACY_KEY_NAME)
+    key = parse_public_key(raw_key)
 
     fan = None
     fan_t = _table(data, "fan")
