@@ -1,0 +1,14 @@
+# hostwatch-control: the only commands the control account may run as root.
+# Check it with visudo -c -f, then copy it to /etc/sudoers.d/ with mode 0440.
+# Regenerate it when the restart list in control.toml changes.
+
+hostwatch-control ALL=(root) NOPASSWD: /opt/thermalctl/venv/bin/thermalctl check-config /etc/thermalctl/config.toml --overrides /etc/thermalctl/overrides.toml
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl kill -s HUP thermalctl
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl restart thermalctl
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl restart hostwatch-agent
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl restart nut-monitor
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/docker restart scrutiny
+hostwatch-control ALL=(root) NOPASSWD: /usr/sbin/shutdown -r +[0-9]
+hostwatch-control ALL=(root) NOPASSWD: /usr/sbin/shutdown -r +[0-9][0-9]
+hostwatch-control ALL=(root) NOPASSWD: /usr/sbin/shutdown -r +[0-9][0-9][0-9]
+hostwatch-control ALL=(root) NOPASSWD: /usr/sbin/shutdown -c

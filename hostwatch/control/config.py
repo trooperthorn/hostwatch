@@ -20,8 +20,13 @@ from pathlib import Path
 
 KEY_PREFIX = "ed25519:"
 CONTROLLERS = ("thermalctl", "thermal-control-suite")
-# Unit and container names end up on a command line later, so only plain characters are accepted.
-SERVICE_NAME = re.compile(r"^(docker:)?[A-Za-z0-9][A-Za-z0-9_.@-]{0,127}$")
+# Unit and container names end up on a command line and in a sudoers rule, so only plain characters
+# are accepted: no spaces, no `@` (template instances are not supported), no leading dash and no `..`.
+SERVICE_NAME = re.compile(r"^(docker:)?[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$")
+
+
+def valid_service_name(name: object) -> bool:
+    return isinstance(name, str) and SERVICE_NAME.fullmatch(name) is not None and ".." not in name
 
 
 class ConfigError(Exception):
@@ -121,7 +126,7 @@ def parse(data: dict) -> ControlConfig:
     if services_t is not None:
         restart = _strings(services_t, "restart")
         for name in restart:
-            if not SERVICE_NAME.match(name):
+            if not valid_service_name(name):
                 raise ConfigError(f"services.restart entry {name!r} has characters that are not allowed")
 
     reboot = RebootPolicy()

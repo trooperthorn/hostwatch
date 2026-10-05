@@ -452,8 +452,16 @@ loads `control.toml` (the pinned watchpost public key, the host name and the fan
 and on POSIX refuses a file that group or others can write. It then checks each signed command in this order:
 signature, host, expiry with 30 seconds of skew, id unseen, seq above the persisted one, and the local allowlist.
 Every refusal has a reason code, listed in `hostwatch/control/verify.py`. The replay state is written atomically and
-a corrupt state file refuses every command. Nothing executes commands or contacts watchpost yet, there is no entry
-point, and the daemon is not installed anywhere. The test vector is in `tests/fixtures/control_vector.json`.
+a corrupt state file refuses every command. The Linux executors are in `hostwatch/control/actions_linux.py`: `fan.set_floor` and `fan.set_mode` write
+`/etc/thermalctl/overrides.toml` atomically with mode 0600, run `thermalctl check-config` with `--overrides` on it, put
+the previous file back if the check fails, then reload thermalctl with `systemctl kill -s HUP` (floor) or restart it
+(mode); `service.restart` runs `systemctl restart <unit>` or `docker restart <name>` as an argument list, never a
+shell, for names that pass a strict pattern (letters, digits, `_`, `.`, `-`, no `@`, no `..`, no leading dash);
+`host.reboot` runs `shutdown -r +N` after `delay_s` (rounded up to whole minutes) and can be cancelled with
+`shutdown -c`, which is what the local `hostwatch-control cancel` runs. `deploy/hostwatch-control.sudoers` is the
+sudo rule for exactly those commands. Nothing contacts watchpost yet, there is no entry point or service, and the
+daemon is not installed anywhere. The Windows executors are a later slice. The test vector is in
+`tests/fixtures/control_vector.json`.
 
 ## Web UI
 

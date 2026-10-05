@@ -1136,6 +1136,29 @@ the watchpost repository. It is not imported by the collector and has no entry p
 
 Parameters are matched exactly, so executors never see a field the allowlist did not check.
 
+### Linux executors
+
+`actions_linux.py` holds `LinuxActions`. Every external command is an argument list handed to an injected `Runner`
+(the real one calls `subprocess.run` with `shell=False`), and programs are named by absolute path so the sudoers rule
+matches what is run. The executors validate again what the allowlist already checked: header ids, the 0 to 100 duty,
+the mode and the service name, all before any call.
+
+- Overrides: the file is read and merged (only `mode` and `[headers.<id>] min_duty` are kept, which is all thermalctl
+  accepts), written to a temporary name with mode 0600, flushed and renamed over the old file. `thermalctl check-config
+  <config> --overrides <path>` then validates the result. On failure the previous bytes are written back (or the file
+  is removed if there was none) and the failure is reported with the check output. A floor then sends SIGHUP through
+  `systemctl kill -s HUP thermalctl`; a mode change runs `systemctl restart thermalctl`, because a reload refuses a
+  mode change. An existing overrides file that cannot be parsed fails the action rather than being overwritten.
+  Whether every header is mapped before going active is enforced by `check-config`, not duplicated here.
+- Restart: `systemctl restart <unit>` or `docker restart <name>` for `docker:<name>`, only for names in the local list.
+- Reboot: `shutdown -r +N` with N the delay in whole minutes rounded up, capped at 999, and `shutdown -c` to cancel.
+  `main_cancel` is the body of the local `hostwatch-control cancel` command; the entry point is a later slice.
+- Privilege: a process that is not root prefixes the commands with `sudo -n`. `render_sudoers` produces the sudoers
+  rule from the allowlist, and `deploy/hostwatch-control.sudoers` is its output for an example list. The only wildcard
+  is the digit pattern in the shutdown delay. This is an enforced limit on what the account may run as root. The
+  overrides file write itself is not a sudo command, so the fan actions still need a process able to write that
+  directory as root (see `UNVERIFIED.md`).
+
 ## Threat model and quick start documents
 
 `docs/THREAT-MODEL.md` lists assets, trust boundaries, threats and controls, and each control line
