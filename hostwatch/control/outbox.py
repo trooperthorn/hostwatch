@@ -11,6 +11,10 @@ unbounded file on a host whose watchpost stays away for days is worse than a mis
 (watchpost shows a command with no result as unknown, never as done). The running count is available from
 `dropped_total()` and the daemon sends it with every result as `outbox_dropped`.
 
+A result that watchpost refuses with a permanent 4xx answer is parked: moved to a `parked` table with the
+reason and no longer sent, so one undeliverable result never blocks the ones behind it. It is kept, not
+deleted, for the owner to inspect (`parked()`), up to the same cap.
+
 A file that SQLite reports as not a database is renamed aside with a timestamp and a fresh outbox
 starts; any other database error is raised and the file is left alone.
 """
@@ -32,6 +36,9 @@ MAX_RESULTS = 200
 _SCHEMA = """
 CREATE TABLE IF NOT EXISTS results (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS parked (
+  seq INTEGER PRIMARY KEY, command_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL, reason TEXT NOT NULL,
+  parked_at INTEGER NOT NULL);
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
 """
 _CORRUPT = ("file is not a database", "malformed", "file is encrypted")
@@ -90,6 +97,8 @@ class ResultOutbox:
         """Queue a result. The row is durable when this returns."""
         text = json.dumps(payload, sort_keys=True, separators=(",", ":"))
         with self._lock, self._db:
+            if self._db.execute("SELECT 1 FROM parked WHERE command_id=?", (command_id,)).fetchone():
+                return  # watchpost refused this command's result for good; a repeat cannot fare better
             row = self._db.execute("SELECT seq, payload FROM results WHERE command_id=?", (command_id,)).fetchone()
             if row is None:
                 self._db.execute("INSERT INTO results (command_id, payload) VALUES (?, ?)", (command_id, text))
@@ -107,7 +116,9 @@ class ResultOutbox:
 
     def has(self, command_id: str) -> bool:
         with self._lock:
-            return self._db.execute("SELECT 1 FROM results WHERE command_id=?", (command_id,)).fetchone() is not None
+            queued = self._db.execute("SELECT 1 FROM results WHERE command_id=?", (command_id,)).fetchone()
+            parked = self._db.execute("SELECT 1 FROM parked WHERE command_id=?", (command_id,)).fetchone()
+            return queued is not None or parked is not None
 
     def peek(self) -> tuple[int, dict] | None:
         """The oldest result. A row that cannot be decoded is removed and logged so it never blocks the rest."""
@@ -128,6 +139,26 @@ class ResultOutbox:
     def ack(self, seq: int) -> None:
         with self._lock, self._db:
             self._db.execute("DELETE FROM results WHERE seq=?", (seq,))
+
+    def park(self, seq: int, reason: str) -> None:
+        """Move a result that watchpost refuses for good out of the queue, keeping it and the reason."""
+        with self._lock, self._db:
+            row = self._db.execute("SELECT command_id, payload FROM results WHERE seq=?", (seq,)).fetchone()
+            if row is None:
+                return
+            self._db.execute("INSERT OR REPLACE INTO parked (seq, command_id, payload, reason, parked_at) "
+                             "VALUES (?, ?, ?, ?, ?)", (seq, row[0], row[1], reason, int(time.time())))
+            self._db.execute("DELETE FROM results WHERE seq=?", (seq,))
+            over = self._db.execute("SELECT COUNT(*) FROM parked").fetchone()[0] - self.max_results
+            if over > 0:
+                self._db.execute("DELETE FROM parked WHERE seq IN (SELECT seq FROM parked ORDER BY seq LIMIT ?)",
+                                 (over,))
+
+    def parked(self) -> list[tuple[str, str]]:
+        """(command id, reason) of every parked result, oldest first."""
+        with self._lock:
+            rows = self._db.execute("SELECT command_id, reason FROM parked ORDER BY seq").fetchall()
+            return [(r[0], r[1]) for r in rows]
 
     def depth(self) -> int:
         with self._lock:

@@ -46,8 +46,9 @@ from typing import Any, Protocol
 import httpx
 
 from . import config as cfgmod
-from .actions_linux import ActionResult, _clip
+from .actions_linux import ActionResult
 from .outbox import OUTBOX_FILE, ResultOutbox
+from .redact import redact
 from .signing import SigningUnavailable
 from .state import STATE_FILE
 from .verify import REPLAYED_ID, CommandVerifier
@@ -62,27 +63,21 @@ MAX_INTERVAL_S = 300.0
 MAX_BACKOFF_S = 60.0
 HTTP_TIMEOUT_S = 10.0
 MAX_PER_PULL = 20
-# Only 409 is final: it means watchpost already has a result for that command id. Every other failure,
-# including 400, 404 and 422, keeps the result queued, because the results route may not exist yet or may
-# be misconfigured, and a result that reports a real reboot or restart must never be discarded silently.
+# 409 is final: watchpost already has a result for that command id, so the copy is dropped.
 DROP_STATUSES = frozenset({409})
+# A 4xx answer that will not change on a retry: the body is refused as it stands. The result is parked
+# with the reason (never deleted, because it may report a real reboot) so the results behind it go on.
+# Not here: 401 and 403 (a key problem fixed on the watchpost side), 404 (the route may not exist yet),
+# 408, 425 and 429 (retry later). Those, and every 5xx, keep the result queued.
+RETRYABLE_4XX = frozenset({401, 403, 404, 408, 425, 429})
 LINUX_DATA_DIR = Path("/var/lib/hostwatch-control")
 LINUX_CONFIG = Path("/etc/hostwatch/control.toml")
 WINDOWS_DATA_DIR = Path("C:/ProgramData/hostwatch")
 ENV_FILE_NAME = "control.env"
 SIGNING_UNAVAILABLE = "signing_unavailable"
 
-_SECRETS = re.compile(r"\b(?:wpc|wpi|wpf|hw)_[A-Za-z0-9_-]{8,}|Bearer\s+\S+|"
-                      r"(?i:(?:password|passwd|secret|token|api[_-]?key)\s*[=:]\s*)\S+")
-
-
 class SettingsError(Exception):
     """The daemon cannot start with the settings it was given."""
-
-
-def redact(text: str) -> str:
-    """Mask anything that looks like a key, a bearer token or a password setting, then clip."""
-    return _clip(_SECRETS.sub("[redacted]", text))
 
 
 @dataclass(frozen=True)
@@ -159,6 +154,7 @@ class ControlDaemon:
         self.verifier, self.actions, self.outbox, self.client, self.clock = verifier, actions, outbox, client, clock
         self.stop_event = threading.Event()
         self._failures = 0
+        self._pulled = False  # whether the last cycle got an answer to its pull
         self._headers = {"Authorization": f"Bearer {settings.key}"}
 
     # network ----------------------------------------------------------------------------------
@@ -183,8 +179,9 @@ class ControlDaemon:
         return items
 
     def flush(self) -> None:
-        """Send queued results oldest first. A result leaves the outbox only after a 2xx answer, or after
-        a 409 (watchpost already has it). Any other failure raises and the result stays queued."""
+        """Send queued results oldest first. A result leaves the queue after a 2xx answer, after a 409
+        (watchpost already has it), or when it is parked after a permanent 4xx refusal, so one undeliverable
+        result never blocks the rest. Any other failure raises and the result stays queued."""
         while (head := self.outbox.peek()) is not None:
             if self.stop_event.is_set():
                 return
@@ -197,6 +194,12 @@ class ControlDaemon:
             if r.is_success:
                 log.info("result for command %s delivered (%s)", payload.get("id"), payload.get("status"))
                 self.outbox.ack(seq)
+            elif 400 <= r.status_code < 500 and r.status_code not in DROP_STATUSES \
+                    and r.status_code not in RETRYABLE_4XX:
+                reason = f"watchpost answered HTTP {r.status_code}"
+                log.error("%s for the result of command %s; it is parked and the next result goes on",
+                          reason, payload.get("id"))
+                self.outbox.park(seq, reason)
             elif r.status_code in DROP_STATUSES:
                 log.warning("watchpost answered HTTP %d for the result of command %s; it already has one, "
                             "so this copy is dropped", r.status_code, payload.get("id"))
@@ -250,6 +253,7 @@ class ControlDaemon:
         """One pass: replay unsent results, pull, and handle each command to completion in seq order.
         Raises DeliveryError when watchpost could not be reached, after doing everything it still could."""
         problem: DeliveryError | None = None
+        self._pulled = False
         try:
             self.flush()
         except DeliveryError as exc:
@@ -261,6 +265,7 @@ class ControlDaemon:
                 log.warning("%s", exc)  # the earlier flush error is the one raised; keep both in the log
                 raise problem from exc
             raise
+        self._pulled = True
         items = sorted(pulled, key=_seq_of)
         for item in items[:MAX_PER_PULL]:
             if self.stop_event.is_set():
@@ -291,8 +296,13 @@ class ControlDaemon:
                 self.cycle()
                 self._failures = 0
             except DeliveryError as exc:
-                self._failures += 1
-                wait = self._backoff()
+                if self._pulled:
+                    # watchpost answers pulls, so only a result is stuck. Pending results never slow polling,
+                    # because a queued command (a cancel, for one) must still be fetched on time.
+                    self._failures = 0
+                else:
+                    self._failures += 1
+                    wait = self._backoff()
                 log.warning("%s; %d result(s) queued, next attempt in %gs", exc, self.outbox.depth(), wait)
             except Exception:  # last resort: nothing may end the loop
                 log.exception("unexpected error in the control loop; continuing")

@@ -24,7 +24,7 @@ from typing import Any, Protocol
 from ..windows import (DEFAULT_PIPE_TIMEOUT_S, MAX_FRAME_BYTES, PIPE_DIR, CommandRunner, PipeAbsentError,
                        SeamError, SubprocessRunner)
 from .actions_linux import HEADER_ID, MODES, ActionResult, _clip
-from .config import ControlConfig, valid_service_name
+from .config import ControlConfig, effective_reboot_delay, valid_service_name
 
 PIPE_NAME = "ThermalControlSuite.Ipc"
 SUITE_CONTROLLER = "thermal-control-suite"
@@ -218,7 +218,7 @@ class WindowsActions:
     def reboot(self) -> ActionResult:
         if not self.config.reboot.allow:
             return ActionResult(False, "refused", "reboot.allow is false")
-        delay = min(self.config.reboot.delay_s, MAX_REBOOT_SECONDS)
+        delay = min(effective_reboot_delay(self.config.reboot.delay_s), MAX_REBOOT_SECONDS)
         outcome = self._run([SHUTDOWN, "/r", "/t", str(delay)])
         if isinstance(outcome, ActionResult):
             return outcome

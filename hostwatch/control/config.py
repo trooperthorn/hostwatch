@@ -43,6 +43,14 @@ class FanPolicy:
     allow_mode_change: bool
 
 
+# A reboot is never scheduled sooner than this, so a local operator always has time to cancel it.
+MIN_REBOOT_DELAY_S = 30
+
+
+def effective_reboot_delay(delay_s: int) -> int:
+    return max(delay_s, MIN_REBOOT_DELAY_S)
+
+
 @dataclass(frozen=True)
 class RebootPolicy:
     allow: bool = False
@@ -136,7 +144,7 @@ def parse(data: dict) -> ControlConfig:
         delay = _int(reboot_t, "delay_s", 60)
         if delay < 0:
             raise ConfigError("reboot.delay_s must not be negative")
-        reboot = RebootPolicy(_bool(reboot_t, "allow", False), delay)
+        reboot = RebootPolicy(_bool(reboot_t, "allow", False), effective_reboot_delay(delay))
 
     return ControlConfig(public_key=key, host=host.strip(), fan=fan, restart=restart, reboot=reboot)
 

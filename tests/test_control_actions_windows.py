@@ -163,6 +163,51 @@ def test_reboot_refused_when_not_allowed_and_failures_reported():
     assert act.cancel_reboot().status == "failed"
 
 
+@pytest.mark.parametrize("configured, applied", [(0, "30"), (29, "30"), (30, "30"), (45, "45")])
+def test_windows_reboot_delay_has_a_30_second_minimum(configured, applied):
+    runner = FakeRunner()
+    actions(runner=runner, cfg=config(reboot={"allow": True, "delay_s": configured})).reboot()
+    assert runner.calls == [["shutdown.exe", "/r", "/t", applied]]
+
+
+class FakeShutdownHost:
+    """shutdown.exe on a host with a clock: /r /t N arms a reboot, /a disarms it, advance() lets time pass."""
+
+    def __init__(self):
+        self.now, self.due, self.rebooted = 0, None, False
+
+    def run(self, args, timeout_s):
+        if args[:2] == ["shutdown.exe", "/r"]:
+            self.due = self.now + int(args[3])
+        elif args == ["shutdown.exe", "/a"]:
+            self.due = None
+        return CommandResult(0, "ok")
+
+    def advance(self, seconds):
+        self.now += seconds
+        if self.due is not None and self.now >= self.due:
+            self.rebooted, self.due = True, None
+
+
+def test_a_local_cancel_inside_the_delay_prevents_the_windows_reboot():
+    host = FakeShutdownHost()
+    act = actions(runner=host, cfg=config(reboot={"allow": True, "delay_s": 0}))
+    act.reboot()
+    host.advance(29)
+    assert act.cancel_reboot().status == "cancelled"
+    host.advance(600)
+    assert host.rebooted is False
+
+
+def test_without_a_cancel_the_windows_reboot_fires_after_the_delay():
+    host = FakeShutdownHost()
+    actions(runner=host, cfg=config(reboot={"allow": True, "delay_s": 45})).reboot()
+    host.advance(44)
+    assert host.rebooted is False
+    host.advance(1)
+    assert host.rebooted is True
+
+
 def test_reboot_delay_is_capped():
     runner = FakeRunner()
     actions(runner=runner, cfg=config(reboot={"allow": True, "delay_s": 10**12})).reboot()

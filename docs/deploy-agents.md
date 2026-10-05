@@ -149,7 +149,8 @@ Linux (systemd), as root:
    `HOSTWATCH_CONTROL_KEY`, and set owner root, group `hostwatch-control`, mode 0640.
 5. Regenerate `deploy/hostwatch-control.sudoers` from your `control.toml` with `render_sudoers` in
    `hostwatch/control/actions_linux.py` when the restart list changes, check it with `visudo -c -f`, and install it in
-   `/etc/sudoers.d/hostwatch-control` with mode 0440. It lists the only commands the account may run as root.
+   `/etc/sudoers.d/hostwatch-control` with mode 0440. It lists the only commands the account may run as root. The
+   reboot rules need `systemd-run` and `systemctl` at `/usr/bin`.
 6. Install `deploy/hostwatch-control.service` into `/etc/systemd/system/`, then `systemctl daemon-reload` and
    `systemctl enable --now hostwatch-control`. Logs are in `journalctl -u hostwatch-control`.
 
@@ -170,7 +171,11 @@ Windows, from an elevated PowerShell (a separate service from `hostwatch-agent`)
 
 To run it by hand on either platform: `python -m hostwatch control run`, with `HOSTWATCH_CONTROL_URL` and
 `HOSTWATCH_CONTROL_KEY` set, and optionally `--config`, `--data-dir` and `--env-file`. `python -m hostwatch control cancel`
-cancels a scheduled reboot on this host without watchpost. The settings are `HOSTWATCH_CONTROL_URL`,
+cancels a scheduled reboot on this host without watchpost; this works for the whole delay. The reboot delay in
+`control.toml` (`[reboot] delay_s`, default 60) has a minimum of 30 seconds, and a smaller value, including 0, is raised
+to 30. On Linux it is a systemd timer named `hostwatch-reboot` and is exact to the second. Results that watchpost refuses
+with a permanent 4xx answer are parked in `control-outbox.db` in the data directory, with the reason, and the results
+behind them are still sent. The settings are `HOSTWATCH_CONTROL_URL`,
 `HOSTWATCH_CONTROL_KEY`, `HOSTWATCH_CONTROL_CONFIG`, `HOSTWATCH_CONTROL_DATA_DIR` (state, results outbox and logs) and
 `HOSTWATCH_CONTROL_INTERVAL_S` (5 to 300, default 5). Over plain HTTP on the LAN the signatures still protect the
 commands, but the key and results travel unencrypted, so TLS to watchpost is recommended.

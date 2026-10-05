@@ -53,6 +53,7 @@ class FakeWatchpost:
     def __init__(self):
         self.queue: list[dict] = []
         self.results: list[dict] = []
+        self.attempts: list[dict] = []
         self.requests: list[httpx.Request] = []
         self.online = True
         self.results_status = 200
@@ -78,9 +79,11 @@ class FakeWatchpost:
                 return httpx.Response(self.pull_status)
             return httpx.Response(200, json={"host": HOST, "commands": list(self.queue)})
         if request.method == "POST" and request.url.path == d.RESULTS_PATH:
-            if self.results_status != 200:
-                return httpx.Response(self.results_status)
             body = json.loads(request.content)
+            self.attempts.append(body)
+            status = self.results_status(body) if callable(self.results_status) else self.results_status
+            if status != 200:
+                return httpx.Response(status)
             self.results.append(body)
             self.queue = [i for i in self.queue if i["command"]["id"] != body["id"]]
             return httpx.Response(200, json={"ok": True})
@@ -309,15 +312,42 @@ def test_results_posted_while_offline_are_replayed_after_a_restart(env):
     assert second.outbox.depth() == 0 and len(exe.calls) == 1
 
 
-@pytest.mark.parametrize("status", [400, 404, 422, 500])
-def test_results_stay_queued_when_the_route_is_missing_or_rejects(env, status):
+@pytest.mark.parametrize("status", [401, 403, 404, 408, 425, 429, 500, 503])
+def test_results_stay_queued_when_the_route_is_missing_or_the_failure_may_pass(env, status):
     exe = FakeExecutor()
     env.wp.add(env.signer, id="a", seq=1, action="service.restart", params={"name": "hostwatch-agent"})
     env.wp.results_status = status
     daemon = env.build(exe)
     with pytest.raises(d.DeliveryError):
         daemon.cycle()
-    assert daemon.outbox.depth() == 1 and len(exe.calls) == 1
+    assert daemon.outbox.depth() == 1 and daemon.outbox.parked() == [] and len(exe.calls) == 1
+
+
+@pytest.mark.parametrize("status", [400, 413, 422])
+def test_a_permanent_4xx_parks_the_result_with_its_reason_and_the_next_one_is_delivered(env, status):
+    env.wp.add(env.signer, id="a", seq=1, action="service.restart", params={"name": "hostwatch-agent"})
+    env.wp.add(env.signer, id="b", seq=2, action="service.restart", params={"name": "hostwatch-agent"})
+    env.wp.results_status = lambda body: status if body["id"] == "a" else 200
+    daemon = env.build(FakeExecutor())
+    daemon.cycle()  # no DeliveryError: nothing is stuck
+    assert [r["id"] for r in env.wp.results] == ["b"]
+    assert daemon.outbox.depth() == 0
+    assert daemon.outbox.parked() == [("a", f"watchpost answered HTTP {status}")]
+    assert [r["id"] for r in env.wp.attempts] == ["a", "b"]  # the parked result is not sent again
+    daemon.cycle()
+    assert [r["id"] for r in env.wp.attempts] == ["a", "b"]
+
+
+def test_a_parked_result_is_kept_across_a_restart_and_a_replay_does_not_requeue_it(env):
+    first = env.build(FakeExecutor())
+    first.outbox.add("a", {"id": "a", "status": "done"})
+    first.outbox.park(first.outbox.peek()[0], "watchpost answered HTTP 422")
+    first.close()
+    second = env.build(FakeExecutor())
+    assert second.outbox.parked() == [("a", "watchpost answered HTTP 422")]
+    assert second.outbox.has("a")
+    second.outbox.add("a", {"id": "a", "status": "refused"})
+    assert second.outbox.depth() == 0
 
 
 def test_a_409_means_watchpost_has_the_result_and_the_copy_is_dropped(env):
@@ -373,6 +403,44 @@ def test_run_backs_off_after_a_failure_and_keeps_going(env):
     assert daemon._failures == 1 and daemon._backoff() == 10.0
 
 
+class _RecordingEvent:
+    """A stop event that records each wait and ends the loop after a set number of cycles."""
+
+    def __init__(self, cycles):
+        self.waits, self.cycles = [], cycles
+
+    def is_set(self):
+        return len(self.waits) >= self.cycles
+
+    def set(self):
+        self.cycles = 0
+
+    def wait(self, seconds):
+        self.waits.append(seconds)
+
+
+def test_polling_stays_at_the_normal_interval_while_results_are_pending(env):
+    daemon = env.build(FakeExecutor())
+    daemon.outbox.add("a", {"id": "a", "status": "done"})
+    env.wp.results_status = 503  # the result cannot be delivered, but pulls are answered
+    daemon.stop_event = _RecordingEvent(cycles=4)
+    daemon.run()
+    assert daemon.outbox.depth() == 1
+    assert len(daemon.stop_event.waits) == 4
+    assert all(0 < w <= env.settings.interval_s for w in daemon.stop_event.waits)
+    assert daemon._failures == 0
+    assert [r.method for r in env.wp.requests].count("GET") == 4
+
+
+def test_polling_still_backs_off_when_watchpost_cannot_be_reached_for_the_pull(env):
+    daemon = env.build(FakeExecutor())
+    daemon.outbox.add("a", {"id": "a", "status": "done"})
+    env.wp.online = False
+    daemon.stop_event = _RecordingEvent(cycles=3)
+    daemon.run()
+    assert daemon._failures == 3 and max(daemon.stop_event.waits) > env.settings.interval_s
+
+
 def test_backoff_is_capped():
     s = d.Settings(URL, KEY, Path("x"), Path("y"), 5.0)
     daemon = d.ControlDaemon(s, None, None, None, None, None)
@@ -382,12 +450,60 @@ def test_backoff_is_capped():
 
 # --- redaction ----------------------------------------------------------------------------
 
-def test_output_is_clipped_and_secrets_are_masked():
-    text = f"key {KEY} and Bearer abc.def and password=hunter2 and hw_0123456789abcdef"
+PEM = ("-----BEGIN OPENSSH PRIVATE KEY-----\nb3BlbnNzaC1rZXktdjEAAAAABG5vbmUAAAAEbm9uZQAAAAAAAAABAAAAMwAAAAtz\n"
+       "c2gtZWQyNTUxOQAAACAxyz\n-----END OPENSSH PRIVATE KEY-----")
+B64 = "dGhpcyBpcyBhIHNlY3JldCB0aGF0IGlzIGxvbmcgZW5vdWdoIHRvIG1hdGNo0123Zx=="
+HEX = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08"
+SECRET_SHAPES = [
+    ("wpc key", KEY, KEY),
+    ("wpi key", "ingest wpi_0123456789abcdefXYZ here", "wpi_0123456789abcdefXYZ"),
+    ("wpf key", "feed wpf_0123456789abcdefXYZ here", "wpf_0123456789abcdefXYZ"),
+    ("hw key", "agent hw_0123456789abcdef here", "hw_0123456789abcdef"),
+    ("bearer", "sent Bearer abc.def-ghi_jkl ok", "abc.def-ghi_jkl"),
+    ("lowercase bearer", "sent bearer tok-en.v4lue ok", "tok-en.v4lue"),
+    ("authorization header", "Authorization: Basic dXNlcjpwYXNz\nnext line", "dXNlcjpwYXNz"),
+    ("authorization custom", "authorization=Token s3cretvalue", "s3cretvalue"),
+    ("password pair", "login password=hunter2 done", "hunter2"),
+    ("password quoted", 'login password="correct horse battery" done', "correct horse"),
+    ("token pair", "api token: s3cr3tt0ken here", "s3cr3tt0ken"),
+    ("token json", '{"token": "abc123def456"}', "abc123def456"),
+    ("pem block", "key follows\n" + PEM + "\nafter", "c2gtZWQyNTUxOQAAACAxyz"),
+    ("truncated pem", "key follows\n-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA", "MIIEowIBAAKCAQEA"),
+    ("base64 run", "blob " + B64 + " end", B64[:40]),
+    ("hex run", "digest " + HEX + " end", HEX),
+]
+
+
+@pytest.mark.parametrize("name, text, secret", SECRET_SHAPES, ids=[c[0] for c in SECRET_SHAPES])
+def test_each_secret_shape_is_masked(name, text, secret):
     out = d.redact(text)
-    assert KEY not in out and "abc.def" not in out and "hunter2" not in out and "hw_0123456789abcdef" not in out
-    assert out.count("[redacted]") == 4
-    assert len(d.redact("x" * 5000)) < 2100
+    assert secret not in out and "[redacted]" in out
+
+
+def test_ordinary_output_is_not_masked():
+    text = "restarted hostwatch-agent in /opt/hostwatch-control/venv/lib/python3.12/site-packages OK, pid 4242"
+    assert d.redact(text) == text
+
+
+def test_output_is_clipped():
+    assert len(d.redact("x y " * 2000)) < 2100
+
+
+def test_masking_happens_before_truncation_so_a_secret_at_the_cut_is_not_half_shown():
+    from hostwatch.control import actions_linux as al
+    secret = "wpc_" + "Ab3" * 12
+    text = "x" * (2000 - 10) + " " + secret + " tail"
+    assert "wpc_" not in d.redact(text) and "wpc_" not in al._clip(text)
+    text = "y" * (2000 - 10) + " password=hunter2hunter2"
+    assert "hunter" not in d.redact(text) and "hunter" not in al._clip(text)
+
+
+def test_a_result_posted_to_watchpost_carries_masked_output(env):
+    env.wp.add(env.signer, id="a", seq=1, action="service.restart", params={"name": "hostwatch-agent"})
+    daemon = env.build(FakeExecutor(ActionResult(True, "done", f"ok {KEY} password=hunter2")))
+    daemon.cycle()
+    sent = env.wp.results[0]["output"]
+    assert KEY not in sent and "hunter2" not in sent
 
 
 # --- settings and entry point -------------------------------------------------------------

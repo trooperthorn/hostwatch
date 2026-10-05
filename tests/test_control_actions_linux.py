@@ -186,7 +186,7 @@ def test_sudo_prefix_when_not_root(tmp_path):
     actions.service_restart("nut-monitor")
     actions.reboot()
     assert runner.calls == [["sudo", "-n", al.SYSTEMCTL, "restart", "nut-monitor"],
-                            ["sudo", "-n", al.SHUTDOWN, "-r", "+1"]]
+                            ["sudo", "-n", *al._reboot_argv(60)]]
 
 
 def test_reboot_schedule_and_cancel():
@@ -196,7 +196,66 @@ def test_reboot_schedule_and_cancel():
     assert scheduled.ok and scheduled.status == "scheduled"
     cancelled = actions.cancel_reboot()
     assert cancelled.ok and cancelled.status == "cancelled"
-    assert runner.calls == [[al.SHUTDOWN, "-r", "+3"], [al.SHUTDOWN, "-c"]]
+    assert runner.calls == [al._reboot_argv(150), al._cancel_argv()]
+    assert scheduled.output.startswith("reboot in 150 second(s)")
+
+
+@pytest.mark.parametrize("configured, applied", [(0, 30), (1, 30), (29, 30), (30, 30), (45, 45), (61, 61)])
+def test_linux_reboot_delay_is_exact_seconds_with_a_30_second_minimum(configured, applied):
+    runner = FakeRunner()
+    actions = al.LinuxActions(config(reboot={"allow": True, "delay_s": configured}), runner, use_sudo=False)
+    assert actions.reboot().output.startswith(f"reboot in {applied} second(s)")
+    assert runner.calls == [[al.SYSTEMD_RUN, "--unit=hostwatch-reboot", f"--on-active={applied}s",
+                             al.SYSTEMCTL, "reboot"]]
+    assert not any("shutdown" in part for part in runner.calls[0])
+
+
+def test_linux_reboot_delay_below_the_minimum_is_raised_even_without_the_config_parser():
+    runner = FakeRunner()
+    policy = cfgmod.RebootPolicy(True, 0)
+    cfg = cfgmod.ControlConfig(public_key=b"", host="h", reboot=policy)
+    al.LinuxActions(cfg, runner, use_sudo=False).reboot()
+    assert runner.calls[0][2] == "--on-active=30s"
+
+
+class FakeHost:
+    """A host with one pending reboot. `advance` runs the clock, and a reboot fires when its time arrives
+    unless a cancel removed it first. It understands both the Linux timer and the Windows shutdown argv."""
+
+    def __init__(self):
+        self.now, self.due, self.rebooted = 0, None, False
+
+    def __call__(self, argv, timeout):
+        argv = list(argv)
+        if argv[0] == al.SYSTEMD_RUN:
+            self.due = self.now + int(argv[2].removeprefix("--on-active=").removesuffix("s"))
+        elif argv[:2] == [al.SYSTEMCTL, "stop"]:
+            self.due = None
+        return al.RunResult(0, "ok")
+
+    def advance(self, seconds):
+        self.now += seconds
+        if self.due is not None and self.now >= self.due:
+            self.rebooted, self.due = True, None
+
+
+def test_a_local_cancel_inside_the_delay_prevents_the_linux_reboot():
+    host = FakeHost()
+    actions = al.LinuxActions(config(reboot={"allow": True, "delay_s": 0}), host, use_sudo=False)
+    actions.reboot()
+    host.advance(29)  # the whole minimum delay minus one second is still cancellable
+    assert actions.cancel_reboot().status == "cancelled"
+    host.advance(600)
+    assert host.rebooted is False
+
+
+def test_without_a_cancel_the_linux_reboot_fires_after_the_delay():
+    host = FakeHost()
+    al.LinuxActions(config(reboot={"allow": True, "delay_s": 45}), host, use_sudo=False).reboot()
+    host.advance(44)
+    assert host.rebooted is False
+    host.advance(1)
+    assert host.rebooted is True
 
 
 def test_reboot_failure_and_disallowed():
@@ -228,8 +287,9 @@ ALLOWED = [
     re.compile(re.escape(f"{al.SYSTEMCTL} kill -s HUP thermalctl")),
     re.compile(re.escape(f"{al.SYSTEMCTL} restart ") + NAME),
     re.compile(re.escape(f"{al.DOCKER} restart ") + NAME),
-    re.compile(re.escape(f"{al.SHUTDOWN} -r +") + r"(\[0-9\]){1,3}"),
-    re.compile(re.escape(f"{al.SHUTDOWN} -c")),
+    re.compile(re.escape(f"{al.SYSTEMD_RUN} --unit={al.REBOOT_UNIT} --on-active=") + r"(\[0-9\]){2,6}"
+               + re.escape(f"s {al.SYSTEMCTL} reboot")),
+    re.compile(re.escape(f"{al.SYSTEMCTL} stop {al.REBOOT_UNIT}.timer")),
 ]
 
 
@@ -274,8 +334,8 @@ def test_sudoers_covers_every_privileged_call_the_executors_make(tmp_path):
     rules = al.sudoers_commands(cfg)
     for call in runner.calls:
         line = " ".join(call).replace(str(overrides), al.OVERRIDES_PATH)
-        if line.startswith(f"{al.SHUTDOWN} -r +"):
-            line = re.sub(r"\+\d+$", "+[0-9]", line)
+        if line.startswith(al.SYSTEMD_RUN):
+            line = re.sub(r"--on-active=(\d+)s", lambda m: "--on-active=" + "[0-9]" * len(m.group(1)) + "s", line)
         assert line in rules, line
 
 

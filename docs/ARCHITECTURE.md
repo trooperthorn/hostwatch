@@ -1157,12 +1157,18 @@ the mode and the service name, all before any call.
   controller. The Linux executor refuses them (status `refused`, no command run) unless it is `thermalctl`, and the
   Windows executor refuses them unless it is `thermal-control-suite`.
 - Restart: `systemctl restart <unit>` or `docker restart <name>` for `docker:<name>`, only for names in the local list.
-- Reboot: `shutdown -r +N` with N the delay in whole minutes rounded up, capped at 999, and `shutdown -c` to cancel.
+- Reboot: a transient systemd timer, `systemd-run --unit=hostwatch-reboot --on-active=<N>s systemctl reboot`, with N the
+  delay in whole seconds (not `shutdown`, which rounds to minutes), capped at 999999, and
+  `systemctl stop hostwatch-reboot.timer` to cancel. The delay has a minimum of 30 seconds: a configured 0 (or any
+  value below 30) is raised to 30, by the `control.toml` parser and again by the executor. While the timer is pending a
+  local `hostwatch-control cancel` stops it, so the whole delay is cancellable. A second reboot while one is pending
+  fails because the unit name is in use, and is reported as `failed`.
   `main_cancel` is the older body of the local cancel command; `python -m hostwatch control cancel` now runs the
   platform executor's `cancel_reboot` through `daemon.run_cancel`.
 - Privilege: a process that is not root prefixes the commands with `sudo -n`. `render_sudoers` produces the sudoers
   rule from the allowlist, and `deploy/hostwatch-control.sudoers` is its output for an example list. The only wildcard
-  is the digit pattern in the shutdown delay. This is an enforced limit on what the account may run as root. The
+  is the digit pattern in the reboot delay (two to six digits, one rule each). The 30 second minimum is enforced by
+  the executor, not by the sudoers pattern. This is an enforced limit on what the account may run as root. The
   sudoers rule names the candidate path `/etc/thermalctl/overrides.toml.candidate`. The overrides file write itself is not a sudo command, so the fan actions still need a process able to write that
   directory as root (see `UNVERIFIED.md`).
 
@@ -1187,17 +1193,20 @@ length-prefixed JSON exchange on a daemon thread with a timeout, the same way th
   never part of the script text. It must be in the local list, match the strict service name pattern and not start with
   `docker:`. The pattern allows no space, quote, `$`, backtick, `;`, `|` or leading dash, which is the enforced
   protection against a name being read as anything but one token.
-- `host.reboot` runs `shutdown.exe /r /t <delay_s>` (capped at the 10 year maximum of the tool) and `cancel_reboot`
-  runs `shutdown.exe /a`.
+- `host.reboot` runs `shutdown.exe /r /t <delay_s>` with the same 30 second minimum (capped at the 10 year maximum
+  of the tool) and `cancel_reboot` runs `shutdown.exe /a`, which works for the whole delay.
 
 ### Pull loop, results outbox and service files
 
 `daemon.py` holds `ControlDaemon`, `outbox.py` the results outbox and `service.py` the Windows service host. The
 daemon only dials out and opens no port. Each cycle does these steps in order:
 
-1. Replay queued results oldest first. A result leaves the outbox after a 2xx answer, or after a 409
-   (watchpost already has it). Any other failure, including 400, 404 and 422, leaves it queued and the cycle reports a
-   delivery error, so nothing is lost while the results route is missing.
+1. Replay queued results oldest first. A result leaves the queue after a 2xx answer, after a 409
+   (watchpost already has it), or when it is parked. A permanent 4xx answer (any 4xx except 401, 403, 404, 408, 425, 429
+   and 409, so in practice 400, 413 and 422) parks the result with the reason in the outbox's `parked` table and the next
+   result goes on; a parked result is kept for the owner to inspect and is never sent again. Every other failure,
+   including 401, 403, 404 and any 5xx, leaves the result queued and the cycle reports a delivery error, so nothing is
+   lost while the results route is missing.
 2. `GET /api/v1/control/commands?host=<host from control.toml>` with `Authorization: Bearer <wpc key>`. A 401 or 403 is
    reported as a rejected key, never with the key. The answer is `{"commands": [{"command": {...}, "signature": "..."}]}`.
 3. Sort by `seq` and handle at most 20 commands, one at a time. Each goes through `CommandVerifier`, then the platform
@@ -1207,8 +1216,11 @@ daemon only dials out and opens no port. Each cycle does these steps in order:
 
 A result is `{"v":1,"id","host","action","seq","status","ok","reason","output","received_at","started_at",
 "finished_at","outbox_dropped"}`. `status` is `done`, `scheduled`, `cancelled`, `failed` or `refused`, and a refusal's `reason` is the
-code from `verify.py`. Output is masked for key shapes, bearer tokens and password settings and clipped to 2000
-characters; this is a courtesy and not a guarantee that no secret is present. The outbox keeps the first result per
+code from `verify.py`. Output is masked and then clipped to 2000 characters (`redact.py`; masking runs on the whole
+text first, and an executor's own output is masked before its clip, so a secret cut by the clip is never half shown). The
+masked shapes are `wpc_`, `wpi_`, `wpf_` and `hw_` keys, bearer tokens, Authorization headers, `password`, `passwd`,
+`secret`, `token` and `api_key` pairs (bare or quoted), PEM blocks (also an unterminated one), hex runs of 32 or more
+characters and mixed-case base64 runs of 40 or more. This is a courtesy and not a guarantee that no secret is present. The outbox keeps the first result per
 command id (a refusal of a replay is not queued while the real result waits, and a queued refusal is replaced by the result of a command that really ran) and holds at most 200 results, dropping the
 oldest and counting it (the count is sent as `outbox_dropped`), because watchpost shows a command with no result as `unknown`. A corrupt outbox file is renamed
 aside and a fresh one started.
@@ -1216,7 +1228,9 @@ aside and a fresh one started.
 Verification records a command before it runs (at most once). A crash between execution and the outbox write therefore
 loses the report and not the safety: watchpost shows `unknown` and the command is never run twice.
 
-After a failed cycle the wait grows from the interval (5 s by default, 5 to 300) in doubling steps to 60 s. The loop
+After a cycle in which the pull failed the wait grows from the interval (5 s by default, 5 to 300) in doubling steps to
+60 s. A cycle whose pull succeeded but whose result could not be delivered keeps the normal interval, so pending results
+never delay fetching commands such as a cancel. The loop
 ends on SIGINT, SIGTERM or a service stop, and results still queued stay on disk for the next start. Startup fails with
 a plain message when the `control` extra is missing, `control.toml` is unreadable or writable by group or others, or the
 URL or key setting is missing or the key does not start with `wpc_`.

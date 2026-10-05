@@ -22,11 +22,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
-from .config import ControlConfig, valid_service_name
+from .config import ControlConfig, effective_reboot_delay, valid_service_name
+from .redact import MAX_OUTPUT, redact  # noqa: F401
 
 SYSTEMCTL = "/usr/bin/systemctl"
 DOCKER = "/usr/bin/docker"
-SHUTDOWN = "/usr/sbin/shutdown"
 THERMALCTL_BIN = "/opt/thermalctl/venv/bin/thermalctl"
 THERMALCTL_CONFIG = "/etc/thermalctl/config.toml"
 OVERRIDES_PATH = "/etc/thermalctl/overrides.toml"
@@ -34,8 +34,10 @@ THERMALCTL_UNIT = "thermalctl"
 THERMALCTL_CONTROLLER = "thermalctl"
 # The candidate overrides are checked under this fixed name so the sudoers rule can name it exactly.
 CANDIDATE_SUFFIX = ".candidate"
-MAX_OUTPUT = 2000
-MAX_REBOOT_MINUTES = 999
+# The reboot is a transient systemd timer, so the delay is exact to the second. shutdown(8) only counts minutes.
+REBOOT_UNIT = "hostwatch-reboot"
+SYSTEMD_RUN = "/usr/bin/systemd-run"
+MAX_REBOOT_SECONDS = 999999
 HEADER_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$")
 MODES = ("dry_run", "active")
 
@@ -68,8 +70,8 @@ class ActionResult:
 
 
 def _clip(text: str) -> str:
-    text = text.strip()
-    return text if len(text) <= MAX_OUTPUT else text[:MAX_OUTPUT] + "...[truncated]"
+    """Mask secrets, then clip, so a secret cut by the clip point is never half shown."""
+    return redact(text)
 
 
 class LinuxActions:
@@ -221,17 +223,25 @@ class LinuxActions:
     def reboot(self) -> ActionResult:
         if not self.config.reboot.allow:
             return ActionResult(False, "refused", "reboot.allow is false")
-        minutes = min(-(-self.config.reboot.delay_s // 60), MAX_REBOOT_MINUTES)
-        done = self._run([SHUTDOWN, "-r", f"+{minutes}"])
+        delay = min(effective_reboot_delay(self.config.reboot.delay_s), MAX_REBOOT_SECONDS)
+        done = self._run(_reboot_argv(delay))
         if done.returncode != 0:
             return ActionResult(False, "failed", _clip(done.output))
-        return ActionResult(True, "scheduled", f"reboot in {minutes} minute(s); cancel with hostwatch-control cancel")
+        return ActionResult(True, "scheduled", f"reboot in {delay} second(s); cancel with hostwatch-control cancel")
 
     def cancel_reboot(self) -> ActionResult:
-        done = self._run([SHUTDOWN, "-c"])
+        done = self._run(_cancel_argv())
         if done.returncode != 0:
             return ActionResult(False, "failed", _clip(done.output))
         return ActionResult(True, "cancelled", "scheduled reboot cancelled")
+
+
+def _reboot_argv(delay: int) -> list[str]:
+    return [SYSTEMD_RUN, f"--unit={REBOOT_UNIT}", f"--on-active={delay}s", SYSTEMCTL, "reboot"]
+
+
+def _cancel_argv() -> list[str]:
+    return [SYSTEMCTL, "stop", f"{REBOOT_UNIT}.timer"]
 
 
 # sudoers --------------------------------------------------------------------------------------
@@ -252,8 +262,10 @@ def sudoers_commands(config: ControlConfig) -> list[str]:
         else:
             cmds.append(f"{SYSTEMCTL} restart {name}")
     if config.reboot.allow:
-        cmds += [f"{SHUTDOWN} -r +{pattern}" for pattern in ("[0-9]", "[0-9][0-9]", "[0-9][0-9][0-9]")]
-        cmds.append(f"{SHUTDOWN} -c")
+        # Delays are 30 seconds or more, so two to six digits.
+        cmds += [f"{SYSTEMD_RUN} --unit={REBOOT_UNIT} --on-active={'[0-9]' * n}s {SYSTEMCTL} reboot"
+                 for n in range(2, 7)]
+        cmds.append(" ".join(_cancel_argv()))
     unique: list[str] = []
     for cmd in cmds:
         if cmd not in unique:

@@ -8,7 +8,9 @@ hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl restart thermalctl
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl restart hostwatch-agent
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl restart nut-monitor
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/docker restart scrutiny
-hostwatch-control ALL=(root) NOPASSWD: /usr/sbin/shutdown -r +[0-9]
-hostwatch-control ALL=(root) NOPASSWD: /usr/sbin/shutdown -r +[0-9][0-9]
-hostwatch-control ALL=(root) NOPASSWD: /usr/sbin/shutdown -r +[0-9][0-9][0-9]
-hostwatch-control ALL=(root) NOPASSWD: /usr/sbin/shutdown -c
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemd-run --unit=hostwatch-reboot --on-active=[0-9][0-9]s /usr/bin/systemctl reboot
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemd-run --unit=hostwatch-reboot --on-active=[0-9][0-9][0-9]s /usr/bin/systemctl reboot
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemd-run --unit=hostwatch-reboot --on-active=[0-9][0-9][0-9][0-9]s /usr/bin/systemctl reboot
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemd-run --unit=hostwatch-reboot --on-active=[0-9][0-9][0-9][0-9][0-9]s /usr/bin/systemctl reboot
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemd-run --unit=hostwatch-reboot --on-active=[0-9][0-9][0-9][0-9][0-9][0-9]s /usr/bin/systemctl reboot
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl stop hostwatch-reboot.timer
