@@ -460,7 +460,7 @@ shell, for names that pass a strict pattern (letters, digits, `_`, `.`, `-`, no 
 `host.reboot` runs `shutdown -r +N` after `delay_s` (rounded up to whole minutes) and can be cancelled with
 `shutdown -c`, which is what the local `hostwatch-control cancel` runs. `deploy/hostwatch-control.sudoers` is the
 sudo rule for exactly those commands. Nothing contacts watchpost yet, there is no entry point or service, and the
-daemon is not installed anywhere. The Windows executors are a later slice. The test vector is in
+daemon is not installed anywhere. The Windows executors are in `hostwatch/control/actions_windows.py`: `fan.set_floor` reads the fan list from the Thermal Control Suite pipe (`GetFans`) and sends `SetFanMapping` with the same mapping and the new `MinDutyPercent`, reporting a refusal from the service as `refused`; `fan.set_mode` is refused with a plain reason because the Suite pipe has no request that changes dry run; `service.restart` runs `powershell.exe` with a fixed `Restart-Service` script and the service name as a separate argument, only for names in the local list that pass the same strict pattern; `host.reboot` runs `shutdown.exe /r /t <delay_s>` and `shutdown.exe /a` cancels it. The Windows executors are tested only with a fake pipe client and a fake runner. The test vector is in
 `tests/fixtures/control_vector.json`.
 
 ## Web UI

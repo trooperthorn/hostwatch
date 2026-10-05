@@ -1159,6 +1159,30 @@ the mode and the service name, all before any call.
   overrides file write itself is not a sudo command, so the fan actions still need a process able to write that
   directory as root (see `UNVERIFIED.md`).
 
+### Windows executors
+
+`actions_windows.py` holds `WindowsActions`. It imports no win32 module and runs programs only through the
+`CommandRunner` seam of `hostwatch.windows` as argument lists, so it is tested on Linux with fakes. The Thermal Control
+Suite pipe is reached through an injectable `PipeClient`; `NamedPipeClient` is the real one and can open only
+`ThermalControlSuite.Ipc`. It checks the pipe directory first so a stopped service never blocks, and it runs the
+length-prefixed JSON exchange on a daemon thread with a timeout, the same way the read-only status reader does.
+
+- `fan.set_floor` refuses unless `fan.controller` is `thermal-control-suite`, validates the header and the 0 to 100 duty,
+  sends `GetFans`, finds the fan by id and sends `SetFanMapping` with every field of the mapping unchanged except
+  `MinDutyPercent`, because that request replaces the whole mapping. A `Success` of false from the service is reported
+  as `refused` with its error text; a missing pipe or timeout is `failed`. The service applies its own limits and audits
+  the change under the caller identity, which is LocalSystem for the daemon. This is an enforced limit on the daemon side
+  (allowlist and range) and the service side (its permission check).
+- `fan.set_mode` is always refused here. The pipe documents no request that sets dry run, which is a setting in the
+  Suite configuration file, so the daemon does not pretend to. The refusal text says so.
+- `service.restart` runs `powershell.exe -NoProfile -NonInteractive -ExecutionPolicy Bypass -Command <script> <name>`
+  where the script is the constant `& { param([string]$Name) Restart-Service -Name $Name -ErrorAction Stop }`. The name is
+  never part of the script text. It must be in the local list, match the strict service name pattern and not start with
+  `docker:`. The pattern allows no space, quote, `$`, backtick, `;`, `|` or leading dash, which is the enforced
+  protection against a name being read as anything but one token.
+- `host.reboot` runs `shutdown.exe /r /t <delay_s>` (capped at the 10 year maximum of the tool) and `cancel_reboot`
+  runs `shutdown.exe /a`.
+
 ## Threat model and quick start documents
 
 `docs/THREAT-MODEL.md` lists assets, trust boundaries, threats and controls, and each control line

@@ -124,7 +124,7 @@ on the hub and use its own ingest key, as in step 1 above.
 
 ## hostwatch-control (not deployable yet)
 
-The control daemon in `hostwatch/control/` has its verification code and the Linux executors so far. There is nothing
+The control daemon in `hostwatch/control/` has its verification code, the Linux executors and the Windows executors so far (the Windows ones call the Thermal Control Suite pipe, `Restart-Service` and `shutdown.exe`, and need a LocalSystem account when installed). There is nothing
 to install: no entry point, no service, and no `control.toml` is shipped. `deploy/hostwatch-control.sudoers` lists the
 only commands the control account may run as root on Linux; regenerate it from your `control.toml` with
 `render_sudoers` in `hostwatch/control/actions_linux.py` when the restart list changes, check it with `visudo -c -f`
