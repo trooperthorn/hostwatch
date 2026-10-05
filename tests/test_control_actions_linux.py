@@ -46,16 +46,20 @@ def setup(tmp_path):
 CHECK = [al.THERMALCTL_BIN, "check-config", al.THERMALCTL_CONFIG, "--overrides"]
 
 
+def cand(path):
+    return path.with_name(path.name + al.CANDIDATE_SUFFIX)
+
+
 def test_set_floor_writes_file_checks_and_reloads(setup):
     actions, runner, path = setup
     result = actions.execute({"action": "fan.set_floor",
                               "params": {"controller": "thermalctl", "header": "pwm2", "min_duty": 25}})
     assert result.ok and result.status == "done"
     assert tomllib.loads(path.read_text()) == {"headers": {"pwm2": {"min_duty": 25}}}
-    assert runner.calls == [CHECK + [str(path)], [al.SYSTEMCTL, "kill", "-s", "HUP", "thermalctl"]]
+    assert runner.calls == [CHECK + [str(cand(path))], [al.SYSTEMCTL, "kill", "-s", "HUP", "thermalctl"]]
     if os.name == "posix":
         assert (path.stat().st_mode & 0o777) == 0o600
-    assert not path.with_name(path.name + ".tmp").exists()
+    assert not path.with_name(path.name + al.CANDIDATE_SUFFIX).exists()
 
 
 def test_set_floor_merges_with_existing_overrides(setup):
@@ -71,7 +75,7 @@ def test_set_mode_restarts_the_service(setup):
     result = actions.execute({"action": "fan.set_mode", "params": {"controller": "thermalctl", "mode": "active"}})
     assert result.ok
     assert tomllib.loads(path.read_text()) == {"mode": "active"}
-    assert runner.calls == [CHECK + [str(path)], [al.SYSTEMCTL, "restart", "thermalctl"]]
+    assert runner.calls == [CHECK + [str(cand(path))], [al.SYSTEMCTL, "restart", "thermalctl"]]
 
 
 def test_check_config_failure_restores_the_previous_file(tmp_path):
@@ -82,9 +86,30 @@ def test_check_config_failure_restores_the_previous_file(tmp_path):
     actions = al.LinuxActions(config(), runner, overrides_path=path, use_sudo=False)
     result = actions.fan_set_floor("pwm2", 5)
     assert not result.ok and result.status == "failed"
-    assert "restored" in result.output and "below limit" in result.output
+    assert "not changed" in result.output and "below limit" in result.output
     assert path.read_bytes() == old
+    assert not cand(path).exists()
     assert len(runner.calls) == 1, "no reload after a failed check"
+
+
+def test_check_config_failure_never_exposes_the_candidate_at_the_real_path(tmp_path):
+    path = tmp_path / "overrides.toml"
+    old = b"[headers.pwm1]\nmin_duty = 30\n"
+    path.write_bytes(old)
+    seen = []
+
+    def runner(argv, timeout):
+        # While thermalctl checks the candidate, the real file must still hold the old bytes and
+        # the check must be pointed at the candidate, not at the real path.
+        seen.append((path.read_bytes(), argv[-1], cand(path).read_bytes()))
+        return al.RunResult(1, "rejected")
+
+    actions = al.LinuxActions(config(), runner, overrides_path=path, use_sudo=False)
+    assert not actions.fan_set_floor("pwm2", 5).ok
+    (real_during, checked, candidate), = seen
+    assert real_during == old and checked == str(cand(path)) and checked != str(path)
+    assert b"pwm2" in candidate
+    assert path.read_bytes() == old and not cand(path).exists()
 
 
 def test_check_config_failure_removes_a_file_that_did_not_exist(tmp_path):
@@ -199,7 +224,7 @@ def test_real_runner_never_uses_a_shell():
 
 NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
 ALLOWED = [
-    re.compile(re.escape(f"{al.THERMALCTL_BIN} check-config {al.THERMALCTL_CONFIG} --overrides {al.OVERRIDES_PATH}")),
+    re.compile(re.escape(f"{al.THERMALCTL_BIN} check-config {al.THERMALCTL_CONFIG} --overrides {al.OVERRIDES_PATH}{al.CANDIDATE_SUFFIX}")),
     re.compile(re.escape(f"{al.SYSTEMCTL} kill -s HUP thermalctl")),
     re.compile(re.escape(f"{al.SYSTEMCTL} restart ") + NAME),
     re.compile(re.escape(f"{al.DOCKER} restart ") + NAME),
@@ -259,3 +284,27 @@ def test_sudoers_renders_nothing_for_disabled_actions_and_rejects_bad_account():
     assert _rules(al.render_sudoers(cfg)) == []
     with pytest.raises(ValueError):
         al.render_sudoers(cfg, "bad user; ALL")
+
+
+# controller selection ------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize("controller", ["thermal-control-suite"])
+def test_thermalctl_fan_actions_are_refused_under_another_controller(tmp_path, controller):
+    runner = FakeRunner()
+    raw = {**RAW, "fan": {**RAW["fan"], "controller": controller}}
+    path = tmp_path / "overrides.toml"
+    actions = al.LinuxActions(cfgmod.parse(raw), runner, overrides_path=path, use_sudo=False)
+    for result in (actions.execute({"action": "fan.set_floor", "params": {"header": "pwm1", "min_duty": 30}}),
+                   actions.execute({"action": "fan.set_mode", "params": {"mode": "active"}})):
+        assert not result.ok and result.status == "refused" and "thermalctl" in result.output
+    assert runner.calls == [] and not path.exists() and not cand(path).exists()
+
+
+def test_thermalctl_fan_actions_are_refused_without_a_fan_section(tmp_path):
+    runner = FakeRunner()
+    cfg = cfgmod.parse({"watchpost_public_key": KEY, "host": "h"})
+    actions = al.LinuxActions(cfg, runner, overrides_path=tmp_path / "o.toml", use_sudo=False)
+    assert actions.fan_set_floor("pwm1", 30).status == "refused"
+    assert actions.fan_set_mode("active").status == "refused"
+    assert runner.calls == []

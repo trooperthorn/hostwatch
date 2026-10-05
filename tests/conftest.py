@@ -34,3 +34,14 @@ def _agent_platform_is_not_the_test_host(request, monkeypatch):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_platform: use the real detect_platform instead of the Linux stand-in")
+
+
+@pytest.fixture(autouse=True)
+def _control_file_owner_is_the_test_user(monkeypatch):
+    """control.toml must be root-owned in production. Tests write it as the current user, so that
+    user is trusted here. The owner tests set the trusted list back to root alone."""
+    import os
+    if os.name != "posix":
+        return
+    import hostwatch.control.config as control_config
+    monkeypatch.setattr(control_config, "TRUSTED_UIDS", (0, os.getuid()))

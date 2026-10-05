@@ -31,6 +31,9 @@ THERMALCTL_BIN = "/opt/thermalctl/venv/bin/thermalctl"
 THERMALCTL_CONFIG = "/etc/thermalctl/config.toml"
 OVERRIDES_PATH = "/etc/thermalctl/overrides.toml"
 THERMALCTL_UNIT = "thermalctl"
+THERMALCTL_CONTROLLER = "thermalctl"
+# The candidate overrides are checked under this fixed name so the sudoers rule can name it exactly.
+CANDIDATE_SUFFIX = ".candidate"
 MAX_OUTPUT = 2000
 MAX_REBOOT_MINUTES = 999
 HEADER_ID = re.compile(r"^[A-Za-z0-9_][A-Za-z0-9_-]{0,31}$")
@@ -76,6 +79,7 @@ class LinuxActions:
                  timeout: float = 120.0):
         self.config, self.runner, self.timeout = config, runner, timeout
         self.overrides_path = Path(overrides_path)
+        self.candidate_path = self.overrides_path.with_name(self.overrides_path.name + CANDIDATE_SUFFIX)
         self.thermalctl_bin, self.thermalctl_config = thermalctl_bin, thermalctl_config
         if use_sudo is None:
             use_sudo = hasattr(os, "geteuid") and os.geteuid() != 0
@@ -103,6 +107,8 @@ class LinuxActions:
     # fan actions ------------------------------------------------------------------------------
 
     def fan_set_floor(self, header: object, min_duty: object) -> ActionResult:
+        if (refused := self._fan_refusal()) is not None:
+            return refused
         if not isinstance(header, str) or not HEADER_ID.fullmatch(header):
             return ActionResult(False, "refused", "invalid header name")
         if isinstance(min_duty, bool) or not isinstance(min_duty, int) or not 0 <= min_duty <= 100:
@@ -110,6 +116,8 @@ class LinuxActions:
         return self._apply_overrides(lambda mode, floors: (mode, {**floors, header: min_duty}), restart=False)
 
     def fan_set_mode(self, mode: object) -> ActionResult:
+        if (refused := self._fan_refusal()) is not None:
+            return refused
         if mode not in MODES:
             return ActionResult(False, "refused", "mode must be dry_run or active")
         return self._apply_overrides(lambda _mode, floors: (mode, floors), restart=True)
@@ -138,9 +146,9 @@ class LinuxActions:
             lines.append(f"\n[headers.{name}]\nmin_duty = {floors[name]}\n")
         return "".join(lines).encode("utf-8")
 
-    def _write_atomic(self, data: bytes) -> None:
-        path = self.overrides_path
-        tmp = path.with_name(path.name + ".tmp")
+    def _stage(self, data: bytes) -> None:
+        """Write the candidate beside the real file under a fixed name, never at the real path."""
+        tmp = self.candidate_path
         fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
             with os.fdopen(fd, "wb") as fh:
@@ -148,39 +156,43 @@ class LinuxActions:
                 fh.flush()
                 os.fsync(fh.fileno())
             os.chmod(tmp, 0o600)
-            os.replace(tmp, path)
         except BaseException:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            self._discard_candidate()
             raise
 
-    def _restore(self, previous: bytes | None) -> str:
+    def _discard_candidate(self) -> None:
         try:
-            if previous is None:
-                self.overrides_path.unlink(missing_ok=True)
-            else:
-                self._write_atomic(previous)
-        except OSError as exc:
-            return f" Restoring the previous overrides failed: {exc}."
-        return " The previous overrides were restored."
+            os.unlink(self.candidate_path)
+        except OSError:
+            pass
+
+    def _fan_refusal(self) -> ActionResult | None:
+        fan = self.config.fan
+        if fan is None or fan.controller != THERMALCTL_CONTROLLER:
+            return ActionResult(False, "refused", "fan.controller is not thermalctl")
+        return None
 
     def _apply_overrides(self, change: Callable, restart: bool) -> ActionResult:
         try:
-            previous, mode, floors = self._read_overrides()
+            _previous, mode, floors = self._read_overrides()
         except (OSError, ValueError, KeyError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
             return ActionResult(False, "failed", f"cannot read the existing overrides: {exc}")
         new_mode, new_floors = change(mode, floors)
         try:
-            self._write_atomic(self._render(new_mode, new_floors))
+            self._stage(self._render(new_mode, new_floors))
         except OSError as exc:
             return ActionResult(False, "failed", f"cannot write the overrides: {exc}")
         check = self._run([self.thermalctl_bin, "check-config", self.thermalctl_config,
-                           "--overrides", str(self.overrides_path)])
+                           "--overrides", str(self.candidate_path)])
         if check.returncode != 0:
-            note = self._restore(previous)
-            return ActionResult(False, "failed", _clip(f"check-config rejected the overrides.{note} {check.output}"))
+            self._discard_candidate()
+            return ActionResult(False, "failed", _clip(
+                f"check-config rejected the overrides. The existing overrides were not changed. {check.output}"))
+        try:
+            os.replace(self.candidate_path, self.overrides_path)
+        except OSError as exc:
+            self._discard_candidate()
+            return ActionResult(False, "failed", f"cannot install the overrides: {exc}")
         if restart:
             applied = self._run([SYSTEMCTL, "restart", THERMALCTL_UNIT])
         else:
@@ -231,7 +243,7 @@ def sudoers_commands(config: ControlConfig) -> list[str]:
     """Exactly the privileged command shapes the Linux executors can run, nothing wider."""
     cmds = []
     if config.fan is not None and config.fan.controller == "thermalctl":
-        cmds += [f"{THERMALCTL_BIN} check-config {THERMALCTL_CONFIG} --overrides {OVERRIDES_PATH}",
+        cmds += [f"{THERMALCTL_BIN} check-config {THERMALCTL_CONFIG} --overrides {OVERRIDES_PATH}{CANDIDATE_SUFFIX}",
                  f"{SYSTEMCTL} kill -s HUP {THERMALCTL_UNIT}",
                  f"{SYSTEMCTL} restart {THERMALCTL_UNIT}"]
     for name in config.restart:

@@ -142,8 +142,9 @@ Linux (systemd), as root:
 1. Create the account: `useradd --system --no-create-home --shell /usr/sbin/nologin hostwatch-control`.
 2. Install into its own environment: `python3 -m venv /opt/hostwatch-control/venv` and
    `/opt/hostwatch-control/venv/bin/pip install '/path/to/hostwatch[control]'`.
-3. Put `control.toml` at `/etc/hostwatch/control.toml`, owned by root and not writable by group or others. The loader
-   refuses it otherwise.
+3. Put `control.toml` at `/etc/hostwatch/control.toml`, owned by root and not writable by group or others, in a directory
+   that group and others cannot write. The loader refuses it otherwise. On Windows it checks the owner (SYSTEM or
+   Administrators) when pywin32 is installed.
 4. Copy `deploy/hostwatch-control.env.example` to `/etc/hostwatch/control.env`, set `HOSTWATCH_CONTROL_URL` and
    `HOSTWATCH_CONTROL_KEY`, and set owner root, group `hostwatch-control`, mode 0640.
 5. Regenerate `deploy/hostwatch-control.sudoers` from your `control.toml` with `render_sudoers` in
@@ -152,7 +153,8 @@ Linux (systemd), as root:
 6. Install `deploy/hostwatch-control.service` into `/etc/systemd/system/`, then `systemctl daemon-reload` and
    `systemctl enable --now hostwatch-control`. Logs are in `journalctl -u hostwatch-control`.
 
-The unit leaves `NoNewPrivileges` off because `sudo` would stop working with it. Fan actions on thermalctl need to write
+The unit leaves `NoNewPrivileges` off because `sudo` would stop working with it. Fan actions run only when `[fan] controller` is `thermalctl` on Linux. A candidate overrides file is written to
+`/etc/thermalctl/overrides.toml.candidate`, validated, then renamed over the real file. Fan actions on thermalctl need to write
 `/etc/thermalctl/overrides.toml`, which thermalctl requires to be root owned. The unit does not grant that write, so those
 actions report a failure until the owner chooses how it is granted.
 

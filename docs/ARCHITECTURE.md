@@ -1122,9 +1122,10 @@ The `hostwatch/control/` package is the verification half of the per-host comman
 the watchpost repository. It is not imported by the collector at import time. The pull loop, results outbox and service
 files are described in the section after the executors. Modules:
 
-- `config.py` loads `control.toml` into frozen dataclasses. On POSIX it refuses a file writable by group or others
-  (enforced). On Windows it cannot check the ACL without pywin32, so the install step must lock the file (advisory
-  until a Windows install exists). Service names are limited to plain characters because they reach a command line
+- `config.py` loads `control.toml` into frozen dataclasses. On POSIX it refuses a file that is not root-owned, a file
+  writable by group or others, and a file in a directory writable by group or others (enforced). On Windows it checks
+  that the owner is SYSTEM or Administrators only when pywin32 is installed; otherwise the install step must lock the
+  file (advisory until a Windows install exists). Service names are limited to plain characters because they reach a command line
   later.
 - `signing.py` builds canonical JSON (sorted keys, no spaces, UTF-8 without ASCII escaping) and verifies the Ed25519
   signature, sent as base64 beside the command, against the pinned key written as `ed25519:` plus base64. The
@@ -1145,12 +1146,16 @@ matches what is run. The executors validate again what the allowlist already che
 the mode and the service name, all before any call.
 
 - Overrides: the file is read and merged (only `mode` and `[headers.<id>] min_duty` are kept, which is all thermalctl
-  accepts), written to a temporary name with mode 0600, flushed and renamed over the old file. `thermalctl check-config
-  <config> --overrides <path>` then validates the result. On failure the previous bytes are written back (or the file
-  is removed if there was none) and the failure is reported with the check output. A floor then sends SIGHUP through
+  accepts), written to a candidate file in the same directory (`overrides.toml.candidate`, mode 0600) and flushed. `thermalctl
+  check-config <config> --overrides <candidate>` validates the candidate, and only on success is it renamed over the
+  real path. On failure the candidate is deleted, the real file is never touched and the failure is reported with the
+  check output. A floor then sends SIGHUP through
   `systemctl kill -s HUP thermalctl`; a mode change runs `systemctl restart thermalctl`, because a reload refuses a
   mode change. An existing overrides file that cannot be parsed fails the action rather than being overwritten.
   Whether every header is mapped before going active is enforced by `check-config`, not duplicated here.
+- Controller selection: the fan actions run only when `[fan] controller` in `control.toml` names the executor's own
+  controller. The Linux executor refuses them (status `refused`, no command run) unless it is `thermalctl`, and the
+  Windows executor refuses them unless it is `thermal-control-suite`.
 - Restart: `systemctl restart <unit>` or `docker restart <name>` for `docker:<name>`, only for names in the local list.
 - Reboot: `shutdown -r +N` with N the delay in whole minutes rounded up, capped at 999, and `shutdown -c` to cancel.
   `main_cancel` is the older body of the local cancel command; `python -m hostwatch control cancel` now runs the
@@ -1158,7 +1163,7 @@ the mode and the service name, all before any call.
 - Privilege: a process that is not root prefixes the commands with `sudo -n`. `render_sudoers` produces the sudoers
   rule from the allowlist, and `deploy/hostwatch-control.sudoers` is its output for an example list. The only wildcard
   is the digit pattern in the shutdown delay. This is an enforced limit on what the account may run as root. The
-  overrides file write itself is not a sudo command, so the fan actions still need a process able to write that
+  sudoers rule names the candidate path `/etc/thermalctl/overrides.toml.candidate`. The overrides file write itself is not a sudo command, so the fan actions still need a process able to write that
   directory as root (see `UNVERIFIED.md`).
 
 ### Windows executors

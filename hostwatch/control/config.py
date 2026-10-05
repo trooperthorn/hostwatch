@@ -1,10 +1,11 @@
 """Loader for control.toml, the root-owned local allowlist.
 
 The file is the authority on what this host will do. On POSIX the loader refuses a file that
-group or others can write, because anyone who could edit it could widen the allowlist or swap
-the pinned key. That check is enforced. On Windows the loader cannot see ACLs without pywin32,
-so it does not check; the install script is expected to lock the file to SYSTEM and
-Administrators, and that is advisory until verified on a host (see UNVERIFIED.md).
+is not root-owned or that group or others can write, and a file in a directory that group or
+others can write, because anyone who could edit it could widen the allowlist or swap the pinned
+key. That check is enforced. On Windows the loader checks the owner (SYSTEM or Administrators)
+only when pywin32 is installed; the install script is expected to lock the file, and that is
+advisory until verified on a host (see UNVERIFIED.md).
 """
 
 from __future__ import annotations
@@ -140,14 +141,43 @@ def parse(data: dict) -> ControlConfig:
     return ControlConfig(public_key=key, host=host.strip(), fan=fan, restart=restart, reboot=reboot)
 
 
+# Owners accepted for control.toml on POSIX. Tests widen this to the test user.
+TRUSTED_UIDS: tuple[int, ...] = (0,)
+# SYSTEM and the built-in Administrators group.
+WINDOWS_TRUSTED_SIDS = ("S-1-5-18", "S-1-5-32-544")
+
+
+def _windows_owner_sid(path: Path) -> str | None:
+    """The owner SID of a file, or None when it cannot be read (pywin32 is not installed)."""
+    try:
+        import win32security  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    desc = win32security.GetFileSecurity(str(path), win32security.OWNER_SECURITY_INFORMATION)
+    return win32security.ConvertSidToStringSid(desc.GetSecurityDescriptorOwner())
+
+
 def check_permissions(path: Path) -> None:
-    """Refuse a file that group or others can write (POSIX only)."""
+    """Refuse a file that is not root-owned, that group or others can write, or whose directory
+    group or others can write. POSIX is enforced. Windows checks the owner when pywin32 is present
+    and otherwise stays advisory (see UNVERIFIED.md)."""
     if os.name != "posix":
+        sid = _windows_owner_sid(path)
+        if sid is not None and sid not in WINDOWS_TRUSTED_SIDS:
+            raise ConfigError(f"{path} is owned by {sid}, not SYSTEM or Administrators; refusing to use it")
         return
-    mode = path.stat().st_mode
-    if mode & (stat.S_IWGRP | stat.S_IWOTH):
-        raise ConfigError(f"{path} is writable by group or others (mode {stat.S_IMODE(mode):04o}); "
+    st = path.stat()
+    if st.st_uid not in TRUSTED_UIDS:
+        raise ConfigError(f"{path} is owned by uid {st.st_uid}, not root; refusing to use it. "
+                          "Fix it with: chown root")
+    if st.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ConfigError(f"{path} is writable by group or others (mode {stat.S_IMODE(st.st_mode):04o}); "
                           "refusing to use it. Fix it with: chmod go-w")
+    parent = path.parent.stat()
+    if parent.st_mode & (stat.S_IWGRP | stat.S_IWOTH):
+        raise ConfigError(f"the directory of {path} is writable by group or others "
+                          f"(mode {stat.S_IMODE(parent.st_mode):04o}); refusing to use it. "
+                          "Fix it with: chmod go-w")
 
 
 def load(path: str | Path) -> ControlConfig:

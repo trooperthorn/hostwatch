@@ -409,12 +409,49 @@ def test_group_write_check_is_a_mode_check_on_posix(tmp_path, monkeypatch):
     p = tmp_path / "c.toml"
     p.write_text("x", encoding="utf-8")
 
-    class St:
-        st_mode = 0o100666
-
     monkeypatch.setattr(cfgmod.os, "name", "posix")
-    monkeypatch.setattr(Path, "stat", lambda self, **k: St())
-    with pytest.raises(cfgmod.ConfigError):
+    monkeypatch.setattr(Path, "stat", lambda self, **k: St(0o100666))
+    with pytest.raises(cfgmod.ConfigError, match="writable by group or others"):
+        cfgmod.check_permissions(p)
+
+
+class St:
+    def __init__(self, mode, uid=0):
+        self.st_mode, self.st_uid = mode, uid
+
+
+def fake_stats(monkeypatch, file_st, dir_st):
+    monkeypatch.setattr(cfgmod, "TRUSTED_UIDS", (0,))
+    monkeypatch.setattr(cfgmod.os, "name", "posix")
+    monkeypatch.setattr(Path, "stat", lambda self, **k: file_st if self.name == "control.toml" else dir_st)
+
+
+def test_root_owned_file_in_a_closed_directory_is_accepted(monkeypatch, tmp_path):
+    fake_stats(monkeypatch, St(0o100644), St(0o040755))
+    cfgmod.check_permissions(tmp_path / "control.toml")
+
+
+def test_non_root_owner_is_refused(monkeypatch, tmp_path):
+    fake_stats(monkeypatch, St(0o100644, uid=1000), St(0o040755))
+    with pytest.raises(cfgmod.ConfigError, match="not root"):
+        cfgmod.check_permissions(tmp_path / "control.toml")
+
+
+@pytest.mark.parametrize("mode", [0o040775, 0o040757, 0o040777])
+def test_group_or_other_writable_directory_is_refused(monkeypatch, tmp_path, mode):
+    fake_stats(monkeypatch, St(0o100644), St(mode))
+    with pytest.raises(cfgmod.ConfigError, match="directory"):
+        cfgmod.check_permissions(tmp_path / "control.toml")
+
+
+def test_windows_owner_must_be_system_or_administrators(monkeypatch):
+    monkeypatch.setattr(cfgmod.os, "name", "nt")
+    p = Path("C:/ProgramData/hostwatch/control.toml")
+    monkeypatch.setattr(cfgmod, "_windows_owner_sid", lambda path: "S-1-5-21-1-2-3-1001")
+    with pytest.raises(cfgmod.ConfigError, match="SYSTEM or Administrators"):
+        cfgmod.check_permissions(p)
+    for sid in ("S-1-5-18", "S-1-5-32-544", None):
+        monkeypatch.setattr(cfgmod, "_windows_owner_sid", lambda path, sid=sid: sid)
         cfgmod.check_permissions(p)
 
 
