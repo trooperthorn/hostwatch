@@ -1,6 +1,6 @@
 # hostwatch-control: the per-host command daemon, separate from the read-only collector.
 #
-# It runs as its own unprivileged account and dials out to watchpost only. It opens no port. Root-level
+# It runs as its own unprivileged account and dials out to Observe only. It opens no port. Root-level
 # work goes through the sudo rules in hostwatch-control.sudoers, which list the exact commands allowed.
 # NoNewPrivileges is deliberately not set, because it would stop sudo from working.
 #

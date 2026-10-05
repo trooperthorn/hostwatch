@@ -287,7 +287,7 @@ def render_sudoers(config: ControlConfig, account: str = "hostwatch-control") ->
 
 
 def main_cancel() -> int:
-    """Local `hostwatch-control cancel`: cancel a scheduled reboot without watchpost."""
+    """Local `hostwatch-control cancel`: cancel a scheduled reboot without Observe."""
     from . import config as cfgmod
     cfg = cfgmod.load("/etc/hostwatch/control.toml")
     result = LinuxActions(cfg).cancel_reboot()

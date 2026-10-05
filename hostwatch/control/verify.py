@@ -46,7 +46,7 @@ REBOOT_NOT_ALLOWED = "reboot_not_allowed"
 STATE_UNAVAILABLE = "state_unavailable"
 
 ACTIONS = ("fan.set_floor", "fan.set_mode", "service.restart", "host.reboot")
-# watchpost checks the typed host name before it signs a reboot. Older plugin builds copied it into the
+# Observe checks the typed host name before it signs a reboot. Older plugin builds copied it into the
 # signed params as confirm_host; it is accepted and ignored. Any other extra parameter is a refusal.
 REBOOT_IGNORED_PARAMS = frozenset({"confirm_host"})
 _FIELDS = {"v": int, "id": str, "host": str, "action": str, "params": dict,

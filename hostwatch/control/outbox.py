@@ -1,6 +1,6 @@
 """A small durable outbox for command results.
 
-A result waits in a SQLite file in the control data directory until watchpost answers 2xx, so a
+A result waits in a SQLite file in the control data directory until Observe answers 2xx, so a
 network outage or a restart delays the report but does not lose it. The outbox is separate from the
 collector's batch outbox and holds nothing but results. A command id has at most one queued row per
 status and at most one final one (done, failed or cancelled): the first final result queued for it wins, so
@@ -13,11 +13,11 @@ ran (capped), so a command that is pulled again after its report was lost is ans
 result, and `scheduled` holds the reboots this host has promised and not yet resolved.
 
 Overflow: when more than `max_results` results wait, the oldest is dropped and counted, because an
-unbounded file on a host whose watchpost stays away for days is worse than a missing old report
-(watchpost shows a command with no result as unknown, never as done). The running count is available from
+unbounded file on a host whose Observe stays away for days is worse than a missing old report
+(Observe shows a command with no result as unknown, never as done). The running count is available from
 `dropped_total()` and the daemon sends it with every result as `outbox_dropped`.
 
-A result that watchpost refuses with a permanent 4xx answer is parked: moved to a `parked` table with the
+A result that Observe refuses with a permanent 4xx answer is parked: moved to a `parked` table with the
 reason and no longer sent, so one undeliverable result never blocks the ones behind it. It is kept, not
 deleted, for the owner to inspect (`parked()`), up to the same cap.
 
@@ -85,7 +85,7 @@ class ResultOutbox:
                 moved = self.path.with_name(f"{moved.name}-{n}")
             self.path.rename(moved)
             log.error("result outbox %s was unreadable (%s); moved to %s and a fresh one started. Unsent "
-                      "results in it are lost and will show as unknown in watchpost", self.path, exc, moved)
+                      "results in it are lost and will show as unknown in Observe", self.path, exc, moved)
             self.recovered_from = moved
             self._db = self._open()
 
@@ -127,7 +127,7 @@ class ResultOutbox:
         status = str(payload.get("status") or "")
         with self._lock, self._db:
             if self._db.execute("SELECT 1 FROM parked WHERE command_id=?", (command_id,)).fetchone():
-                return  # watchpost refused this command's result for good; a repeat cannot fare better
+                return  # Observe refused this command's result for good; a repeat cannot fare better
             known = [r[0] for r in self._db.execute(
                 "SELECT status FROM results WHERE command_id=?", (command_id,)).fetchall()]
             ran = self._db.execute("SELECT 1 FROM executed WHERE command_id=?", (command_id,)).fetchone()
@@ -216,7 +216,7 @@ class ResultOutbox:
             self._db.execute("DELETE FROM results WHERE seq=?", (seq,))
 
     def park(self, seq: int, reason: str) -> None:
-        """Move a result that watchpost refuses for good out of the queue, keeping it and the reason."""
+        """Move a result that Observe refuses for good out of the queue, keeping it and the reason."""
         with self._lock, self._db:
             row = self._db.execute("SELECT command_id, payload FROM results WHERE seq=?", (seq,)).fetchone()
             if row is None:

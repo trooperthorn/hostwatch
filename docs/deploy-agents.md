@@ -84,7 +84,7 @@ is older than 60 seconds.
 A Windows host runs the native agent as the `hostwatch-agent` service. It is not verified on a real Windows host yet
 (see `UNVERIFIED.md`). It pushes the same wire schema as the other agents, so the hub settings in step 1 apply
 unchanged: create a key bound to the Windows host name with `python -m hostwatch key create --scopes ingest --host <name>`.
-The destination is only the `HOSTWATCH_HUB_URL` setting, and it is expected to move from the hostwatch hub to watchpost
+The destination is only the `HOSTWATCH_HUB_URL` setting, and it is expected to move from the hostwatch hub to Observe
 later, which will ingest the same schema.
 
 On the Windows host, from an elevated PowerShell in a checkout of this repository (Python 3.11 or newer is needed):
@@ -124,20 +124,20 @@ on the hub and use its own ingest key, as in step 1 above.
 
 ## hostwatch-control
 
-The control daemon is a separate program from the collector. It pulls signed commands from watchpost, checks them against
+The control daemon is a separate program from the collector. It pulls signed commands from Observe, checks them against
 the local allowlist `control.toml`, runs the allowed ones and reports the result. It only dials out and opens no port. It
 needs the `control` extra (`pip install 'hostwatch[control]'`) and runs under its own account, not the collector's. The
 collector works without it. None of the steps below has been run on a real host; see `UNVERIFIED.md`.
 
 Before installing, on both platforms:
 
-1. In watchpost, create a control key bound to this host: `--ingest-key-create HOST --ingest-key-scope wpc`. Keep the
+1. In Observe, create a control key bound to this host: `--ingest-key-create HOST --ingest-key-scope wpc`. Keep the
    `wpc_` value out of files you commit.
-2. Write `control.toml` with the watchpost public key (`ed25519:...`), the host name exactly as watchpost knows it, and
-   the fan, services and reboot allowlist. The format is in `CONTROL.md` in the docs folder of the watchpost repository. Everything
+2. Write `control.toml` with the Observe public key (`ed25519:...`), the host name exactly as Observe knows it, and
+   the fan, services and reboot allowlist. The format is in `CONTROL.md` in the docs folder of the Observe repository. Everything
    not listed is refused. The `host` must also be this machine's own name (full or short, any case): the daemon refuses
    to start on any other machine, and refuses each command with reason `wrong_machine` if the name changes later. If the
-   operating system name differs from the watchpost name, add `machine_id = "<contents of /etc/machine-id>"` (the
+   operating system name differs from the Observe name, add `machine_id = "<contents of /etc/machine-id>"` (the
    MachineGuid on Windows) and that id is checked instead. The agent logs one warning when `HOSTWATCH_HOST_NAME`
    differs from the machine name, which is normal in a container and does not stop it.
 
@@ -166,7 +166,7 @@ actions report a failure until the owner chooses how it is granted.
 Windows, from an elevated PowerShell (a separate service from `hostwatch-agent`):
 
 1. Put `control.toml` in `C:/ProgramData/hostwatch`, or pass its path as `-ConfigFile`.
-2. Run `deploy/windows/install-control.ps1 -WatchpostUrl https://watchpost.example.lan:8443 -DryRun` to read the steps,
+2. Run `deploy/windows/install-control.ps1 -ObserveUrl https://observe.example.lan:8443 -DryRun` to read the steps,
    then run it again without `-DryRun`. It asks for the `wpc_` key as a secure string and never prints it.
 3. It creates its own environment, writes `control.env`, locks `control.toml` and `control.env` to SYSTEM and
    Administrators, and registers `hostwatch-control` as LocalSystem, which the Thermal Control Suite pipe needs. Logs are
@@ -175,17 +175,17 @@ Windows, from an elevated PowerShell (a separate service from `hostwatch-agent`)
 
 To run it by hand on either platform: `python -m hostwatch control run`, with `HOSTWATCH_CONTROL_URL` and
 `HOSTWATCH_CONTROL_KEY` set, and optionally `--config`, `--data-dir` and `--env-file`. `python -m hostwatch control cancel`
-cancels a scheduled reboot on this host without watchpost; this works for the whole delay. The reboot delay in
+cancels a scheduled reboot on this host without Observe; this works for the whole delay. The reboot delay in
 `control.toml` (`[reboot] delay_s`, default 60) has a minimum of 30 seconds, and a smaller value, including 0, is raised
 to 30. On Linux it is a systemd timer named `hostwatch-reboot` and is exact to the second. A reboot is reported to
-watchpost as `scheduled`, then `done` or `failed` for the same command id, and an admin cancel in watchpost reaches the
+Observe as `scheduled`, then `done` or `failed` for the same command id, and an admin cancel in Observe reaches the
 host on its next pull (the pull answer lists the cancelled ids) and cancels the pending reboot here, reported as
-`cancelled`. A command whose result was lost is re-sent, not refused as a replay. Results that watchpost refuses
+`cancelled`. A command whose result was lost is re-sent, not refused as a replay. Results that Observe refuses
 with a permanent 4xx answer are parked in `control-outbox.db` in the data directory, with the reason, and the results
 behind them are still sent. The settings are `HOSTWATCH_CONTROL_URL`,
 `HOSTWATCH_CONTROL_KEY`, `HOSTWATCH_CONTROL_CONFIG`, `HOSTWATCH_CONTROL_DATA_DIR` (state, results outbox and logs) and
 `HOSTWATCH_CONTROL_INTERVAL_S` (5 to 300, default 5). Over plain HTTP on the LAN the signatures still protect the
-commands, but the key and results travel unencrypted, so TLS to watchpost is recommended.
+commands, but the key and results travel unencrypted, so TLS to Observe is recommended.
 
 ## Windows source reporting
 

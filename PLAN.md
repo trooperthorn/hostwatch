@@ -179,6 +179,6 @@ Code complete and unit-tested with fakes; not verified on a Windows host. The ag
 service or with `python -m hostwatch windows run`, keeps its outbox under `C:/ProgramData/hostwatch`, and pushes the
 unchanged wire schema. The remaining exit test is the Phase 2 scenarios on a real Windows host (see `UNVERIFIED.md`).
 
-The hostwatch hub and web view are expected to be retired in favour of watchpost, which will ingest this same wire
-schema. Agent-side work therefore stays independent of the hub, and the schema changes only additively. When watchpost
+The hostwatch hub and web view are expected to be retired in favour of Observe, which will ingest this same wire
+schema. Agent-side work therefore stays independent of the hub, and the schema changes only additively. When Observe
 is ready, the Windows agent moves by changing its receiver URL and key.

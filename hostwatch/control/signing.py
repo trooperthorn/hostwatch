@@ -1,4 +1,4 @@
-"""Canonical JSON and Ed25519 verification for watchpost commands.
+"""Canonical JSON and Ed25519 verification for Observe commands.
 
 The signature covers the canonical JSON of the command object: keys sorted, no spaces,
 UTF-8 with non-ASCII characters kept as is. The signature travels beside the command as

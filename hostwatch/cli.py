@@ -79,7 +79,7 @@ def _parser() -> argparse.ArgumentParser:
     run_win.add_argument("--env-file", default=None, help="settings file (default: agent.env in the data directory)")
     ctl = sub.add_parser("control", help="the hostwatch-control command daemon").add_subparsers(
         dest="action", required=True)
-    run_ctl = ctl.add_parser("run", help="pull and run signed commands from watchpost in the foreground")
+    run_ctl = ctl.add_parser("run", help="pull and run signed commands from Observe in the foreground")
     run_ctl.add_argument("--config", default=None, help="control.toml (default: HOSTWATCH_CONTROL_CONFIG or the platform path)")
     run_ctl.add_argument("--data-dir", default=None, help="state and outbox folder (default: HOSTWATCH_CONTROL_DATA_DIR)")
     run_ctl.add_argument("--env-file", default=None, help="settings file (default: control.env in the data directory)")

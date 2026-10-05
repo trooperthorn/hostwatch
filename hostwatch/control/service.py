@@ -23,7 +23,7 @@ from . import daemon
 
 SERVICE_NAME = "hostwatch-control"
 SERVICE_DISPLAY_NAME = "hostwatch control"
-SERVICE_DESCRIPTION = "Pulls signed commands from watchpost, checks them against the local allowlist and runs them."
+SERVICE_DESCRIPTION = "Pulls signed commands from Observe, checks them against the local allowlist and runs them."
 SERVICE_MODULE = "hostwatch.control.service"
 SERVICE_CLASS_NAME = "HostwatchControlService"
 SERVICE_CLASS_STRING = f"{SERVICE_MODULE}.{SERVICE_CLASS_NAME}"

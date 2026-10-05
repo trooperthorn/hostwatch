@@ -30,7 +30,7 @@ NOW = 1759600060
 HOST = "MediaIn-SVR"
 
 TOML = """
-watchpost_public_key = "{key}"
+observe_public_key = "{key}"
 host = "MediaIn-SVR"
 
 [fan]
@@ -334,7 +334,7 @@ def test_set_mode_refused_when_not_allowed(tmp_path, signer):
 
 
 def _data(signer):
-    return {"watchpost_public_key": pub_text(signer), "host": HOST}
+    return {"observe_public_key": pub_text(signer), "host": HOST}
 
 
 def test_fan_actions_refused_without_fan_section(tmp_path, signer):
@@ -463,9 +463,9 @@ def test_loader_reports_missing_and_invalid_files(tmp_path, signer):
 
 
 @pytest.mark.parametrize("patch,message", [
-    ({"watchpost_public_key": "abc"}, "must start with"),
-    ({"watchpost_public_key": "ed25519:!!!"}, "base64"),
-    ({"watchpost_public_key": "ed25519:" + b64(b"short")}, "32 bytes"),
+    ({"observe_public_key": "abc"}, "must start with"),
+    ({"observe_public_key": "ed25519:!!!"}, "base64"),
+    ({"observe_public_key": "ed25519:" + b64(b"short")}, "32 bytes"),
     ({"host": ""}, "host"),
     ({"fan": {"controller": "other", "headers": ["a"]}}, "controller"),
     ({"fan": {"controller": "thermalctl", "headers": []}}, "headers"),

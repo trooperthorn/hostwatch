@@ -70,13 +70,13 @@ class ControlConfig:
 def parse_public_key(text: object) -> bytes:
     """Decode `ed25519:<base64 of the 32 raw key bytes>`."""
     if not isinstance(text, str) or not text.startswith(KEY_PREFIX):
-        raise ConfigError(f"watchpost_public_key must start with {KEY_PREFIX}")
+        raise ConfigError(f"observe_public_key must start with {KEY_PREFIX}")
     try:
         raw = base64.b64decode(text[len(KEY_PREFIX):], validate=True)
     except (binascii.Error, ValueError) as exc:
-        raise ConfigError("watchpost_public_key is not valid base64") from exc
+        raise ConfigError("observe_public_key is not valid base64") from exc
     if len(raw) != 32:
-        raise ConfigError("watchpost_public_key must decode to 32 bytes")
+        raise ConfigError("observe_public_key must decode to 32 bytes")
     return raw
 
 
@@ -114,7 +114,7 @@ def parse(data: dict) -> ControlConfig:
     host = data.get("host")
     if not isinstance(host, str) or not host.strip():
         raise ConfigError("host must be a non-empty string")
-    key = parse_public_key(data.get("watchpost_public_key"))
+    key = parse_public_key(data.get("observe_public_key"))
 
     fan = None
     fan_t = _table(data, "fan")

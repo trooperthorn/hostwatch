@@ -1,6 +1,6 @@
 """The hostwatch-control pull loop.
 
-Every cycle the daemon first replays any results that could not be sent earlier, then asks watchpost
+Every cycle the daemon first replays any results that could not be sent earlier, then asks Observe
 for the commands waiting for this host (`GET /api/v1/control/commands?host=`, bearer `wpc_` key) and
 handles them one at a time in `seq` order. Each command goes through `CommandVerifier` (signature,
 host, expiry, id, seq, local allowlist). An accepted command is executed by the platform executor and
@@ -15,7 +15,7 @@ The pull answer is {"host", "commands": [...signed commands...], "cancel": [comm
 host's scheduled commands that an admin cancelled; for each one that this daemon has a pending reboot for, it
 cancels the reboot locally and reports `cancelled`. An id it never pulled is ignored.
 
-A result is posted as exactly the body the watchpost results route validates (it refuses unknown fields):
+A result is posted as exactly the body the Observe results route validates (it refuses unknown fields):
   {"id", "state", "output", "started_at", "finished_at"}
 `state` is done, failed, refused, scheduled or cancelled. A reboot is reported `scheduled` when the timer is
 set and `done` or `failed` later for the same id. For a refusal or a failure `output` starts with the stable
@@ -24,7 +24,7 @@ reason) stays in the local outbox. Results are only posted for commands this hos
 already executed and is pulled again is answered with its stored result, never refused as a replay.
 
 Settings (environment, optionally seeded from a KEY=value file named control.env in the data directory):
-  HOSTWATCH_CONTROL_URL         watchpost base URL, for example https://watchpost.example.lan:8443
+  HOSTWATCH_CONTROL_URL         Observe base URL, for example https://observe.example.lan:8443
   HOSTWATCH_CONTROL_KEY         the host's wpc_ control key
   HOSTWATCH_CONTROL_CONFIG      path of control.toml (default /etc/hostwatch/control.toml, or control.toml in
                                 the data directory on Windows)
@@ -68,16 +68,16 @@ MAX_INTERVAL_S = 300.0
 MAX_BACKOFF_S = 60.0
 HTTP_TIMEOUT_S = 10.0
 MAX_PER_PULL = 20
-# 409 is final: watchpost already has a result for that command id, so the copy is dropped.
+# 409 is final: Observe already has a result for that command id, so the copy is dropped.
 DROP_STATUSES = frozenset({409})
-MAX_OUTPUT_CHARS = 4096  # watchpost keeps this much of the output and cuts the rest
+MAX_OUTPUT_CHARS = 4096  # Observe keeps this much of the output and cuts the rest
 MAX_CANCEL_IDS = 100
 NO_SUCH_COMMAND = "no such command for this host"
 RESOLVE_GRACE_S = 30.0
 RESULT_LOST = "result_lost"
 # A 4xx answer that will not change on a retry: the body is refused as it stands. The result is parked
 # with the reason (never deleted, because it may report a real reboot) so the results behind it go on.
-# Not here: 401 and 403 (a key problem fixed on the watchpost side), 404 (the route may not exist yet; a 404
+# Not here: 401 and 403 (a key problem fixed on the Observe side), 404 (the route may not exist yet; a 404
 # that says "no such command for this host" is permanent and is parked), 408, 425 and 429 (retry later).
 # Those, and every 5xx, keep the result queued.
 RETRYABLE_4XX = frozenset({401, 403, 404, 408, 425, 429})
@@ -120,7 +120,7 @@ def load_settings(environ: Mapping[str, str] | None = None, *, data_dir: str | P
         config = LINUX_CONFIG
     url = (env.get("HOSTWATCH_CONTROL_URL") or "").strip().rstrip("/")
     if not re.match(r"^https?://[^/\s]+", url):
-        raise SettingsError("HOSTWATCH_CONTROL_URL must be the watchpost base URL, starting with http:// or https://")
+        raise SettingsError("HOSTWATCH_CONTROL_URL must be the Observe base URL, starting with http:// or https://")
     key = (env.get("HOSTWATCH_CONTROL_KEY") or "").strip()
     if not key.startswith(KEY_PREFIX) or len(key) <= len(KEY_PREFIX):
         raise SettingsError(f"HOSTWATCH_CONTROL_KEY must be a control key starting with {KEY_PREFIX}")
@@ -150,11 +150,11 @@ def build_actions(config: cfgmod.ControlConfig, platform: str | None = None) -> 
 
 
 class DeliveryError(Exception):
-    """watchpost could not be reached or answered with a failure."""
+    """Observe could not be reached or answered with a failure."""
 
 
 def wire_body(payload: dict) -> dict:
-    """The exact body of the watchpost results route (`ResultBody`): no other field may be sent."""
+    """The exact body of the Observe results route (`ResultBody`): no other field may be sent."""
     started, finished = payload.get("started_at"), payload.get("finished_at")
     started = float(started) if isinstance(started, (int, float)) and not isinstance(started, bool) else None
     finished = float(finished) if isinstance(finished, (int, float)) and not isinstance(finished, bool) else None
@@ -194,7 +194,7 @@ class ControlDaemon:
         except httpx.HTTPError as exc:
             raise DeliveryError(f"pull failed: {type(exc).__name__}") from exc
         if r.status_code in (401, 403):
-            raise DeliveryError(f"watchpost refused the control key (HTTP {r.status_code}); check "
+            raise DeliveryError(f"Observe refused the control key (HTTP {r.status_code}); check "
                                 "HOSTWATCH_CONTROL_KEY and that it is bound to this host name")
         if not r.is_success:
             raise DeliveryError(f"pull answered HTTP {r.status_code}")
@@ -211,7 +211,7 @@ class ControlDaemon:
 
     def flush(self) -> None:
         """Send queued results oldest first. A result leaves the queue after a 2xx answer, after a 409
-        (watchpost already has it), or when it is parked after a permanent 4xx refusal, so one undeliverable
+        (Observe already has it), or when it is parked after a permanent 4xx refusal, so one undeliverable
         result never blocks the rest. Any other failure raises and the result stays queued."""
         while (head := self.outbox.peek()) is not None:
             if self.stop_event.is_set():
@@ -227,12 +227,12 @@ class ControlDaemon:
                 self.outbox.ack(seq)
             elif 400 <= r.status_code < 500 and r.status_code not in DROP_STATUSES \
                     and (r.status_code not in RETRYABLE_4XX or self._no_such_command(r)):
-                reason = f"watchpost answered HTTP {r.status_code}"
+                reason = f"Observe answered HTTP {r.status_code}"
                 log.error("%s for the result of command %s; it is parked and the next result goes on",
                           reason, payload.get("id"))
                 self.outbox.park(seq, reason)
             elif r.status_code in DROP_STATUSES:
-                log.warning("watchpost answered HTTP %d for the result of command %s; it already has one, "
+                log.warning("Observe answered HTTP %d for the result of command %s; it already has one, "
                             "so this copy is dropped", r.status_code, payload.get("id"))
                 self.outbox.ack(seq)
             else:
@@ -240,7 +240,7 @@ class ControlDaemon:
 
     @staticmethod
     def _no_such_command(r: httpx.Response) -> bool:
-        """A 404 from the results route itself (watchpost does not know this id for this host) is final."""
+        """A 404 from the results route itself (Observe does not know this id for this host) is final."""
         if r.status_code != 404:
             return False
         try:
@@ -300,7 +300,7 @@ class ControlDaemon:
         return self._result(command, received, started, done.ok, done.status, reason, done.output)
 
     def _replayed(self, command: dict, received: float) -> dict | None:
-        """A signed command this host already accepted is pulled again, so watchpost has not recorded its
+        """A signed command this host already accepted is pulled again, so Observe has not recorded its
         outcome. Answer with the stored result. It is never refused as a replay: the command did run."""
         cid = command["id"]
         if cid in self._followed or self.outbox.has(cid):
@@ -311,7 +311,7 @@ class ControlDaemon:
             return self._result(command, received, received, False, "failed", RESULT_LOST,
                                 "the command was accepted earlier but its result was lost, so what it did is unknown")
         if stored.get("status") == "scheduled" and cid in self.outbox.scheduled():
-            return None  # the reboot is still pending and watchpost already has the scheduled report
+            return None  # the reboot is still pending and Observe already has the scheduled report
         return stored
 
     def _followup(self, cid: str, status: str, reason: str, output: str) -> None:
@@ -357,7 +357,7 @@ class ControlDaemon:
 
     def cycle(self) -> None:
         """One pass: replay unsent results, pull, and handle each command to completion in seq order.
-        Raises DeliveryError when watchpost could not be reached, after doing everything it still could."""
+        Raises DeliveryError when Observe could not be reached, after doing everything it still could."""
         problem: DeliveryError | None = None
         self._pulled = False
         self._followed.clear()
@@ -408,7 +408,7 @@ class ControlDaemon:
                 self._failures = 0
             except DeliveryError as exc:
                 if self._pulled:
-                    # watchpost answers pulls, so only a result is stuck. Pending results never slow polling,
+                    # Observe answers pulls, so only a result is stuck. Pending results never slow polling,
                     # because a queued command (a cancel, for one) must still be fetched on time.
                     self._failures = 0
                 else:
@@ -504,7 +504,7 @@ def run_foreground(config_path: str | None = None, data_dir: str | None = None, 
 
 def run_cancel(config_path: str | None = None,
                actions_factory: Callable[[cfgmod.ControlConfig], Any] = build_actions) -> int:
-    """`python -m hostwatch control cancel`: cancel a scheduled reboot on this host without watchpost."""
+    """`python -m hostwatch control cancel`: cancel a scheduled reboot on this host without Observe."""
     path = config_path or os.environ.get("HOSTWATCH_CONTROL_CONFIG") or (
         str(WINDOWS_DATA_DIR / "control.toml") if sys.platform == "win32" else str(LINUX_CONFIG))
     try:

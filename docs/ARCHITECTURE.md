@@ -1119,7 +1119,7 @@ the CLI.
 ## hostwatch-control verification
 
 The `hostwatch/control/` package is the verification half of the per-host command daemon in `docs/CONTROL.md` of
-the watchpost repository. It is not imported by the collector at import time. The pull loop, results outbox and service
+the Observe repository. It is not imported by the collector at import time. The pull loop, results outbox and service
 files are described in the section after the executors. Modules:
 
 - `config.py` loads `control.toml` into frozen dataclasses. On POSIX it refuses a file that is not root-owned, a file
@@ -1129,7 +1129,7 @@ files are described in the section after the executors. Modules:
   later.
 - `identity.py` compares the `host` in `control.toml` with the machine's own name (`socket.gethostname()` and the
   FQDN, each with its short form, lower case, plus COMPUTERNAME on Windows). A different name stops the daemon at
-  start with an error naming both. A host whose operating system name differs from its watchpost name sets
+  start with an error naming both. A host whose operating system name differs from its Observe name sets
   `machine_id` in `control.toml`, which must equal `/etc/machine-id` or the Windows MachineGuid, and then only the id
   decides. The daemon repeats the check before every command, so a renamed or cloned disk answers `refused` with
   reason `wrong_machine` and runs nothing. The agent only warns once when `HOSTWATCH_HOST_NAME` differs from the
@@ -1209,7 +1209,7 @@ length-prefixed JSON exchange on a daemon thread with a timeout, the same way th
 daemon only dials out and opens no port. Each cycle does these steps in order:
 
 1. Replay queued results oldest first. A result leaves the queue after a 2xx answer, after a 409
-   (watchpost already has a final result), or when it is parked. A permanent 4xx answer (any 4xx except 401, 403, 404,
+   (Observe already has a final result), or when it is parked. A permanent 4xx answer (any 4xx except 401, 403, 404,
    408, 425, 429 and 409, so in practice 400, 413 and 422, plus a 404 whose detail is `no such command for this host`)
    parks the result with the reason in the outbox's `parked` table and the next result goes on; a parked result is kept
    for the owner to inspect and is never sent again. Every other failure, including 401, 403, any other 404 and any 5xx,
@@ -1225,19 +1225,19 @@ daemon only dials out and opens no port. Each cycle does these steps in order:
    result is written to the outbox and delivery is tried before the next command starts. An executor that raises is
    reported as `failed`. A command with no usable id cannot be reported and is only logged.
 
-The body posted to `POST /api/v1/control/results` is exactly the model the watchpost results route validates, which
+The body posted to `POST /api/v1/control/results` is exactly the model the Observe results route validates, which
 refuses any other field: `{"id","state","output","started_at","finished_at"}` with the two times as floats. `state` is
 `done`, `failed`, `refused`, `scheduled` or `cancelled`. A refusal or failure puts its stable reason code from
 `verify.py` at the start of `output` (`unit_not_allowed: ...`). The outbox keeps the richer record (`v`, `host`,
 `action`, `seq`, `status`, `ok`, `reason`, `received_at`, `outbox_dropped`) and `wire_body` in `daemon.py` cuts it down
-at send time; output is clipped to 4096 characters, the amount watchpost keeps.
+at send time; output is clipped to 4096 characters, the amount Observe keeps.
 
 A `host.reboot` that sets its timer is reported `scheduled`, and the outbox records the promise in its `scheduled`
 table with the due time. Later the same id is reported `done` when the daemon started after the due time (the host went
 down and the service came back), `failed` (`reboot_not_seen`) when the due time plus 30 s passed and the same daemon
 process is still running, or `cancelled` when a pull lists the id in `cancel`: the daemon runs the platform executor's
 `cancel_reboot`, and a cancel that fails is logged and tried again on the next pull. A local `control cancel` is not
-seen by the daemon and later shows as `failed`. A command that is pulled again after it was accepted (watchpost has not
+seen by the daemon and later shows as `failed`. A command that is pulled again after it was accepted (Observe has not
 recorded its outcome) is never refused as `replayed_id`: the daemon re-sends its stored result from the outbox's
 `executed` table (the latest result of the last 1000 commands that ran), or reports `failed` (`result_lost`) when the
 result is gone, and it sends nothing while the result is still queued or the reboot is still pending. A `host.reboot`
@@ -1250,11 +1250,11 @@ masked shapes are `wpc_`, `wpi_`, `wpf_` and `hw_` keys, bearer tokens, Authoriz
 `secret`, `token` and `api_key` pairs (bare or quoted), PEM blocks (also an unterminated one), hex runs of 32 or more
 characters and mixed-case base64 runs of 40 or more. This is a courtesy and not a guarantee that no secret is present. The outbox keeps one row per
 command id and status, with the first final result winning (a refusal is not queued when anything real is known about the id, and a queued refusal is replaced by the result of a command that really ran) and holds at most 200 results, dropping the
-oldest and counting it (kept in the local record, not sent), because watchpost shows a command with no result as `unknown`. A corrupt outbox file is renamed
+oldest and counting it (kept in the local record, not sent), because Observe shows a command with no result as `unknown`. A corrupt outbox file is renamed
 aside and a fresh one started.
 
 Verification records a command before it runs (at most once). A crash between execution and the outbox write therefore
-loses the report and not the safety: watchpost shows `unknown` and the command is never run twice.
+loses the report and not the safety: Observe shows `unknown` and the command is never run twice.
 
 After a cycle in which the pull failed the wait grows from the interval (5 s by default, 5 to 300) in doubling steps to
 60 s. A cycle whose pull succeeded but whose result could not be delivered keeps the normal interval, so pending results
@@ -1579,5 +1579,5 @@ the service and the venv and keeps the data directory unless `-RemoveData` is gi
 and with the PowerShell parser when one is present, and never run them.
 
 Destination: the agent only needs a URL that accepts the wire schema. The hostwatch hub and web view are expected to be
-retired in favour of watchpost, which will ingest the same schema, so the agent is kept free of any hub dependency and
-the schema changes only additively. Pointing the agent at watchpost will be a change to `HOSTWATCH_HUB_URL` and the key.
+retired in favour of Observe, which will ingest the same schema, so the agent is kept free of any hub dependency and
+the schema changes only additively. Pointing the agent at Observe will be a change to `HOSTWATCH_HUB_URL` and the key.

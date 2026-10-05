@@ -12,7 +12,7 @@ from hostwatch.control import config as cfgmod
 from hostwatch.windows import CommandResult, SeamError
 
 KEY = "ed25519:" + "A" * 43 + "="
-RAW = {"watchpost_public_key": KEY, "host": "MediaIn-SVR",
+RAW = {"observe_public_key": KEY, "host": "MediaIn-SVR",
        "fan": {"controller": "thermal-control-suite", "headers": ["fan1"], "allow_mode_change": True},
        "services": {"restart": ["hostwatch-agent", "Spooler"]},
        "reboot": {"allow": True, "delay_s": 90}}

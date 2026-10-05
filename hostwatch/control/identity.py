@@ -4,7 +4,7 @@ control.toml names the host this daemon speaks for. If the file was copied to th
 daemon would run that host's commands, a reboot included, on this one. So the host name in the file must
 match the machine's own name: the full name, the short name (before the first dot) or, on Windows,
 COMPUTERNAME, compared without regard to case. A host whose operating system name differs from the
-name used in watchpost sets `machine_id` in control.toml instead. It must equal /etc/machine-id on Linux
+name used in Observe sets `machine_id` in control.toml instead. It must equal /etc/machine-id on Linux
 or the MachineGuid registry value on Windows. When machine_id is set, it alone decides.
 
 The check runs when the daemon starts and again before every command, so a renamed or cloned disk stops too.

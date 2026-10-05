@@ -1,4 +1,4 @@
-"""hostwatch-control: the per-host command daemon described in docs/CONTROL.md of the watchpost repo.
+"""hostwatch-control: the per-host command daemon described in docs/CONTROL.md of the Observe repo.
 
 This package is separate from the read-only collector. No collector module imports it at
 import time (`hostwatch.cli` imports `hostwatch.control.daemon` only inside the function that

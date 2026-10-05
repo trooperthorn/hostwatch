@@ -434,7 +434,7 @@ hostwatch variable for the agent.
 
 ## Windows agent (Phase 8)
 
-A native Windows host runs the agent as the `hostwatch-agent` service, with no container. It is the same agent loop as on Linux, wired to the Windows seam, the Event Log reader and the Windows collectors, and it pushes the unchanged wire schema to a receiver URL. Today that receiver is the hostwatch hub. The destination is only a setting (`HOSTWATCH_HUB_URL`), and it is expected to move to watchpost later, which will ingest this same schema, so nothing agent-side depends on the hub.
+A native Windows host runs the agent as the `hostwatch-agent` service, with no container. It is the same agent loop as on Linux, wired to the Windows seam, the Event Log reader and the Windows collectors, and it pushes the unchanged wire schema to a receiver URL. Today that receiver is the hostwatch hub. The destination is only a setting (`HOSTWATCH_HUB_URL`), and it is expected to move to Observe later, which will ingest this same schema, so nothing agent-side depends on the hub.
 
 ```
 python -m hostwatch windows run                # foreground, for a console check
@@ -445,10 +445,10 @@ The durable outbox lives in `C:/ProgramData/hostwatch` (`HOSTWATCH_DATA_DIR`), s
 
 ## hostwatch-control
 
-`hostwatch/control/` is the start of the per-host control daemon from `docs/CONTROL.md` in the watchpost
+`hostwatch/control/` is the start of the per-host control daemon from `docs/CONTROL.md` in the Observe
 repository. It is separate from the read-only collector: the collector never imports it, and it needs the optional
 `control` extra (`pip install 'hostwatch[control]'`) for Ed25519. It
-loads `control.toml` (the pinned watchpost public key, the host name and the fan, services and reboot allowlist),
+loads `control.toml` (the pinned Observe public key, the host name and the fan, services and reboot allowlist),
 and on POSIX refuses a file that group or others can write. The daemon also refuses to start when the `host` in
 `control.toml` is not this machine's own name (full or short name, any case, or COMPUTERNAME on Windows), unless
 `machine_id` in `control.toml` matches `/etc/machine-id` or the Windows MachineGuid. The same check runs before every
@@ -465,17 +465,17 @@ shell, for names that pass a strict pattern (letters, digits, `_`, `.`, `-`, no 
 sudo rule for exactly those commands. The daemon loop is in `hostwatch/control/daemon.py`. The Windows executors are in `hostwatch/control/actions_windows.py`: `fan.set_floor` reads the fan list from the Thermal Control Suite pipe (`GetFans`) and sends `SetFanMapping` with the same mapping and the new `MinDutyPercent`, reporting a refusal from the service as `refused`; `fan.set_mode` is refused with a plain reason because the Suite pipe has no request that changes dry run; `service.restart` runs `powershell.exe` with a fixed `Restart-Service` script and the service name as a separate argument, only for names in the local list that pass the same strict pattern; `host.reboot` runs `shutdown.exe /r /t <delay_s>` and `shutdown.exe /a` cancels it. The Windows executors are tested only with a fake pipe client and a fake runner. The test vector is in
 `tests/fixtures/control_vector.json`.
 
-The daemon is started with `python -m hostwatch control run`. Every 5 seconds it asks watchpost for this host's commands
+The daemon is started with `python -m hostwatch control run`. Every 5 seconds it asks Observe for this host's commands
 (`GET /api/v1/control/commands?host=`, bearer `wpc_` key), handles them one at a time in `seq` order, and posts each
 result to `POST /api/v1/control/results`. A refused command is not run and its result carries the reason code. Results
-are written to a small durable outbox (`control-outbox.db` in the data directory) before they are sent, so a watchpost
+are written to a small durable outbox (`control-outbox.db` in the data directory) before they are sent, so a Observe
 outage or a restart delays a report but does not lose it, and a replayed command can never overwrite the report of what
 really happened. Settings are `HOSTWATCH_CONTROL_URL`, `HOSTWATCH_CONTROL_KEY`, `HOSTWATCH_CONTROL_CONFIG`,
 `HOSTWATCH_CONTROL_DATA_DIR` and `HOSTWATCH_CONTROL_INTERVAL_S`. The daemon opens no listening port. On Linux it runs
 under its own account from `deploy/hostwatch-control.service` with the sudo rules in `deploy/hostwatch-control.sudoers`; on
 Windows it is the separate `hostwatch-control` service installed by `deploy/windows/install-control.ps1`. `python -m
 hostwatch control cancel` cancels a scheduled reboot locally. The pull, results and install paths are tested only against a
-fake watchpost and fake runners; see `UNVERIFIED.md`. The install steps are in `docs/deploy-agents.md`.
+fake Observe and fake runners; see `UNVERIFIED.md`. The install steps are in `docs/deploy-agents.md`.
 
 ## Web UI
 

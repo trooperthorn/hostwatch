@@ -1,4 +1,4 @@
-"""Masking of secrets in the text a control action reports back to watchpost.
+"""Masking of secrets in the text a control action reports back to Observe.
 
 Masking runs on the whole text before it is clipped, so a secret that straddles the clip point can
 never leave a readable half behind. It is a courtesy and not a guarantee: a secret in a shape this
@@ -22,7 +22,7 @@ _PATTERNS = (
     # An Authorization header or setting, the whole line, whatever the scheme.
     re.compile(r"(?i:authorization)[\"']?[ \t]*[=:][^\r\n]*"),
     re.compile(r"(?i:bearer)[ \t]+\S+"),
-    # Hostwatch and watchpost key shapes.
+    # Hostwatch and Observe key shapes.
     re.compile(r"\b(?:wpc|wpi|wpf|hw)_[A-Za-z0-9_-]{8,}"),
     # password=..., token: "...", api_key=... and the like, with a quoted or bare value.
     re.compile(r"(?i:(?:password|passwd|secret|token|api[_-]?key))[\"']?[ \t]*[=:][ \t]*" + _VALUE),

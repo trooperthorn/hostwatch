@@ -8,7 +8,7 @@
   and Administrators, locks control.toml the same way, registers the service as LocalSystem with
   restart-on-failure recovery, and starts it.
 
-  control.toml (the local allowlist and the pinned watchpost public key) must already exist in the
+  control.toml (the local allowlist and the pinned Observe public key) must already exist in the
   data folder or be given with -ConfigFile. The daemon refuses to start without it.
 
   Run from an elevated PowerShell. Nothing changes until you answer the confirmation; use -DryRun
@@ -18,11 +18,11 @@
   only to the protected settings file. It is never printed, logged or placed on a command line.
 
 .EXAMPLE
-  .\install-control.ps1 -WatchpostUrl https://watchpost.example.lan:8443 -DryRun
+  .\install-control.ps1 -ObserveUrl https://observe.example.lan:8443 -DryRun
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$WatchpostUrl,
+    [Parameter(Mandatory = $true)][string]$ObserveUrl,
     [securestring]$ControlKey,
     [string]$ConfigFile,
     [string]$SourcePath = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
@@ -54,7 +54,7 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin -and -not $DryRun) { throw 'Run this script from an elevated PowerShell.' }
-if ($WatchpostUrl -notmatch '^https?://') { throw 'WatchpostUrl must start with http:// or https://.' }
+if ($ObserveUrl -notmatch '^https?://') { throw 'ObserveUrl must start with http:// or https://.' }
 if (-not (Test-Path (Join-Path $SourcePath 'pyproject.toml'))) { throw "No pyproject.toml under $SourcePath." }
 if (-not $ConfigFile -and -not (Test-Path $ConfigPath)) {
     throw "No control.toml in $DataDir. Create it first, or pass -ConfigFile."
@@ -65,7 +65,7 @@ Write-Host "  - create a virtual environment in $Venv and install hostwatch with
 Write-Host "  - write $EnvFile and lock $ConfigPath so only SYSTEM and Administrators can read or change them"
 Write-Host "  - leave the ACL of $DataDir alone if it already exists (it is shared with the agent); lock it only when this script creates it"
 Write-Host "  - register the $ServiceName service as LocalSystem, start it on boot, and restart it after a failure"
-Write-Host "  - let $WatchpostUrl ask this host to run actions that control.toml allows"
+Write-Host "  - let $ObserveUrl ask this host to run actions that control.toml allows"
 if ($DryRun) { Write-Host 'Dry run: nothing was changed.'; return }
 if (-not $Force) {
     $answer = Read-Host 'Type yes to continue'
@@ -100,7 +100,7 @@ try {
     if ($secret -notmatch '^wpc_') { throw 'The control key must start with wpc_.' }
     $lines = @(
         '# hostwatch control settings. Readable only by SYSTEM and Administrators.',
-        "HOSTWATCH_CONTROL_URL=$WatchpostUrl",
+        "HOSTWATCH_CONTROL_URL=$ObserveUrl",
         "HOSTWATCH_CONTROL_DATA_DIR=$DataDir",
         "HOSTWATCH_CONTROL_KEY=$secret"
     )

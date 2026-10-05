@@ -14,7 +14,7 @@ from hostwatch.control import config as cfgmod
 
 ROOT = Path(__file__).resolve().parent.parent
 KEY = "ed25519:" + "A" * 43 + "="
-RAW = {"watchpost_public_key": KEY, "host": "MediaIn-SVR",
+RAW = {"observe_public_key": KEY, "host": "MediaIn-SVR",
        "fan": {"controller": "thermalctl", "headers": ["pwm1", "pwm2"], "allow_mode_change": True},
        "services": {"restart": ["hostwatch-agent", "nut-monitor", "docker:scrutiny"]},
        "reboot": {"allow": True, "delay_s": 60}}
@@ -340,7 +340,7 @@ def test_sudoers_covers_every_privileged_call_the_executors_make(tmp_path):
 
 
 def test_sudoers_renders_nothing_for_disabled_actions_and_rejects_bad_account():
-    cfg = cfgmod.parse({"watchpost_public_key": KEY, "host": "h"})
+    cfg = cfgmod.parse({"observe_public_key": KEY, "host": "h"})
     assert _rules(al.render_sudoers(cfg)) == []
     with pytest.raises(ValueError):
         al.render_sudoers(cfg, "bad user; ALL")
@@ -363,7 +363,7 @@ def test_thermalctl_fan_actions_are_refused_under_another_controller(tmp_path, c
 
 def test_thermalctl_fan_actions_are_refused_without_a_fan_section(tmp_path):
     runner = FakeRunner()
-    cfg = cfgmod.parse({"watchpost_public_key": KEY, "host": "h"})
+    cfg = cfgmod.parse({"observe_public_key": KEY, "host": "h"})
     actions = al.LinuxActions(cfg, runner, overrides_path=tmp_path / "o.toml", use_sudo=False)
     assert actions.fan_set_floor("pwm1", 30).status == "refused"
     assert actions.fan_set_mode("active").status == "refused"

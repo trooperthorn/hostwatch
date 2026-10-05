@@ -1,6 +1,6 @@
 """hostwatch-control pull loop, results outbox, entry point, service files and import isolation.
 
-A fake watchpost (an httpx mock transport) serves the pull route and takes results. Commands are
+A fake Observe (an httpx mock transport) serves the pull route and takes results. Commands are
 signed with a throwaway key made in the test. Executors are fakes or the real Linux executor with a
 fake runner, so nothing here runs a program, opens a socket or touches a real service.
 """
@@ -39,7 +39,7 @@ from test_control_verify import HOST, NOW, TOML, make_cmd, pub_text, sign  # noq
 
 ROOT = Path(__file__).resolve().parent.parent
 DEPLOY = ROOT / "deploy"
-URL = "http://watchpost.test"
+URL = "http://observe.test"
 KEY = "wpc_" + "k3yvalue" * 4
 RESULT_FIELDS = {"id", "state", "output", "started_at", "finished_at"}
 
@@ -59,7 +59,7 @@ def signer():
     return Ed25519PrivateKey.generate()
 
 
-class FakeWatchpost:
+class FakeObserve:
     """The pull route and the results route. `online` and `results_ok` switch failures on and off."""
 
     def __init__(self):
@@ -84,7 +84,7 @@ class FakeWatchpost:
         if self.on_request:
             self.on_request(request)
         if not self.online:
-            raise httpx.ConnectError("watchpost is down", request=request)
+            raise httpx.ConnectError("Observe is down", request=request)
         if request.headers.get("authorization") != f"Bearer {KEY}":
             return httpx.Response(401)
         if request.method == "GET" and request.url.path == d.COMMANDS_PATH:
@@ -95,7 +95,7 @@ class FakeWatchpost:
             return httpx.Response(200, json={"host": HOST, "commands": list(self.queue), "cancel": list(self.cancel)})
         if request.method == "POST" and request.url.path == d.RESULTS_PATH:
             body = json.loads(request.content)
-            assert set(body) == RESULT_FIELDS, "the body must match the watchpost ResultBody exactly"
+            assert set(body) == RESULT_FIELDS, "the body must match the Observe ResultBody exactly"
             self.attempts.append(body)
             status = self.results_status(body) if callable(self.results_status) else self.results_status
             if status != 200:
@@ -134,7 +134,7 @@ def env(tmp_path, signer):
         cfg_path.chmod(0o644)
     data = tmp_path / "data"
     settings = d.Settings(URL, KEY, cfg_path, data, 5.0)
-    wp = FakeWatchpost()
+    wp = FakeObserve()
 
     class Env:
         pass
@@ -352,7 +352,7 @@ def test_a_permanent_4xx_parks_the_result_with_its_reason_and_the_next_one_is_de
     daemon.cycle()  # no DeliveryError: nothing is stuck
     assert [r["id"] for r in env.wp.results] == ["b"]
     assert daemon.outbox.depth() == 0
-    assert daemon.outbox.parked() == [("a", f"watchpost answered HTTP {status}")]
+    assert daemon.outbox.parked() == [("a", f"Observe answered HTTP {status}")]
     assert [r["id"] for r in env.wp.attempts] == ["a", "b"]  # the parked result is not sent again
     daemon.cycle()
     assert [r["id"] for r in env.wp.attempts] == ["a", "b"]
@@ -361,16 +361,16 @@ def test_a_permanent_4xx_parks_the_result_with_its_reason_and_the_next_one_is_de
 def test_a_parked_result_is_kept_across_a_restart_and_a_replay_does_not_requeue_it(env):
     first = env.build(FakeExecutor())
     first.outbox.add("a", {"id": "a", "status": "done"})
-    first.outbox.park(first.outbox.peek()[0], "watchpost answered HTTP 422")
+    first.outbox.park(first.outbox.peek()[0], "Observe answered HTTP 422")
     first.close()
     second = env.build(FakeExecutor())
-    assert second.outbox.parked() == [("a", "watchpost answered HTTP 422")]
+    assert second.outbox.parked() == [("a", "Observe answered HTTP 422")]
     assert second.outbox.has("a")
     second.outbox.add("a", {"id": "a", "status": "refused"})
     assert second.outbox.depth() == 0
 
 
-def test_a_409_means_watchpost_has_the_result_and_the_copy_is_dropped(env):
+def test_a_409_means_observe_has_the_result_and_the_copy_is_dropped(env):
     env.wp.add(env.signer, id="a", seq=1, action="service.restart", params={"name": "hostwatch-agent"})
     env.wp.results_status = 409
     daemon = env.build(FakeExecutor())
@@ -452,7 +452,7 @@ def test_polling_stays_at_the_normal_interval_while_results_are_pending(env):
     assert [r.method for r in env.wp.requests].count("GET") == 4
 
 
-def test_polling_still_backs_off_when_watchpost_cannot_be_reached_for_the_pull(env):
+def test_polling_still_backs_off_when_observe_cannot_be_reached_for_the_pull(env):
     daemon = env.build(FakeExecutor())
     daemon.outbox.add("a", {"id": "a", "status": "done"})
     env.wp.online = False
@@ -518,7 +518,7 @@ def test_masking_happens_before_truncation_so_a_secret_at_the_cut_is_not_half_sh
     assert "hunter" not in d.redact(text) and "hunter" not in al._clip(text)
 
 
-def test_a_result_posted_to_watchpost_carries_masked_output(env):
+def test_a_result_posted_to_observe_carries_masked_output(env):
     env.wp.add(env.signer, id="a", seq=1, action="service.restart", params={"name": "hostwatch-agent"})
     daemon = env.build(FakeExecutor(ActionResult(True, "done", f"ok {KEY} password=hunter2")))
     daemon.cycle()
@@ -543,7 +543,7 @@ def test_settings_load_with_platform_defaults():
 
 @pytest.mark.parametrize("over,message", [
     ({"HOSTWATCH_CONTROL_URL": None}, "HOSTWATCH_CONTROL_URL"),
-    ({"HOSTWATCH_CONTROL_URL": "watchpost.test"}, "HOSTWATCH_CONTROL_URL"),
+    ({"HOSTWATCH_CONTROL_URL": "observe.test"}, "HOSTWATCH_CONTROL_URL"),
     ({"HOSTWATCH_CONTROL_KEY": None}, "HOSTWATCH_CONTROL_KEY"),
     ({"HOSTWATCH_CONTROL_KEY": "wpi_" + "x" * 20}, "HOSTWATCH_CONTROL_KEY"),
     ({"HOSTWATCH_CONTROL_KEY": "wpc_"}, "HOSTWATCH_CONTROL_KEY"),
@@ -845,13 +845,13 @@ def test_the_service_class_is_built_lazily_and_pywin32_is_not_imported_at_import
         csvc.NoSuchThing
 
 
-def test_canonical_json_is_what_the_fake_watchpost_signs(signer):
+def test_canonical_json_is_what_the_fake_observe_signs(signer):
     cmd = make_cmd()
     raw = base64.b64decode(sign(signer, cmd))
     signer.public_key().verify(raw, canonical_json(cmd))
 
 
-# --- the watchpost control plugin contract ------------------------------------------------
+# --- the Observe control plugin contract ------------------------------------------------
 
 class SchedulingExecutor(FakeExecutor):
     """Reports a reboot as scheduled, like the real executors do."""
@@ -878,7 +878,7 @@ def _build_with_clock(env, actions, clock):
 def test_the_result_body_is_exactly_what_the_plugin_results_route_validates(env):
     pydantic = pytest.importorskip("pydantic")
 
-    # A copy of watchpost_control.ResultBody (extra fields are forbidden, output is at most 262144 chars).
+    # A copy of observe_control.ResultBody (extra fields are forbidden, output is at most 262144 chars).
     class ResultBody(pydantic.BaseModel):
         model_config = pydantic.ConfigDict(extra="forbid")
         id: str = pydantic.Field(min_length=1, max_length=64)
@@ -1000,7 +1000,7 @@ def test_a_404_that_says_no_such_command_parks_the_result(env):
     daemon = d.build_daemon(env.settings, client=httpx.Client(transport=httpx.MockTransport(answer)),
                             actions=FakeExecutor(), clock=lambda: NOW)
     daemon.cycle()
-    assert daemon.outbox.parked() == [("a", "watchpost answered HTTP 404")] and daemon.outbox.depth() == 0
+    assert daemon.outbox.parked() == [("a", "Observe answered HTTP 404")] and daemon.outbox.depth() == 0
 
 
 def test_an_old_outbox_with_one_row_per_command_is_migrated(tmp_path):
@@ -1051,7 +1051,7 @@ def test_the_name_set_holds_short_and_lower_case_forms(monkeypatch):
 
 
 def test_a_config_host_with_a_domain_matches_the_short_machine_name(env, monkeypatch):
-    cfg = cfgmod.parse({"host": "MediaIn-SVR.lan", "watchpost_public_key": "ed25519:" + "A" * 43 + "="})
+    cfg = cfgmod.parse({"host": "MediaIn-SVR.lan", "observe_public_key": "ed25519:" + "A" * 43 + "="})
     _names(monkeypatch, "mediain-svr")
     assert ident.check(cfg) == ""
 
@@ -1072,7 +1072,7 @@ def test_a_machine_id_mismatch_is_refused_even_when_the_names_match(env, monkeyp
 
 def test_machine_id_must_be_a_string():
     with pytest.raises(cfgmod.ConfigError):
-        cfgmod.parse({"host": "h", "watchpost_public_key": "ed25519:" + "A" * 43 + "=", "machine_id": 5})
+        cfgmod.parse({"host": "h", "observe_public_key": "ed25519:" + "A" * 43 + "=", "machine_id": 5})
 
 
 def test_a_name_change_between_commands_refuses_before_the_action(env, signer, monkeypatch):

@@ -288,11 +288,11 @@ DOC_FILES = ["README.md", "docs/ARCHITECTURE.md", "docs/deploy-agents.md", "PLAN
 
 
 @pytest.mark.parametrize("name", DOC_FILES)
-def test_phase_8_docs_say_the_destination_will_move_to_watchpost(name):
+def test_phase_8_docs_say_the_destination_will_move_to_observe(name):
     text = (ROOT / name).read_text(encoding="utf-8")
     assert "hostwatch-agent" in text or name in ("PLAN.md", "UNVERIFIED.md"), name
     if name != "UNVERIFIED.md":
-        assert "watchpost" in text, name
+        assert "Observe" in text, name
 
 
 def test_docs_name_real_commands_files_and_no_em_dashes():
