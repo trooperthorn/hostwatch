@@ -34,13 +34,22 @@ and the decode error, and the queue moves on.
 
 A file that SQLite reports as not a database or as malformed is renamed to
 outbox.db.corrupt-<timestamp> together with any -wal, -shm or -journal sidecar, an error is
-logged, and a fresh outbox starts. Other errors, such as a locked database or an I/O error, say
+logged, and a fresh outbox starts. Damage in the middle of the file does not always show up as an
+error on the first query, so the open also runs PRAGMA quick_check, and any later call that fails
+with a corruption error recovers the same way and is run once more against the fresh file. Each
+recovery is recorded as an incident that the agent turns into an observe.source.change log, so the
+loss is reported to Observe and not only logged. Other errors, such as a locked database or an I/O error, say
 nothing about the file contents, so they are raised and the file is left alone. `recovered_from`
 names the renamed file so the agent can report the loss.
+
+The dead_letters table is bounded in rows (MAX_DEAD_LETTERS) and in bytes (MAX_DEAD_LETTER_BYTES),
+oldest first, so a run of large refused requests cannot fill the disk. The outbox file is created
+with mode 0600 on POSIX.
 """
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 import sqlite3
@@ -51,11 +60,13 @@ from pathlib import Path
 from typing import Protocol
 
 from .otlp import OtlpRequest
+from .privfile import ensure_private
 
 log = logging.getLogger("hostwatch.outbox")
 
 OUTBOX_FILE = "outbox.db"
 MAX_DEAD_LETTERS = 1000
+MAX_DEAD_LETTER_BYTES = 16 * 1024 * 1024
 MAX_REQUESTS = 2000
 MAX_BYTES = 32 * 1024 * 1024
 MAX_METRICS_AGE_S = 6 * 3600.0
@@ -82,6 +93,21 @@ def _is_corruption(exc: sqlite3.DatabaseError) -> bool:
     """True only for errors that mean the file content is unusable. Locked or
     I/O errors are transient and must not cause the file to be replaced."""
     return any(m in str(exc).lower() for m in CORRUPT_MARKERS)
+
+
+def _recovering(method):
+    """Run an Outbox method; if SQLite reports corruption, move the file aside, start a fresh one
+    and run the method once more. Any other error is raised unchanged."""
+    @functools.wraps(method)
+    def wrapper(self, *args, **kwargs):
+        try:
+            return method(self, *args, **kwargs)
+        except sqlite3.DatabaseError as exc:
+            if not _is_corruption(exc):
+                raise
+            self._recover(exc)
+            return method(self, *args, **kwargs)
+    return wrapper
 
 
 class Markers(Protocol):
@@ -134,7 +160,11 @@ class Outbox:
         self._clock = clock
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
+        self._path = path
         self.recovered_from: Path | None = None
+        self._incidents: list[str] = []
+        self._staged: dict[str, str | None] = {}
+        self._warned_drop = 0
         try:
             self._db = self._open(path)
         except sqlite3.DatabaseError as exc:
@@ -142,28 +172,54 @@ class Outbox:
                 log.error("outbox %s could not be opened (%s); this is not corruption, so the file "
                           "was left in place", path, exc)
                 raise
-            stamp = time.strftime("%Y%m%dT%H%M%S")
-            moved = path.with_name(f"{path.name}.corrupt-{stamp}")
-            n = 0
-            while moved.exists():
-                n += 1
-                moved = path.with_name(f"{path.name}.corrupt-{stamp}-{n}")
-            # Sidecars first: if one cannot be moved the error is raised with the main
-            # file still in place, so the next start sees the same corruption and retries.
-            for suffix in SIDECAR_SUFFIXES:
-                side = path.with_name(path.name + suffix)
-                if side.exists():
-                    side.rename(moved.with_name(moved.name + suffix))
-            path.rename(moved)
-            log.error("outbox %s could not be opened (%s); moved to %s and a fresh outbox was started. "
-                      "Queued requests and source progress markers in it are lost", path, exc, moved)
-            self.recovered_from = moved
+            self._quarantine(exc)
             self._db = self._open(path)
-        self._staged: dict[str, str | None] = {}
-        self._warned_drop = 0
+
+    def _quarantine(self, exc: Exception) -> None:
+        path = self._path
+        stamp = time.strftime("%Y%m%dT%H%M%S")
+        moved = path.with_name(f"{path.name}.corrupt-{stamp}")
+        n = 0
+        while moved.exists():
+            n += 1
+            moved = path.with_name(f"{path.name}.corrupt-{stamp}-{n}")
+        # Sidecars first: if one cannot be moved the error is raised with the main
+        # file still in place, so the next start sees the same corruption and retries.
+        for suffix in SIDECAR_SUFFIXES:
+            side = path.with_name(path.name + suffix)
+            if side.exists():
+                side.rename(moved.with_name(moved.name + suffix))
+        path.rename(moved)
+        log.error("outbox %s could not be opened (%s); moved to %s and a fresh outbox was started. "
+                  "Queued requests and source progress markers in it are lost", path, exc, moved)
+        self.recovered_from = moved
+        self._incidents.append(f"the outbox file was corrupt ({exc}) and was moved to {moved.name}; "
+                               "queued requests and progress markers in it were lost")
+
+    def _recover(self, exc: Exception) -> None:
+        """Replace a file found corrupt while in use. Staged markers are kept: they describe
+        what the sources have read, not what the lost file held."""
+        with self._lock:
+            try:
+                self._db.close()
+            except sqlite3.Error:
+                pass
+            self._quarantine(exc)
+            self._db = self._open(self._path)
+            self._warned_drop = 0
+
+    def take_incidents(self) -> list[str]:
+        """Texts describing recoveries since the last call, for the agent to report to Observe."""
+        with self._lock:
+            out, self._incidents = self._incidents, []
+            return out
 
     @staticmethod
     def _open(path: Path) -> sqlite3.Connection:
+        try:
+            ensure_private(path)
+        except OSError as exc:
+            log.warning("cannot set mode 0600 on %s: %s", path, exc)
         db = sqlite3.connect(path, check_same_thread=False)
         try:
             db.execute("PRAGMA synchronous=FULL")
@@ -177,6 +233,11 @@ class Outbox:
             with db:
                 db.executescript(_SCHEMA)
             db.execute("SELECT COUNT(*) FROM requests").fetchone()
+            # A damaged page in the middle of the file can pass the checks above. quick_check
+            # reads every page, so it finds that damage now and not in the middle of a send.
+            problems = [r[0] for r in db.execute("PRAGMA quick_check").fetchall() if r[0] != "ok"]
+            if problems:
+                raise sqlite3.DatabaseError(f"database disk image is malformed: {problems[0]}")
         except sqlite3.DatabaseError:
             db.close()
             raise
@@ -193,6 +254,7 @@ class Outbox:
             self._db.close()
 
     # markers
+    @_recovering
     def get(self, key: str) -> str | None:
         with self._lock:
             if key in self._staged:
@@ -211,6 +273,7 @@ class Outbox:
             else:
                 self._db.execute("INSERT OR REPLACE INTO markers (key, value) VALUES (?, ?)", (key, value))
 
+    @_recovering
     def commit_staged(self) -> None:
         """Make staged markers durable without a request. Used for the boot event, which must
         survive a restart before the first request is built."""
@@ -229,6 +292,7 @@ class Outbox:
         return row[0] if row else 0
 
     # queue
+    @_recovering
     def enqueue(self, requests: list[OtlpRequest], entry_id: str) -> None:
         """Write the requests of one entry and all staged markers in one transaction. An entry with
         no requests still commits the staged markers."""
@@ -253,6 +317,7 @@ class Outbox:
                             self.dropped_records_total())
                 self._warned_drop = dropped
 
+    @_recovering
     def prune(self) -> None:
         """Apply the age and size limits now. The agent calls it before each delivery pass, so a
         long outage does not leave stale readings to be sent when Observe comes back."""
@@ -282,14 +347,17 @@ class Outbox:
                 return
             self._drop(*row)
 
+    @_recovering
     def depth(self) -> int:
         with self._lock:
             return self._db.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
 
+    @_recovering
     def size_bytes(self) -> int:
         with self._lock:
             return self._db.execute("SELECT COALESCE(SUM(LENGTH(body)), 0) FROM requests").fetchone()[0]
 
+    @_recovering
     def peek(self) -> QueuedRequest | None:
         """The next request to send: log requests before metrics requests, each oldest first, so
         events that were queued during an outage leave before the backlog of readings. A row whose
@@ -310,6 +378,7 @@ class Outbox:
                 except ValueError as exc:
                     self.dead_letter(row[0], 0, f"undecodable headers: {exc}")
 
+    @_recovering
     def ack(self, seq: int) -> None:
         """Remove a delivered request. Called only after a 2xx answer."""
         with self._lock, self._db:
@@ -318,6 +387,7 @@ class Outbox:
                 self._db.execute("DELETE FROM counters WHERE name='dropped_since_drain'")
                 self._warned_drop = 0
 
+    @_recovering
     def dead_letter(self, seq: int, status: int, error: str = "") -> None:
         with self._lock, self._db:
             row = self._db.execute("SELECT entry_id, signal, headers, body FROM requests WHERE seq=?",
@@ -330,50 +400,74 @@ class Outbox:
             self._db.execute("DELETE FROM requests WHERE seq=?", (seq,))
             self._db.execute("DELETE FROM dead_letters WHERE id <= (SELECT MAX(id) FROM dead_letters) - ?",
                              (MAX_DEAD_LETTERS,))
+            self._trim_dead_letters()
         log.error("request %s (%s) was refused with status %d and moved to the dead-letter table%s",
                   row[0], row[1], status, f": {error}" if error else "")
 
+    def _trim_dead_letters(self) -> None:
+        """Keep the dead letters under MAX_DEAD_LETTER_BYTES, oldest first. The newest row always
+        stays, so the most recent refusal can be inspected even when it alone is large."""
+        while True:
+            size, newest = self._db.execute(
+                "SELECT COALESCE(SUM(LENGTH(body) + LENGTH(headers)), 0), MAX(id) FROM dead_letters").fetchone()
+            if size <= MAX_DEAD_LETTER_BYTES:
+                return
+            cur = self._db.execute("DELETE FROM dead_letters WHERE id = (SELECT MIN(id) FROM dead_letters) "
+                                   "AND id < ?", (newest,))
+            if cur.rowcount == 0:
+                return
+
+    @_recovering
     def note_rejected(self, signal: str, count: int) -> None:
         """Count data points or log records Observe accepted the request for but refused."""
         if count > 0:
             with self._lock, self._db:
                 self._bump("rejected_points" if signal == "metrics" else "rejected_records", count)
 
+    @_recovering
     def note_quarantined(self, signal: str, count: int) -> None:
         """Count items that could not be encoded and were left out of every request."""
         if count > 0:
             with self._lock, self._db:
                 self._bump("quarantined_points" if signal == "metrics" else "quarantined_records", count)
 
+    @_recovering
     def quarantined_total(self) -> int:
         with self._lock:
             return self._counter("quarantined_points") + self._counter("quarantined_records")
 
+    @_recovering
     def dead_letter_count(self) -> int:
         with self._lock:
             return self._db.execute("SELECT COUNT(*) FROM dead_letters").fetchone()[0]
 
+    @_recovering
     def dropped_total(self) -> int:
         """Requests dropped for age or size since the file was created."""
         with self._lock:
             return self._counter("dropped_requests")
 
+    @_recovering
     def dropped_points_total(self) -> int:
         with self._lock:
             return self._counter("dropped_points")
 
+    @_recovering
     def dropped_records_total(self) -> int:
         with self._lock:
             return self._counter("dropped_records")
 
+    @_recovering
     def dropped_since_drain(self) -> int:
         with self._lock:
             return self._counter("dropped_since_drain")
 
+    @_recovering
     def rejected_points_total(self) -> int:
         with self._lock:
             return self._counter("rejected_points")
 
+    @_recovering
     def rejected_records_total(self) -> int:
         with self._lock:
             return self._counter("rejected_records")

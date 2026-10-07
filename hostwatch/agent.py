@@ -48,6 +48,7 @@ from .events.thresholds import ThresholdEngine
 from .model import Event, Sample, SourceStatus
 from .otel_map import LogRecord, MapContext, Point
 from .outbox import OUTBOX_FILE, Outbox
+from .privfile import write_private
 from .runner import CollectorRunner, CollectorTimeout
 from .windows import WindowsSeam
 
@@ -155,6 +156,10 @@ class Agent:
         self.collectors = build_collectors(cfg, seam, platform=self.platform)
         self.status: dict[str, SourceStatus] = {}
         self.outbox = Outbox(cfg.data_dir / OUTBOX_FILE)
+        # Problems with the outbox itself, waiting to be sent as observe.source.change logs. The
+        # outbox adds its own recoveries here; a first rejection of each signal is added by flush.
+        self._outbox_incidents: list[str] = []
+        self._rejection_reported: set[str] = set()
         self.resource = otel_map.resource_attributes(cfg.host_name, self.platform, __version__,
                                                      arch=_platform.machine())
         self.map_context = MapContext(ups_name=cfg.nut_ups or "ups")
@@ -693,6 +698,8 @@ class Agent:
         if tier == tiers.AVAILABILITY:
             self._outbox_status()
             points += [otel_map.heartbeat_point(now), *otel_map.map_source_status(self.status.values(), now),
+                       *otel_map.rejected_points(self.outbox.rejected_points_total(),
+                                                 self.outbox.rejected_records_total(), now),
                        *otel_map.tier_interval_points(self.schedule.rates(), now)]
         logs += [otel_map.map_event(e) for e in events]
         self._enqueue(points, logs)
@@ -704,7 +711,28 @@ class Agent:
             self.outbox.stage(THRESHOLD_MARKER, state)
         return events
 
+    def _incident_logs(self) -> list[LogRecord]:
+        """One observe.source.change log for each outbox problem not yet reported (a file that
+        was found corrupt, or the first items Observe rejected). The outbox source is marked as
+        reported unavailable, so the next source change pass reports it available again."""
+        self._outbox_incidents.extend(self.outbox.take_incidents())
+        if not self._outbox_incidents:
+            return []
+        now = self._wall()
+        out = [otel_map.map_source_change("outbox", False, text, now) for text in self._outbox_incidents]
+        self._outbox_incidents = []
+        self._reported["outbox"] = False
+        return out
+
     def _enqueue(self, points: list[Point], logs: list[LogRecord]) -> None:
+        """Queue points and logs, then queue any outbox incident the write itself caused, so a
+        recovery during this write is reported on this pass."""
+        self._enqueue_entry(points, [*logs, *self._incident_logs()])
+        late = self._incident_logs()
+        if late:
+            self._enqueue_entry([], late)
+
+    def _enqueue_entry(self, points: list[Point], logs: list[LogRecord]) -> None:
         """Encode points and logs as OTLP requests and write them, with the staged markers, to the
         outbox in one transaction. Nothing is queued for an empty list."""
         entry_id = uuid.uuid4().hex
@@ -823,6 +851,12 @@ class Agent:
                         r.content, r.headers.get("content-type", ""), req.signal)
                     if rejected or message:
                         self.outbox.note_rejected(req.signal, rejected)
+                        if req.signal not in self._rejection_reported:
+                            self._rejection_reported.add(req.signal)
+                            self._outbox_incidents.append(
+                                f"Observe accepted a {req.signal} request but rejected {rejected} item(s): "
+                                f"{message or 'no reason given'}; further rejections are counted in "
+                                "observe.agent.rejected.items")
                         log.warning("Observe accepted %s request %s but rejected %d item(s): %s",
                                     req.signal, req.entry_id, rejected, message or "no reason given")
                 self.outbox.ack(req.seq)
@@ -891,7 +925,7 @@ class Agent:
         loop turns; whether Observe receives the data is what the outbox status reports."""
         try:
             tmp = self.cfg.data_dir / (ALIVE_FILE + ".tmp")
-            tmp.write_text(str(self._wall()), encoding="utf-8")
+            write_private(tmp, str(self._wall()))
             tmp.replace(self.cfg.data_dir / ALIVE_FILE)
         except OSError as exc:
             log.warning("cannot write %s: %s", ALIVE_FILE, exc)

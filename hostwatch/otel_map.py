@@ -517,6 +517,14 @@ def tier_interval_points(rates: dict[str, float], ts: float) -> list[Point]:
                   {"observe.tier": tier}) for tier, seconds in rates.items()]
 
 
+def rejected_points(points: int, records: int, ts: float) -> list[Point]:
+    """Items Observe accepted a request for but refused, as cumulative counts by signal, so a
+    partial success shows up in Observe and not only in the agent log. Nothing is sent while
+    both counts are zero."""
+    return [Point(EVENT_SCOPE, "observe.agent.rejected.items", "1", SUM, float(n), ts, {"observe.signal": sig})
+            for sig, n in (("metrics", points), ("logs", records)) if n > 0]
+
+
 def heartbeat_point(sent_at: float) -> Point:
     return Point(EVENT_SCOPE, "observe.agent.heartbeat", "s", GAUGE, float(sent_at), sent_at, {})
 

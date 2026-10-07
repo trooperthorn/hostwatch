@@ -191,7 +191,9 @@ only after a 2xx answer:
 
 * A 200 with a partial success (protobuf or JSON, as sent) is acknowledged, because the rejected
   items would be rejected again. The rejected count and Observe's message are logged, counted in the
-  outbox and reported in the `outbox` source status.
+  outbox, reported in the `outbox` source status, sent as the cumulative counter
+  `observe.agent.rejected.items` (by signal) with the availability tier, and announced by one
+  `observe.source.change` log for the first rejection of each signal in a run.
 * 400, 409, 413, 415 and 422 can never succeed for the request that was sent. The request moves to
   the `dead_letters` table with the status and the problem text (the last 1000 are kept), and the
   next request is sent.
@@ -388,12 +390,18 @@ under the same key. The old `batches` table of earlier versions is dropped when 
   and the `outbox` source is reported unavailable, with the counts in the reason, until the queue
   drains.
 * **Dead letters.** See the list of statuses above. A row whose headers cannot be decoded moves to
-  `dead_letters` with status 0 and the error.
+  `dead_letters` with status 0 and the error. The table keeps the newest 1000 rows and at most
+  16 MiB of bodies and headers, dropping the oldest first; the newest row always stays.
 * **Corruption.** If SQLite reports `outbox.db` as not a database or malformed, it is renamed, with
   any `-wal`, `-shm` or `-journal` file, to `outbox.db.corrupt-<timestamp>`, an error is logged, and a
   fresh outbox is started. The `outbox` status names the renamed file, because the queued requests
-  and markers in it are lost. Locked or I/O errors are not treated as corruption: the file is left
-  alone and the error is raised.
+  and markers in it are lost. Damage in the middle of the file is found by `PRAGMA quick_check` at
+  open, and a corruption error from any later call recovers the same way and runs the call once
+  more on the fresh file. Each recovery also queues an `observe.source.change` log for the
+  `outbox` source, so Observe is told, not only the agent log. Locked or I/O errors are not
+  treated as corruption: the file is left alone and the error is raised.
+* **File modes.** On POSIX `outbox.db`, `heartbeat.json` and `agent.alive` are created with mode
+  0600 (`hostwatch/privfile.py`). On Windows the data directory ACL is the control.
 * **Guarded work.** Each tier run and each event read runs inside a guard. An exception is logged,
   markers staged by that unit are discarded so nothing is skipped, the threshold state is restored,
   the journal reader is rewound, the source `agent` is reported unavailable with the reason, and the

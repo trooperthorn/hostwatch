@@ -12,7 +12,7 @@ import sqlite3
 
 import httpx
 import pytest
-from agent_helpers import FakeObserve, collect_once, drain_logs, event, event_cycle
+from agent_helpers import FakeObserve, collect_once, drain_logs, event, event_cycle, request_json
 
 import hostwatch.agent as agent_mod
 from hostwatch import otlp, tiers
@@ -789,3 +789,126 @@ def test_log_requests_leave_before_the_metrics_backlog(tmp_path):
         order.append(req.entry_id)
         out.ack(req.seq)
     assert order == ["l1", "m1", "m2"]
+
+
+# -- robustness: mid-file corruption, dead-letter bytes, rejected items, file modes -------------------
+
+def _fill(path, n=60):
+    box = Outbox(path)
+    for i in range(n):
+        box.enqueue(requests_for(f"e{i}", n_points=40), f"e{i}")
+    box.close()
+
+
+def _damage_middle(path):
+    raw = bytearray(path.read_bytes())
+    mid = (len(raw) // 2) // 4096 * 4096
+    raw[mid:mid + 4096] = b"\xff" * 4096
+    path.write_bytes(bytes(raw))
+
+
+def test_mid_file_corruption_is_quarantined_at_open_and_reported_and_sending_resumes(tmp_path):
+    cfg = make_cfg(tmp_path)
+    path = cfg.data_dir / "outbox.db"
+    _fill(path, 80)
+    assert path.stat().st_size > 20000
+    _damage_middle(path)
+    agent = Agent(cfg)
+    assert agent.outbox.recovered_from is not None and agent.outbox.recovered_from.exists()
+    assert agent.outbox.depth() == 0
+    agent._enqueue([], [])
+    records = drain_logs(agent)
+    changes = [r for r in records if r["event"] == "observe.source.change" and r["source"] == "outbox"]
+    assert len(changes) == 1 and "corrupt" in changes[0]["body"]
+    agent.outbox.enqueue(requests_for("after", n_points=1), "after")
+    observe = FakeObserve()
+    with observe.client() as client:
+        agent.flush(client)
+    assert len(observe.posts) == 1 and agent.outbox.depth() == 0
+
+
+def test_corruption_found_while_running_recovers_and_the_call_is_retried(tmp_path):
+    cfg = make_cfg(tmp_path)
+    agent = Agent(cfg)
+    agent.outbox.enqueue(requests_for("e1", n_points=1), "e1")
+    real = agent.outbox._db
+
+    class Broken:
+        def __getattr__(self, name):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        def __enter__(self):
+            raise sqlite3.DatabaseError("database disk image is malformed")
+
+        def __exit__(self, *a):
+            return False
+
+        def close(self):
+            real.close()
+
+    agent.outbox._db = Broken()
+    agent.outbox.enqueue(requests_for("e2", n_points=1), "e2")
+    assert agent.outbox.recovered_from is not None
+    assert agent.outbox.depth() == 1  # the old row is lost, the new one is kept
+    agent._enqueue([], [])
+    changes = [r for r in drain_logs(agent) if r["event"] == "observe.source.change"]
+    assert any(r["source"] == "outbox" for r in changes)
+
+
+def test_dead_letters_stay_under_the_byte_cap(tmp_path):
+    import hostwatch.outbox as ob
+    box = Outbox(tmp_path / "data/outbox.db")
+    body = b"x" * 100_000
+    for i in range(1000):
+        box.enqueue([otlp.OtlpRequest("logs", "/v1/logs", {"Idempotency-Key": f"k{i}"}, body, 1, len(body))],
+                    f"e{i}")
+        box.dead_letter(box.peek().seq, 400)
+    size = box._db.execute("SELECT SUM(LENGTH(body) + LENGTH(headers)) FROM dead_letters").fetchone()[0]
+    assert size <= ob.MAX_DEAD_LETTER_BYTES
+    assert 0 < box.dead_letter_count() <= ob.MAX_DEAD_LETTERS
+    newest = box._db.execute("SELECT entry_id FROM dead_letters ORDER BY id DESC LIMIT 1").fetchone()[0]
+    assert newest == "e999"
+
+
+def test_a_partial_success_rejection_is_counted_and_reported_to_observe(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    agent.outbox.enqueue(requests_for("e1", n_points=5), "e1")
+    body = b'{"partialSuccess": {"rejectedDataPoints": "2", "errorMessage": "name too long"}}'
+    observe = FakeObserve(answers=[(200, {"Content-Type": "application/json"}, body)])
+    with observe.client() as client:
+        agent.flush(client)
+    assert agent.outbox.rejected_points_total() == 2
+    agent._enqueue([], [])
+    changes = [r for r in drain_logs(agent) if r["event"] == "observe.source.change"]
+    assert len(changes) == 1 and "rejected 2 item(s)" in changes[0]["body"]
+    # The cumulative counter travels with the availability tier.
+    from hostwatch import otel_map
+    agent._complete_tier(tiers.AVAILABILITY, [])
+    names = set()
+    while (req := agent.outbox.peek()) is not None:
+        if req.signal == "metrics":
+            names.update(m["name"] for rm in request_json(req)["resourceMetrics"]
+                         for sm in rm["scopeMetrics"] for m in sm["metrics"])
+        agent.outbox.ack(req.seq)
+    assert "observe.agent.rejected.items" in names
+    pts = otel_map.rejected_points(2, 0, 1.0)
+    assert [(p.name, p.value, p.attributes["observe.signal"]) for p in pts] == [("observe.agent.rejected.items", 2.0, "metrics")]
+    assert otel_map.rejected_points(0, 0, 1.0) == []
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "fchmod") or __import__("os").name != "posix",
+                    reason="file modes are POSIX only")
+def test_data_files_are_created_private(tmp_path):
+    import os
+    import stat
+    previous = os.umask(0o022)
+    try:
+        cfg = make_cfg(tmp_path)
+        agent = Agent(cfg)
+        agent._touch_alive()
+        from hostwatch.events import boot
+        boot.Heartbeat(cfg.data_dir, "b1").beat()
+    finally:
+        os.umask(previous)
+    for name in ("outbox.db", "agent.alive", "heartbeat.json"):
+        assert stat.S_IMODE(os.stat(cfg.data_dir / name).st_mode) == 0o600, name

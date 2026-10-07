@@ -40,7 +40,8 @@ model is in `docs/THREAT-MODEL.md`.
 | `hostwatch/tiers.py` | The five tiers, their defaults and limits, rate parsing and the schedule |
 | `hostwatch/otel_map.py` | Maps samples, source statuses and events to OpenTelemetry names, UCUM units, attributes and log records |
 | `hostwatch/otlp.py` | Hand-written OTLP protobuf and JSON encoder, request splitting, `Idempotency-Key`s and the partial success reader |
-| `hostwatch/outbox.py` | The durable outbox (requests, progress markers, dead letters, counters) |
+| `hostwatch/outbox.py` | The durable outbox (requests, progress markers, dead letters, counters); recovers from a damaged file |
+| `hostwatch/privfile.py` | Creates the outbox, heartbeat and liveness files with mode 0600 on POSIX |
 | `hostwatch/model.py` | The agent's own `Sample`, `SourceStatus` and `Event` types. They never cross the network as they are |
 | `hostwatch/config.py` | Settings read from `HOSTWATCH_*` environment variables |
 | `hostwatch/collectors/` | One module per source: `cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `zfs`, `scrutiny`, `nut`, `truenas`, `rpi`, `thermalctl`, plus the Windows-only `win_cpu`, `win_memory`, `win_storage` (the `win_storage` and `win_smartctl` sources) and `win_thermalsuite` |

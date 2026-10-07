@@ -27,6 +27,7 @@ from pathlib import Path
 from typing import Any
 
 from ..model import Event
+from ..privfile import write_private
 
 log = logging.getLogger("hostwatch.boot")
 
@@ -165,10 +166,7 @@ class Heartbeat:
                    "agent_stopped_cleanly": clean}
         self.path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.path.with_name(self.path.name + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as fh:
-            json.dump(payload, fh)
-            fh.flush()
-            os.fsync(fh.fileno())
+        write_private(tmp, json.dumps(payload), fsync=True)
         os.replace(tmp, self.path)
 
     def beat(self) -> None:
