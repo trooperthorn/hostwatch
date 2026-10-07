@@ -126,7 +126,8 @@ on the hub and use its own ingest key, as in step 1 above.
 
 The agent is being converted to send OTLP to Observe. The names, units and attributes each
 collector will use are defined in `hostwatch/otel_map.py` and described in `docs/ARCHITECTURE.md`.
-Nothing is sent that way yet, so no deployment step changes with this slice.
+`hostwatch/otlp.py` now encodes OTLP requests, but nothing is sent yet, so no deployment step changes
+with this slice.
 
 ## hostwatch-control
 

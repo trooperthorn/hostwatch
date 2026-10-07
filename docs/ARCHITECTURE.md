@@ -148,8 +148,26 @@ per process. Events map to logs named `hostwatch.<kind>`, except boot classifica
 `observe.host.boot` with severity 9 or 13 as the design gives them; the original severity stays in
 the `observe.severity` attribute. Event detail is flattened under `observe.detail.*` with a cap on
 keys and value length. The golden inputs and outputs live in `tests/fixtures/otel/`, one file per
-collector plus `events.json`, so Observe can reuse them. This slice adds the mapping only; the
-encoder, the tiered scheduler and the removal of the batch format come in later slices.
+collector plus `events.json`, so Observe can reuse them. The scheduler, the sender and the removal of the batch format come in later slices.
+
+## OTLP encoder (`hostwatch/otlp.py`)
+
+`hostwatch/otlp.py` turns mapped points and log records into `ExportMetricsServiceRequest` and
+`ExportLogsServiceRequest` bodies. The encoder is hand written, so the agent gains no runtime
+dependency. A request is built as an OTLP JSON tree and the protobuf bytes are written from the same
+tree with a small field table, so the two encodings cannot drift apart; protobuf is the default and
+JSON is an option. Gzip is optional and uses a zero timestamp so a body is reproducible. Limits match
+Observe's ingest: 1 MiB on the wire, 4 MiB inflated, an inflate ratio under 100, 5000 points or 500
+log records per request, 64 resource attributes, 32 attributes per point or record, keys up to 128
+characters and string values up to 1024. A batch that does not fit is split into several requests,
+each with the full resource, by count first and then by halving on size. Points Observe would
+refuse (a value that is not finite, an over-long name) are skipped and counted, never sent as zero.
+Each request's `Idempotency-Key` is `hw-<entry id>-<signal initial><part>`, built only from the
+outbox entry id, the signal and the position in the split, so a replay sends the same key and the
+same bytes; an id that is not short printable ASCII is replaced by a hash. The builder returns the
+path, headers (without credentials) and body of each request and does no network access. Tests
+decode the protobuf with an independent decoder in `tests/otlp_decoder.py`. The outbox still stores
+the old batch format until a later slice.
 
 ## Events on the wire
 

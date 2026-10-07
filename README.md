@@ -447,8 +447,9 @@ The durable outbox lives in `C:/ProgramData/hostwatch` (`HOSTWATCH_DATA_DIR`), s
 
 `hostwatch/otel_map.py` maps every collector sample and event to OpenTelemetry metric names, UCUM
 units, attributes and log records as Observe defines them. Metrics a collector adds before the
-table is updated are sent as `observe.legacy.<source>.<metric>`. The module is not wired to a sender
-yet. See `docs/ARCHITECTURE.md`.
+table is updated are sent as `observe.legacy.<source>.<metric>`. `hostwatch/otlp.py` encodes the result as OTLP
+protobuf (default) or JSON, with optional gzip, split to Observe's request limits, with a stable
+`Idempotency-Key` per outbox entry. Neither module is wired to a sender yet. See `docs/ARCHITECTURE.md`.
 
 ## hostwatch-control
 
