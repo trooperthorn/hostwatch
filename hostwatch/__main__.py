@@ -1,227 +1,61 @@
 """Entry point.
 
-  python -m hostwatch                run the configured role (HOSTWATCH_ROLE)
-  python -m hostwatch bootstrap-admin | user ... | key ...
-                                     operator commands, see cli.py
-  python -m hostwatch healthcheck    exit 0 when the local hub health endpoint answers, used by the
+  python -m hostwatch                run the agent
+  python -m hostwatch healthcheck    exit 0 when the agent loop has run recently, used by the
                                      container HEALTHCHECK
-  python -m hostwatch collect-once   print one cycle of detection and samples,
-                                     without a hub; useful for verification
+  python -m hostwatch collect-once   print one cycle of detection and samples, without sending
+                                     anything; useful for verification
+  python -m hostwatch windows run    the native Windows agent in the foreground, see cli.py
+  python -m hostwatch control ...    the hostwatch-control daemon, see cli.py
 """
 
 from __future__ import annotations
 
-import dataclasses
-import json
 import logging
 import signal
-import socket
-import ssl
 import sys
-import threading
 import time
-import urllib.request
+from pathlib import Path
 
 from . import cli
-from .agent import Agent
-from .config import Config, _is_loopback, normalize_ip
+from .agent import ALIVE_FILE, Agent
+from .config import Config
+
+# The loop writes its marker every few seconds. A marker older than this means the loop is stuck.
+ALIVE_MAX_AGE_S = 120.0
 
 
 def collect_once(cfg: Config) -> int:
     agent = Agent(cfg)
     agent.detect()
-    agent.collect_once()           # prime rate-based collectors
+    agent.collect_samples()           # prime rate-based collectors
     time.sleep(2)
-    batch = agent.collect_once()
-    print(json.dumps({"host": batch.host, "platform": batch.platform,
-                      "sources": [s.model_dump() for s in batch.sources]}, indent=2))
-    for s in batch.samples:
+    samples = agent.collect_samples()
+    print(f"host={cfg.host_name} platform={agent.platform}")
+    for st in agent.status.values():
+        print(f"source {st.source}: {'available' if st.available else 'unavailable'}"
+              f"{' (' + st.reason + ')' if st.reason else ''}")
+    for s in samples:
         lbl = " ".join(f"{k}={v}" for k, v in s.labels.items())
         print(f"{s.source:9} {s.metric:22} {str(s.value):>14} {s.unit:4} {lbl}")
     return 0
 
 
-HEALTH_PATH = "/internal/v1/health"
-HEALTH_TIMEOUT_S = 5.0
-
-
-def health_url(cfg: Config) -> str:
-    """The local health URL: the configured port, the scheme the hub serves, and an address it listens on.
-
-    The all role always listens on loopback. The hub role listens only on its bind address, so a
-    specific non-loopback bind is used as is; a wildcard bind is reached over loopback.
-    """
-    host = LOOPBACK_V4
-    if cfg.role != "all" and not _is_loopback(cfg.hub_bind):
-        try:
-            if not normalize_ip(cfg.hub_bind).is_unspecified:
-                host = cfg.hub_bind
-        except ValueError:
-            pass
-    if ":" in host:
-        host = f"[{host}]"
-    scheme = "https" if cfg.tls_configured else "http"
-    return f"{scheme}://{host}:{cfg.hub_port}{HEALTH_PATH}"
-
-
-def healthcheck(cfg: Config, opener=None) -> int:
-    """Return 0 when the local hub answers its health endpoint with HTTP 200 and status ok, else 1.
-
-    The standard library is used so the image needs no curl. Over TLS the certificate is not
-    verified, because it is issued for the public name and not for the loopback address. The
-    endpoint is unauthenticated and returns only a status and a version, so this is a liveness
-    probe and not an authentication step. The agent role serves nothing, so there is nothing to
-    probe and the command reports that and returns 0 rather than failing every agent container.
-    """
-    if cfg.role == "agent":
-        print("agent role: no health endpoint to check")
-        return 0
-    url = health_url(cfg)
-    if opener is None:
-        ctx = None
-        if url.startswith("https://"):
-            ctx = ssl.create_default_context()
-            ctx.check_hostname = False
-            ctx.verify_mode = ssl.CERT_NONE
-        opener = lambda u: urllib.request.urlopen(u, timeout=HEALTH_TIMEOUT_S, context=ctx)  # noqa: E731
+def healthcheck(cfg: Config, now: float | None = None) -> int:
+    """Return 0 when the agent loop has written its marker recently, else 1. The agent serves
+    nothing, so this reads the marker file in the data directory. It says the loop is turning, not
+    that Observe is receiving: delivery trouble is reported by the outbox source."""
+    path: Path = cfg.data_dir / ALIVE_FILE
     try:
-        with opener(url) as resp:
-            if resp.status != 200:
-                print(f"unhealthy: HTTP {resp.status} from {url}", file=sys.stderr)
-                return 1
-            body = json.loads(resp.read().decode("utf-8"))
-    except Exception as exc:  # any failure means unhealthy; the reason goes to the health log
-        print(f"unhealthy: {url}: {exc}", file=sys.stderr)
+        written = float(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        print(f"unhealthy: {path} is not readable: {exc}", file=sys.stderr)
         return 1
-    if body.get("status") != "ok":
-        print(f"unhealthy: {url} reported {body!r}", file=sys.stderr)
+    age = (time.time() if now is None else now) - written
+    if age > ALIVE_MAX_AGE_S:
+        print(f"unhealthy: the agent loop last ran {age:.0f}s ago", file=sys.stderr)
         return 1
     return 0
-
-
-def uvicorn_kwargs(cfg: Config) -> dict:
-    """Keyword arguments for uvicorn.run, including TLS when the operator supplied a certificate.
-
-    A client CA asks for a client certificate but does not require one, so
-    password and key callers still work; certificate login is decided by the
-    hub from the verified identity, not by the handshake alone.
-    """
-    kwargs: dict = {"host": cfg.hub_bind, "port": cfg.hub_port, "log_level": "info"}
-    if cfg.tls_configured:
-        kwargs["ssl_certfile"] = cfg.tls_cert
-        kwargs["ssl_keyfile"] = cfg.tls_key
-        if cfg.tls_client_ca:
-            kwargs["ssl_ca_certs"] = cfg.tls_client_ca
-            kwargs["ssl_cert_reqs"] = ssl.CERT_OPTIONAL
-    return kwargs
-
-
-LOOPBACK_V4 = "127.0.0.1"
-
-
-def listen_addresses(cfg: Config) -> list[tuple[str, int]]:
-    """The (host, port) pairs the hub serves on.
-
-    The all role runs the agent in the same process and the agent posts over
-    loopback. When the hub is bound to one specific non-loopback address, that
-    address does not accept loopback connections, so 127.0.0.1 is added as a
-    second listener. The hub role and every loopback or wildcard bind get the
-    single configured address.
-    """
-    addrs = [(cfg.hub_bind, cfg.hub_port)]
-    if cfg.role == "all" and not _is_loopback(cfg.hub_bind):
-        try:
-            unspecified = normalize_ip(cfg.hub_bind).is_unspecified
-        except ValueError:
-            unspecified = False
-        if not unspecified:
-            addrs.append((LOOPBACK_V4, cfg.hub_port))
-    return addrs
-
-
-def local_agent_hub_url(cfg: Config) -> str:
-    """The hub URL the in-process agent uses in the all role: always loopback, same scheme and port."""
-    scheme = "https" if cfg.tls_configured else "http"
-    return f"{scheme}://{LOOPBACK_V4}:{cfg.hub_port}"
-
-
-def _bind_one(host: str, port: int) -> socket.socket:
-    family = socket.AF_INET6 if ":" in host else socket.AF_INET
-    sock = socket.socket(family, socket.SOCK_STREAM)
-    try:
-        if sys.platform != "win32":
-            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        sock.bind((host, port))
-        sock.listen(2048)
-        sock.set_inheritable(True)
-    except OSError:
-        sock.close()
-        raise
-    return sock
-
-
-def bind_sockets(cfg: Config, bind_one=_bind_one) -> list[socket.socket]:
-    """Bind every listener before serving. If any bind fails, close the ones already bound and raise
-    RuntimeError naming the address, so startup fails loudly instead of the agent queueing silently."""
-    socks: list[socket.socket] = []
-    for host, port in listen_addresses(cfg):
-        try:
-            socks.append(bind_one(host, port))
-        except OSError as exc:
-            for s in socks:
-                s.close()
-            raise RuntimeError(
-                f"Cannot listen on {host}:{port} ({exc}). In the all role the hub must listen on both the "
-                f"configured address and {LOOPBACK_V4} so the local agent can deliver; free the port or "
-                "change HOSTWATCH_HUB_BIND or HOSTWATCH_HUB_PORT.") from exc
-    return socks
-
-
-def serve_hub(app, cfg: Config) -> None:
-    import uvicorn
-    kwargs = uvicorn_kwargs(cfg)
-    if len(listen_addresses(cfg)) == 1:
-        uvicorn.run(app, **kwargs)
-        return
-    socks = bind_sockets(cfg)
-    try:
-        uvicorn.Server(uvicorn.Config(app, **kwargs)).run(sockets=socks)
-    finally:
-        for s in socks:
-            s.close()
-
-
-def build_ha(cfg: Config, store, transport_factory=None, wall_power=None):
-    """The Home Assistant discovery publisher and events publisher, sharing one MQTT client, or
-    (None, None) when MQTT is not configured. Only the hub and all roles call this."""
-    if not cfg.mqtt_enabled:
-        return None, None
-    from .integrations.ha_events import HomeAssistantEventPublisher
-    from .integrations.homeassistant import HomeAssistantPublisher
-    from .integrations.mqtt_client import MqttClient, PahoTransport
-    transport = transport_factory() if transport_factory else PahoTransport("hostwatch-hub")
-    client = MqttClient(cfg, transport)
-    return (HomeAssistantPublisher(cfg, client, store, wall_power=wall_power),
-            HomeAssistantEventPublisher(cfg, client, store))
-
-
-def build_witness(cfg: Config):
-    """The Home Assistant plug witness, or None when it is not fully configured."""
-    from .witness.homeassistant import HomeAssistantWitness
-    witness = HomeAssistantWitness.from_config(cfg)
-    return witness if witness.configured else None
-
-
-def chain(*hooks):
-    """One callable that runs each non-None hook in order, or None when there are none."""
-    active = [h for h in hooks if h]
-    if not active:
-        return None
-
-    def run() -> None:
-        for hook in active:
-            hook()
-    return run
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -234,37 +68,15 @@ def main(argv: list[str] | None = None) -> int:
         return collect_once(cfg)
     if argv and argv[0] in cli.COMMANDS:
         return cli.run(argv, cfg)
-    cfg.validate()
-
-    if cfg.role == "agent":
-        agent = Agent(cfg)
-        # The handler only sets a flag; the run loop writes the clean flag on exit.
-        signal.signal(signal.SIGTERM, lambda *_: agent.stop())
-        agent.run()
-        return 0
-
-    from .hub import create_app
-    from .store import Store
-
-    store = Store(cfg.data_dir / "hostwatch.db")
-    if cfg.role == "all":
-        # The local agent talks to its own hub with a hashed, scoped key minted in memory.
-        from .auth import mint_internal_ingest_key
-        cfg = dataclasses.replace(cfg, ingest_key=mint_internal_ingest_key(cfg, store),
-                                  hub_url=local_agent_hub_url(cfg))
-    agent = Agent(cfg) if cfg.role == "all" else None
-    thread = threading.Thread(target=agent.run, name="agent", daemon=True) if agent else None
-    witness = build_witness(cfg)
-    wall_power = None
-    if witness is not None:
-        from .witness.power import read_wall_power
-        wall_power = lambda host, now: read_wall_power(store, witness, host, now)  # noqa: E731
-    ha_publisher, ha_events = build_ha(cfg, store, wall_power=wall_power)
-    app = create_app(cfg, store,
-                     on_start=chain(thread.start if thread else None, ha_events.start if ha_events else None),
-                     on_stop=chain(ha_events.stop if ha_events else None, agent.stop_and_wait if agent else None),
-                     ha_publisher=ha_publisher, power_witness=witness)
-    serve_hub(app, cfg)
+    try:
+        cfg.validate()
+    except ValueError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    agent = Agent(cfg)
+    # The handler only sets a flag; the run loop writes the clean flag on exit.
+    signal.signal(signal.SIGTERM, lambda *_: agent.stop())
+    agent.run()
     return 0
 
 

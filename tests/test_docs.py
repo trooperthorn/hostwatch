@@ -27,9 +27,9 @@ def test_threat_model_exists_and_has_the_required_sections():
     text = (ROOT / "docs" / "THREAT-MODEL.md").read_text(encoding="utf-8")
     for heading in ("## Assets", "## Trust boundaries", "## Threats and controls", "## Residual risks"):
         assert heading in text, heading
-    for name in ("host", "container", "hub", "agent", "LAN", "Home Assistant", "Orion", "MQTT", "NUT"):
+    for name in ("host", "container", "Observe", "agent", "LAN", "NUT", "TrueNAS"):
         assert name.lower() in text.lower(), name
-    for risk in ("RAPL", "plain HTTP", "shared token"):
+    for risk in ("RAPL", "plain HTTP", "outbox"):
         assert risk.lower() in text.lower(), risk
 
 
@@ -48,14 +48,15 @@ def test_every_control_line_has_exactly_one_label():
 def test_quick_start_steps_are_numbered_in_order():
     numbers = [int(m.group(1)) for m in re.finditer(r"^(\d+)\. \*\*", _quick_start(), re.M)]
     assert numbers == list(range(1, len(numbers) + 1))
-    assert len(numbers) >= 9
+    assert len(numbers) >= 7
 
 
 def test_quick_start_uses_only_cli_commands_that_exist():
     top = _choices(cli._parser())
     found = re.findall(r"python -m hostwatch ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?", _quick_start())
-    assert found
     for command, action in found:
+        if command in ("healthcheck", "collect-once"):
+            continue
         assert command in top, command
         sub = _choices(top[command])
         if sub and action:
@@ -69,7 +70,7 @@ def test_quick_start_uses_only_known_environment_variables():
         sources.append(path.read_text(encoding="utf-8"))
     known = "\n".join(sources)
     names = set(re.findall(r"HOSTWATCH_[A-Z0-9_]+", _quick_start()))
-    assert {"HOSTWATCH_RAPL_GID", "HOSTWATCH_JOURNAL_GID", "HOSTWATCH_ROLE"} <= names
+    assert {"HOSTWATCH_RAPL_GID", "HOSTWATCH_JOURNAL_GID", "HOSTWATCH_OBSERVE_URL", "HOSTWATCH_INGEST_KEY"} <= names
     for name in names:
         assert name in known, name
 
@@ -78,3 +79,27 @@ def test_quick_start_scripts_and_files_exist():
     section = _quick_start()
     for rel in set(re.findall(r"\./(scripts/[\w.\-]+)", section)) | {"deploy/.env.example"}:
         assert (ROOT / rel).is_file(), rel
+
+
+def test_the_readme_names_no_retired_component_as_current():
+    text = (ROOT / "README.md").read_text(encoding="utf-8")
+    for retired in ("HOSTWATCH_ROLE", "bootstrap-admin", "/internal/v1/" + "ingest", "HOSTWATCH_INGEST_TOKEN"):
+        assert retired not in text, retired
+
+
+def test_the_healthcheck_reads_the_agent_liveness_marker(tmp_path):
+    import time
+
+    from hostwatch.__main__ import ALIVE_MAX_AGE_S, healthcheck
+    from hostwatch.agent import ALIVE_FILE
+    from hostwatch.config import Config
+
+    cfg = Config(data_dir=tmp_path)
+    assert healthcheck(cfg) == 1  # no marker yet
+    (tmp_path / ALIVE_FILE).write_text(str(time.time()), encoding="utf-8")
+    assert healthcheck(cfg) == 0
+    assert healthcheck(cfg, now=time.time() + ALIVE_MAX_AGE_S + 5) == 1
+    (tmp_path / ALIVE_FILE).write_text("not a time", encoding="utf-8")
+    assert healthcheck(cfg) == 1
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert 'CMD ["python", "-m", "hostwatch", "healthcheck"]' in dockerfile

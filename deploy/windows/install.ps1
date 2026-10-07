@@ -14,11 +14,11 @@
   only to the protected settings file. It is never printed, logged or placed on a command line.
 
 .EXAMPLE
-  .\install.ps1 -HubUrl https://hub.example.lan:8090 -DryRun
+  .\install.ps1 -ObserveUrl https://observe.example.lan -DryRun
 #>
 [CmdletBinding()]
 param(
-    [Parameter(Mandatory = $true)][string]$HubUrl,
+    [Alias('HubUrl')][Parameter(Mandatory = $true)][string]$ObserveUrl,
     [string]$HostName = $env:COMPUTERNAME,
     [securestring]$IngestKey,
     [string]$SourcePath = (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path,
@@ -49,7 +49,7 @@ $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
 if (-not $isAdmin -and -not $DryRun) { throw 'Run this script from an elevated PowerShell.' }
-if ($HubUrl -notmatch '^https?://') { throw 'HubUrl must start with http:// or https://.' }
+if ($ObserveUrl -notmatch '^https?://') { throw 'ObserveUrl must start with http:// or https://.' }
 if ($HostName -notmatch '^[A-Za-z0-9._-]{1,64}$') { throw 'HostName may hold letters, digits, dots, dashes and underscores only.' }
 if (-not (Test-Path (Join-Path $SourcePath 'pyproject.toml'))) { throw "No pyproject.toml under $SourcePath." }
 
@@ -57,14 +57,14 @@ Write-Host 'This will:'
 Write-Host "  - create a virtual environment in $Venv and install hostwatch with the windows extra"
 Write-Host "  - write $EnvFile readable only by SYSTEM and Administrators"
 Write-Host "  - register the $ServiceName service as LocalSystem, start it on boot, and restart it after a failure"
-Write-Host "  - send host health to $HubUrl as host $HostName"
+Write-Host "  - send host health to Observe at $ObserveUrl as host $HostName"
 if ($DryRun) { Write-Host 'Dry run: nothing was changed.'; return }
 if (-not $Force) {
     $answer = Read-Host 'Type yes to continue'
     if ($answer -ne 'yes') { Write-Host 'Cancelled. Nothing was changed.'; return }
 }
 
-if (-not $IngestKey) { $IngestKey = Read-Host -AsSecureString 'Ingest key or token for this host' }
+if (-not $IngestKey) { $IngestKey = Read-Host -AsSecureString 'Observe ingest key for this host' }
 
 Step 'Creating the virtual environment'
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
@@ -82,15 +82,12 @@ Invoke-Native 'icacls.exe' @($EnvFile, '/inheritance:r', '/grant:r', "${SidSyste
 $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($IngestKey)
 try {
     $secret = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-    $keyName = 'HOSTWATCH_INGEST_KEY'
-    if ($secret -notmatch '^hw_') { $keyName = 'HOSTWATCH_INGEST_TOKEN' }
     $lines = @(
         '# hostwatch agent settings. Readable only by SYSTEM and Administrators.',
-        'HOSTWATCH_ROLE=agent',
-        "HOSTWATCH_HUB_URL=$HubUrl",
+        "HOSTWATCH_OBSERVE_URL=$ObserveUrl",
         "HOSTWATCH_HOST_NAME=$HostName",
         "HOSTWATCH_DATA_DIR=$DataDir",
-        "$keyName=$secret"
+        "HOSTWATCH_INGEST_KEY=$secret"
     )
     [IO.File]::WriteAllText($EnvFile, (($lines -join "`n") + "`n"), (New-Object Text.UTF8Encoding($false)))
 }

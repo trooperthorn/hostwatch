@@ -118,18 +118,16 @@ def test_sbom_is_spdx_and_attached_to_the_release():
     assert "hostwatch.spdx.json" in release
 
 
-def test_smoke_job_binds_loopback_and_never_echoes_secrets():
+def test_smoke_job_runs_the_agent_read_only_and_never_echoes_secrets():
     smoke = _jobs()["smoke"]
-    assert "HOSTWATCH_HUB_BIND=127.0.0.1" in smoke
-    assert "--tmpfs /data" in smoke
-    assert "read:metrics" in smoke and "/api/v1/orion/hosts" in smoke
-    assert "bootstrap-admin" in smoke
+    assert "HOSTWATCH_OBSERVE_URL=" in smoke and "HOSTWATCH_INGEST_KEY=" in smoke
+    assert "--tmpfs /data" in smoke and "--read-only" in smoke and "--cap-drop ALL" in smoke
+    assert "python -m hostwatch healthcheck" in smoke
     assert "0.0.0.0" not in smoke and "-p 8090" not in smoke
-    for secret in ("ingest_token", "password", "csrf", "secret"):
-        assert f'echo "::add-mask::${secret}"' in smoke, secret
+    assert 'echo "::add-mask::$ingest_key"' in smoke
     for line in smoke.splitlines():
         if re.match(r"\s*echo\b", line) and "::add-mask::" not in line:
-            assert not re.search(r"\$\{?(password|csrf|secret|ingest_token)\b", line), line
+            assert not re.search(r"\$\{?ingest_key\b", line), line
     assert "set -x" not in smoke and "bash -x" not in smoke
 
 

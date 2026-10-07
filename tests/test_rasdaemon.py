@@ -8,7 +8,6 @@ import time
 import pytest
 
 from hostwatch.outbox import Outbox
-from hostwatch.schema import Batch
 
 from hostwatch.events.rasdaemon import KIND, RasdaemonReader, open_readonly
 
@@ -120,8 +119,7 @@ def drain(path, outbox, max_cycles=10):
         if not events:
             break
         keys.extend(e.dedup_key for e in events)
-        outbox.enqueue(Batch(agent_version="t", host="h", platform="x86", sent_at=0.0,
-                             sources=[], samples=[], events=events))
+        outbox.enqueue([], "e")
     return keys
 
 
@@ -137,8 +135,7 @@ def test_restart_with_1200_rows_delivers_each_once(tmp_path):
     ob = Outbox(out)
     _, first = RasdaemonReader(path, markers=ob).read()
     assert len(first) == 500
-    ob.enqueue(Batch(agent_version="t", host="h", platform="x86", sent_at=0.0,
-                     sources=[], samples=[], events=first))
+    ob.enqueue([], "e")
     ob.close()
     ob = Outbox(out)  # restart: new process, same durable file
     rest = drain(path, ob)

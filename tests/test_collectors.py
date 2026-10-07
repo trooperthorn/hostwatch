@@ -202,4 +202,5 @@ def test_hwmon_patterns_are_validated():
             Config(hwmon_ignore=bad).validate()
     with pytest.raises(ValueError, match="HOSTWATCH_HWMON_CPU_SENSORS"):
         Config(hwmon_cpu_sensors="nope").validate()
-    Config(hwmon_ignore="nct6779:AUXTIN*", hwmon_cpu_sensors="nct6779:CPUTIN").validate()
+    Config(hwmon_ignore="nct6779:AUXTIN*", hwmon_cpu_sensors="nct6779:CPUTIN",
+           observe_url="http://observe.test", ingest_key="k").validate()

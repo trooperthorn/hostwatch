@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent_helpers import collect_once
 import dataclasses
 import json
 import os
@@ -21,7 +22,7 @@ def make_cfg(tmp_path, boot_id=NEW):
     (procfs / "sys/kernel/random/boot_id").write_text(boot_id + "\n")
     sysfs.mkdir()
     data.mkdir()
-    return Config(procfs=procfs, sysfs=sysfs, data_dir=data, ingest_token="x" * 32, host_name="h",
+    return Config(procfs=procfs, sysfs=sysfs, data_dir=data, host_name="h",
                   journal=tmp_path / "journal", journal_volatile=tmp_path / "journal-volatile", pstore=tmp_path / "pstore")
 
 
@@ -286,10 +287,10 @@ def test_event_is_emitted_once_and_deduplicated_across_restarts(tmp_path):
     write_hb(cfg, clean=True)
     agent = start(cfg)
     agent.heartbeat.beat()
-    batch = agent.collect_once()
-    assert len(batch.events) == 1
-    agent.outbox.enqueue(batch)  # the marker is cleared only with the queued batch
-    assert agent.collect_once().events == []
+    cycle = collect_once(agent)
+    assert len(cycle.events) == 1
+    agent.outbox.enqueue([], "e1")  # the marker is cleared only with the queued entry
+    assert collect_once(agent).events == []
     again = start(cfg)  # agent restart inside the same boot
     assert again.pending_events == []
 
@@ -324,18 +325,15 @@ def test_unreadable_boot_id_reports_source_unavailable(tmp_path):
     assert agent.pending_events == []
 
 
-def test_boot_event_row_in_hub_store_has_boot_id_and_previous_heartbeat_ts(tmp_path):
-    from hostwatch.schema import Batch
-    from hostwatch.store import Store
+def test_boot_event_has_boot_id_and_previous_heartbeat_ts_and_maps_to_a_boot_log(tmp_path):
+    from hostwatch import otel_map
     cfg = make_cfg(tmp_path)
     write_hb(cfg, ts=1234.5)
     (ev,) = start(cfg).pending_events
-    store = Store(tmp_path / "hub.db")
-    store.ingest_batch(Batch(agent_version="t", host="h", platform="x", sent_at=2000.0,
-                             batch_id="b1", sources=[], samples=[], events=[ev]))
-    (row,) = store.events(host="h")
-    assert row["boot_id"] == NEW
-    assert row["ts"] == 1234.5
+    assert ev.boot_id == NEW and ev.ts == 1234.5
+    record = otel_map.map_event(ev)
+    assert record.event_name == "observe.host.boot" and record.ts == 1234.5
+    assert record.attributes["observe.boot_id"] == NEW
 
 
 def test_custom_pstore_root_with_fresh_panic_record_gives_kernel_panic(tmp_path):

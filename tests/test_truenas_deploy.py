@@ -85,7 +85,7 @@ def test_compose_has_the_container_limits(service):
     uid, _, gid = str(service["user"]).partition(":")
     assert uid.isdigit() and int(uid) > 0 and gid.isdigit() and int(gid) > 0
     assert service["network_mode"] == "host"
-    assert service["environment"]["HOSTWATCH_ROLE"] == "agent"
+    assert "HOSTWATCH_ROLE" not in service["environment"]  # the agent is the only role
     assert "102" in service["group_add"]
 
 
@@ -165,15 +165,15 @@ def test_guide_names_only_real_settings_commands_and_files():
         return {}
 
     top = sub(cli._parser())
-    found = re.findall(r"python -m hostwatch ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?", text)
-    assert found
-    for command, action in found:
+    for command, action in re.findall(r"python -m hostwatch ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?", text):
+        if command in ("healthcheck", "collect-once"):
+            continue
         assert command in top, command
         if sub(top[command]) and action:
             assert action in sub(top[command]), f"{command} {action}"
     for rel in set(re.findall(r"`((?:deploy/truenas|docs)/[\w./\-]+\.(?:md|sh|yaml))`", text)):
         assert (ROOT / rel).is_file(), rel
-    for needle in ("10.10.11.98", "HOSTWATCH_ALLOWED_CLIENTS", "READONLY_ADMIN", "HOSTWATCH_HUB_BIND"):
+    for needle in ("TrueNAS-SVR", "READONLY_ADMIN", "HOSTWATCH_OBSERVE_URL", "HOSTWATCH_INGEST_KEY"):
         assert needle in text, needle
 
 

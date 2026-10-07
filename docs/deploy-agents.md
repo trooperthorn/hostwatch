@@ -1,54 +1,46 @@
-# Deploy remote agents and the three-host layout
+# Deploy the agents and the three-host layout
 
-This guide connects the three test hosts. MediaIn-SVR runs the hub, TrueNAS-SVR and
-ai-pi run agents that push to it. Facts measured on hosts are in `docs/hosts/truenas-svr.md`.
-Nothing about ai-pi has been measured yet; the checks that would confirm it are in
-`UNVERIFIED.md` and a source that cannot be confirmed is reported unavailable, never guessed.
+This guide connects the three test hosts to Observe. MediaIn-SVR, TrueNAS-SVR and ai-pi each run the
+hostwatch agent, which sends OpenTelemetry (OTLP) to Observe. There is no hostwatch hub any more, and no
+migration path from the old agent: each host is redeployed with the new agent and a new ingest key. Facts
+measured on hosts are in `docs/hosts/truenas-svr.md`. Nothing about ai-pi has been measured yet; the checks
+that would confirm it are in `UNVERIFIED.md` and a source that cannot be confirmed is reported unavailable,
+never guessed.
 
 ## The layout
 
-| Host | Role | Notes |
+| Host | Agent | Notes |
 |---|---|---|
-| MediaIn-SVR | `all` (hub plus its own agent) | Binds the hub to its LAN address and lists the agent addresses in an allowlist. |
-| TrueNAS-SVR | `agent` | Custom app, see `docs/deploy-truenas.md`. A standalone setup can use `all` instead. |
-| ai-pi | `agent` | Raspberry Pi 5, Debian arm64, uses `deploy/agent/docker-compose.yml`. |
+| MediaIn-SVR | `deploy/docker-compose.yml` | Container with RAPL, journal, pstore and rasdaemon mounts. Steps are in the README quick start. |
+| TrueNAS-SVR | `deploy/truenas/compose.yaml` | Custom app, see `docs/deploy-truenas.md`. |
+| ai-pi | `deploy/agent/docker-compose.yml` | Raspberry Pi 5, Debian arm64. |
 
-Security labels: the source allowlist and the per-agent ingest key are enforced controls.
-Binding the hub to one LAN address is exposure control only, not authentication. Traffic
-between agent and hub is plain HTTP unless the hub is given a certificate, so use a trusted
-LAN segment or set `HOSTWATCH_TLS_CERT` and `HOSTWATCH_TLS_KEY` on the hub.
+Security labels: the per-host ingest key is bound by Observe to one host name, and that binding is an
+enforced control in Observe. Traffic between the agent and Observe is plain HTTP unless `HOSTWATCH_OBSERVE_URL`
+starts with `https://`, so use a trusted LAN segment or HTTPS.
 
-## 1. Hub settings on MediaIn-SVR
+## 1. Observe settings
 
-The hub binds to 127.0.0.1 by default, so no remote agent can reach it. In `deploy/.env` set:
+In Observe, create one ingest key per host so that one host can be revoked without touching the others. Bind
+each key to the host name that the agent will report, which is the `HOSTWATCH_HOST_NAME` of the agent. Observe
+refuses requests that name another host, so one agent cannot report as another. Keep the key out of files you
+commit.
 
-```
-HOSTWATCH_HUB_BIND=<MediaIn-SVR LAN address>
-HOSTWATCH_ALLOWED_CLIENTS=<TrueNAS-SVR address>,<ai-pi address>
-```
-
-The bind must be one specific address, never a wildcard. A non-loopback bind without TLS
-needs a non-empty `HOSTWATCH_ALLOWED_CLIENTS` list of individual addresses. In the `all`
-role the hub also keeps listening on 127.0.0.1 so the local agent keeps delivering. Apply
-with `cd deploy && sudo docker compose up -d`.
-
-Create one key per agent so that one agent can be revoked without touching the others.
-The secret is printed once. Each agent key carries only the `ingest` scope and is bound to
-one host with `--host`, which must match the `HOSTWATCH_HOST_NAME` the agent reports. This is
-enforced: the hub answers 403 and writes an audit row naming both hosts when a batch names a
-different host, so one agent cannot post as another. A host-bound ingest key may also read its
-own host's events, which is how the agent restores its threshold state after a restart, and
-nothing else. The hub refuses to create an ingest key without `--host`. Keys created before
-this existed stay unbound and keep working, and the audit log marks each of their ingests as
-`unbound_key`; replace them with bound keys and revoke the old ones:
+Every agent needs two settings, and nothing else about Observe:
 
 ```
-sudo docker exec hostwatch python -m hostwatch key create --scopes ingest --host ai-pi --owner agent-ai-pi
-sudo docker exec hostwatch python -m hostwatch key create --scopes ingest --host TrueNAS-SVR --owner agent-truenas
-sudo docker exec hostwatch python -m hostwatch key list
+HOSTWATCH_OBSERVE_URL=https://observe.example.lan
+HOSTWATCH_INGEST_KEY=<the key for this host>
 ```
 
-To retire an agent, run `python -m hostwatch key revoke ID` with its id from the list.
+`HOSTWATCH_HUB_URL` is accepted as an alias for the URL, because Observe's install scripts set it. The agent
+fetches its polling rates from Observe at start and every five minutes, so a rate changed in the Observe
+console applies without a visit to the host. When Observe cannot be reached the defaults apply (availability 30 s,
+device metrics 60 s, storage health 15 min, SMART 1 h, inventory 1 h) and the agent keeps collecting and
+queueing. Events (boot, kernel, RAID, ZFS, SMART, UPS and WHEA) are sent within a few seconds whatever the
+rates are. Data is sent as protobuf with gzip; set `HOSTWATCH_OTLP_FORMAT=json` to debug a receiver.
+
+To retire a host, revoke its key in Observe and stop the agent.
 
 ## 2. The Raspberry Pi (ai-pi)
 
@@ -57,11 +49,11 @@ on ai-pi, with Docker installed:
 
 1. Get the repository and enter the agent folder: `cd deploy/agent`.
 2. Copy the example settings: `cp .env.example .env`, then `chmod 0600 .env`.
-3. Fill in `HOSTWATCH_HUB_URL` with the hub's LAN address and port 8090, paste the key from
-   step 1 into `HOSTWATCH_INGEST_KEY`, and set `HOSTWATCH_HOST_NAME`.
+3. Fill in `HOSTWATCH_OBSERVE_URL` with the Observe address, paste the key from step 1 into
+   `HOSTWATCH_INGEST_KEY`, and set `HOSTWATCH_HOST_NAME`.
 4. Set `HOSTWATCH_JOURNAL_GID` from `getent group systemd-journal | cut -d: -f3`.
 5. Start it: `sudo docker compose up -d`.
-6. In the hub UI confirm ai-pi appears with a recent sample.
+6. In Observe confirm ai-pi appears with a recent heartbeat.
 
 The container runs as uid 10001 with a read-only root filesystem, all capabilities dropped,
 no privileged mode, host networking and read-only host mounts. The host `/proc` is not
@@ -82,16 +74,14 @@ is older than 60 seconds.
 ## Windows agents
 
 A Windows host runs the native agent as the `hostwatch-agent` service. It is not verified on a real Windows host yet
-(see `UNVERIFIED.md`). It pushes the same wire schema as the other agents, so the hub settings in step 1 apply
-unchanged: create a key bound to the Windows host name with `python -m hostwatch key create --scopes ingest --host <name>`.
-The destination is only the `HOSTWATCH_HUB_URL` setting, and it is expected to move from the hostwatch hub to Observe
-later, which will ingest the same schema.
+(see `UNVERIFIED.md`). It sends the same OTLP as the other agents, so the Observe settings in step 1 apply
+unchanged: create a key bound to the Windows host name.
 
 On the Windows host, from an elevated PowerShell in a checkout of this repository (Python 3.11 or newer is needed):
 
 ```
-.\deploy\windows\install.ps1 -HubUrl https://hub.example.lan:8090 -DryRun   # preview, changes nothing
-.\deploy\windows\install.ps1 -HubUrl https://hub.example.lan:8090           # asks, then prompts for the key
+.\deploy\windows\install.ps1 -ObserveUrl https://observe.example.lan -DryRun   # preview, changes nothing
+.\deploy\windows\install.ps1 -ObserveUrl https://observe.example.lan           # asks, then prompts for the key
 ```
 
 `deploy/windows/install.ps1` creates a virtual environment under `C:\Program Files\hostwatch`, installs the package with
@@ -103,8 +93,7 @@ parameter `DataDir` under `HKLM\SYSTEM\CurrentControlSet\Services\hostwatch-agen
 before it looks for `agent.env`. The service is registered with its full class string
 `hostwatch.windows.service.HostwatchAgentService` so pywin32 can load it from the virtual environment. Each send times
 out after 5 seconds, a stop request ends delivery between sends, and the one last delivery attempt on stop is limited to
-10 seconds in total. Anything not accepted stays queued for the next start. `HOSTWATCH_INTERVAL` must be at least 5
-seconds; zero or a negative value is refused at start. For a console check without the service, run `python -m hostwatch windows run` with the same
+10 seconds in total. Anything not accepted stays queued for the next start. For a console check without the service, run `python -m hostwatch windows run` with the same
 settings in the environment or in `agent.env`. `deploy/windows/uninstall.ps1` removes the service and the virtual
 environment and keeps the data directory unless `-RemoveData` is given.
 
@@ -116,18 +105,16 @@ is more than 60 seconds old is reported unavailable.
 
 ## 3. TrueNAS-SVR
 
-A pool seen by both the kstat and API sources appears once on the hub, at the worse of the two states. The TrueNAS API client does not use proxy environment variables.
-
-
-Follow `docs/deploy-truenas.md`. Add the TrueNAS-SVR address to `HOSTWATCH_ALLOWED_CLIENTS`
-on the hub and use its own ingest key, as in step 1 above.
+Follow `docs/deploy-truenas.md`. Create an ingest key for it in Observe, bound to `TrueNAS-SVR`, as in step 1 above.
+A pool seen by both the kstat and API sources is reported by both; Observe decides how to present them together.
+The TrueNAS API client does not use proxy environment variables.
 
 ## OTEL metric names
 
-The agent is being converted to send OTLP to Observe. The names, units and attributes each
-collector will use are defined in `hostwatch/otel_map.py` and described in `docs/ARCHITECTURE.md`.
-`hostwatch/otlp.py` now encodes OTLP requests, but nothing is sent yet, so no deployment step changes
-with this slice.
+The names, units and attributes each collector uses are defined in `hostwatch/otel_map.py` and described in
+`docs/ARCHITECTURE.md`. Every request carries the resource attributes `host.name`, `os.type`, `service.name`,
+`service.version` and `observe.platform`, and each collector is its own instrumentation scope named
+`hostwatch.collector.<source>`.
 
 ## hostwatch-control
 
@@ -200,8 +187,8 @@ A Windows agent reports the Linux-only sources (`rapl`, `hwmon`, `mdraid`, `zfs`
 
 ## Windows PowerShell output encoding
 
-The Windows agent runs PowerShell with `-NoProfile -NonInteractive`, sets the console output encoding to UTF-8 at the start of every script, and decodes the output as UTF-8 with replacement. Event text in any language is kept, and an invalid byte appears as a replacement character instead of failing the cycle. No host setting is needed.
+The Windows agent runs PowerShell with `-NoProfile -NonInteractive`, sets the console output encoding to UTF-8 at the start of every script, and decodes the output as UTF-8 with replacement. Event text in any language is kept, and an invalid byte appears as a replacement character instead of failing the read. No host setting is needed.
 
 ## Windows event log bookmark
 
-The Windows agent keeps its Event Log position in the outbox database (`outbox.db` in the data directory), so the position moves forward only when the batch carrying the events is stored. If a cycle fails, the next cycle reads the same records again. A burst of more than 500 records is delivered over several cycles, oldest first. If the stored position is damaged or lies in the future, the agent logs one warning and reads back seven days; the hub drops repeats by their dedup key, so this does not duplicate events.
+The Windows agent keeps its Event Log position in the outbox database (`outbox.db` in the data directory), so the position moves forward only when the requests carrying the events are stored. If a read fails, the next read reads the same records again. A burst of more than 500 records is delivered over several reads, oldest first. If the stored position is damaged or lies in the future, the agent logs one warning and reads back seven days; Observe drops repeats by their dedup key, so this does not duplicate events.

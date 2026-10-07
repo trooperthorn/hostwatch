@@ -1,7 +1,7 @@
-"""Durable outbox tests: restarts, outages, overflow, dead letters and markers.
+"""Durable outbox tests: restarts, outages, limits, dead letters and markers.
 
-Each test that simulates a restart builds a second Agent on the same data
-directory, which is what a restarted process does.
+Each test that simulates a restart builds a second Agent on the same data directory, which is what
+a restarted process does. Observe is played by FakeObserve (agent_helpers.py).
 """
 
 from __future__ import annotations
@@ -12,15 +12,18 @@ import sqlite3
 
 import httpx
 import pytest
+from agent_helpers import FakeObserve, collect_once, drain_logs, event, event_cycle
 
+import hostwatch.agent as agent_mod
+from hostwatch import otlp, tiers
 from hostwatch.agent import Agent
 from hostwatch.config import Config
-from hostwatch.events.journal import JournalWatcher
+from hostwatch.events.journal import BackgroundJournal, JournalWatcher
+from hostwatch.model import Sample, SourceStatus
 from hostwatch.outbox import Outbox
-from hostwatch.schema import Batch, Event, Sample, SourceStatus
 
-TOKEN = "t" * 32
 OLD, NEW = "aaaaaaaa-0000-0000-0000-000000000001", "bbbbbbbb-0000-0000-0000-000000000002"
+RES = {"host.name": "h"}
 
 
 def make_cfg(tmp_path, **over):
@@ -29,21 +32,11 @@ def make_cfg(tmp_path, **over):
     (procfs / "sys/kernel/random/boot_id").write_text(NEW + "\n")
     sysfs.mkdir(exist_ok=True)
     data.mkdir(exist_ok=True)
-    args = dict(procfs=procfs, sysfs=sysfs, data_dir=data, ingest_token=TOKEN, host_name="h",
-                pstore=tmp_path / "none", journal=tmp_path / "none", rasdaemon_db=tmp_path / "none.db")
+    args = dict(procfs=procfs, sysfs=sysfs, data_dir=data, ingest_key="k" * 24, host_name="h",
+                observe_url="http://observe.test", pstore=tmp_path / "none", journal=tmp_path / "none",
+                rasdaemon_db=tmp_path / "none.db")
     args.update(over)
     return Config(**args)
-
-
-def hub_client(status=200, log=None):
-    def handler(request):
-        body = json.loads(request.content)
-        if log is not None:
-            log.append(body)
-        code = status(body) if callable(status) else status
-        return httpx.Response(code, json={})
-
-    return httpx.Client(transport=httpx.MockTransport(handler))
 
 
 def down_client():
@@ -53,49 +46,93 @@ def down_client():
     return httpx.Client(transport=httpx.MockTransport(refuse))
 
 
-def event(key, source="journal"):
-    return Event(kind="x", severity="info", source=source, ts=1.0, title="t", dedup_key=key)
+def requests_for(entry, n_points=0, n_records=0, **kw):
+    pts = [pt(i) for i in range(n_points)]
+    recs = [rec(i) for i in range(n_records)]
+    return [*otlp.build_metrics_requests(entry, RES, pts, **kw).requests,
+            *otlp.build_logs_requests(entry, RES, recs, **kw).requests]
 
 
-def batch(n, samples=0, events=()):
-    return Batch(agent_version="t", host="h", platform="x86", sent_at=float(n), sources=[],
-                 samples=[Sample(source="s", metric="m", value=1.0, ts=float(n)) for _ in range(samples)],
-                 events=list(events), batch_id=f"b{n}")
+def pt(i):
+    from hostwatch.otel_map import GAUGE, Point
+    return Point("hostwatch.collector.cpu", "hw.cpu.utilization", "1", GAUGE, 0.5, 1700000000.0 + i, {})
 
 
-def test_restart_during_hub_outage_resends_queued_events(tmp_path):
+def rec(i):
+    from hostwatch.otel_map import LogRecord
+    return LogRecord("hostwatch.collector.journal", 1700000000.0 + i, "hostwatch.x", 13, "WARN", "b",
+                     {"observe.dedup_key": f"k{i}"})
+
+
+def queued(agent):
+    """(path, Idempotency-Key, body) of every request in the outbox, oldest first, without removing any."""
+    rows = sqlite3.connect(agent.cfg.data_dir / "outbox.db").execute(
+        "SELECT path, headers, body FROM requests ORDER BY seq").fetchall()
+    return [(p, json.loads(h)["Idempotency-Key"], bytes(b)) for p, h, b in rows]
+
+
+# -- replay -----------------------------------------------------------------------------------
+
+def test_replay_after_restart_sends_each_request_once_with_the_same_key_and_body(tmp_path):
     cfg = make_cfg(tmp_path)
     first = Agent(cfg)
     first.detect()
-    first.outbox.stage("k", "v")
-    first.outbox.enqueue(batch(1, events=[event("e1")]))
-    first.cycle()
-    try:
-        first.flush(down_client())
-    except httpx.ConnectError:
-        pass
-    assert first.outbox.depth() == 2
+    first.run_tier(tiers.DEVICE_METRICS)
+    first.run_tier(tiers.AVAILABILITY)
+    first.outbox.enqueue(requests_for("ev1", n_records=2), "ev1")
+    before = queued(first)
+    assert len(before) >= 2
+    with pytest.raises(httpx.ConnectError):
+        first.flush(down_client())  # the outage: nothing was delivered
+    assert queued(first) == before
     first.outbox.close()
     second = Agent(cfg)  # restart
-    assert second.outbox.depth() == 2 and second.outbox.get("k") == "v"
-    received: list = []
-    second.flush(hub_client(log=received))
+    observe = FakeObserve()
+    with observe.client() as client:
+        second.flush(client)
+        second.flush(client)  # nothing is left, so nothing more is sent
+    assert [(r.url.path, r.headers["idempotency-key"], r.content) for r in observe.posts] == before
+    assert len({k for _, k, _ in before}) == len(before)
     assert second.outbox.depth() == 0
-    assert received[0]["batch_id"] == "b1" and received[0]["events"][0]["dedup_key"] == "e1"
-    assert len(received) == 2
+    assert all(r.headers["authorization"] == "Bearer " + "k" * 24 for r in observe.posts)
 
 
-def test_batch_stays_queued_on_5xx_and_is_acked_only_on_2xx(tmp_path):
+def test_a_replay_of_the_same_request_uses_the_same_key_even_when_sent_twice(tmp_path):
+    """A 5xx after Observe stored the data makes the agent send the request again: same key."""
     agent = Agent(make_cfg(tmp_path))
-    agent.outbox.enqueue(batch(1))
-    try:
-        agent.flush(hub_client(status=503))
-    except httpx.HTTPStatusError:
-        pass
+    agent.outbox.enqueue(requests_for("e1", n_points=3), "e1")
+    observe = FakeObserve(answers=[503, 200])
+    with observe.client() as client:
+        with pytest.raises(agent_mod.DeliveryError):
+            agent.flush(client)
+        agent.flush(client)
+    assert len(observe.posts) == 2
+    assert observe.posts[0].headers["idempotency-key"] == observe.posts[1].headers["idempotency-key"]
+    assert observe.posts[0].content == observe.posts[1].content
+
+
+def test_the_credential_is_never_written_to_the_outbox(tmp_path):
+    cfg = make_cfg(tmp_path)
+    agent = Agent(cfg)
+    agent.run_tier(tiers.AVAILABILITY)
+    agent.outbox.close()
+    raw = (cfg.data_dir / "outbox.db").read_bytes()
+    assert b"k" * 24 not in raw and b"Authorization" not in raw
+
+
+def test_request_stays_queued_on_5xx_and_is_acked_only_on_2xx(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    agent.outbox.enqueue(requests_for("e1", n_points=1), "e1")
+    with FakeObserve(answers=[503]).client() as client:
+        with pytest.raises(agent_mod.DeliveryError):
+            agent.flush(client)
     assert agent.outbox.depth() == 1
-    agent.flush(hub_client(status=200))
+    with FakeObserve(answers=[200]).client() as client:
+        agent.flush(client)
     assert agent.outbox.depth() == 0
 
+
+# -- markers committed with their requests -----------------------------------------------------
 
 class FakeReader:
     def __init__(self, entries):
@@ -123,28 +160,25 @@ ENTRIES = [{"__CURSOR": "c1", "__REALTIME_TIMESTAMP": "1000000", "MESSAGE": "ata
 
 def test_journal_entries_read_before_a_crash_are_not_skipped(tmp_path):
     crashed = journal_agent(tmp_path, ENTRIES)
-    assert len(crashed.collect_once().events) == 2
-    # Crash after reading but before the batch reached the outbox: the cursor
-    # was only staged, so the restarted agent reads the entries again.
+    assert len(collect_once(crashed).events) == 2
+    # Crash after reading but before the requests reached the outbox: the cursor was only staged,
+    # so the restarted agent reads the entries again.
     crashed.outbox.close()
     again = journal_agent(tmp_path, ENTRIES)
-    batch_two = again.collect_once()
-    assert [e.dedup_key for e in batch_two.events] == ["journal:c1", "journal:c2"]
-    again.outbox.enqueue(batch_two)
+    assert event_cycle(again) is True
     # Crash after enqueue: the events are in the outbox and the cursor moved with them.
     again.outbox.close()
     final = journal_agent(tmp_path, ENTRIES)
-    assert final.collect_once().events == []
-    received: list = []
-    final.flush(hub_client(log=received))
-    assert [e["dedup_key"] for e in received[0]["events"]] == ["journal:c1", "journal:c2"]
+    assert collect_once(final).events == []
+    keys = [r["dedup_key"] for r in drain_logs(final)]
+    assert keys == ["journal:c1", "journal:c2"]
 
 
 def test_legacy_journal_cursor_file_is_imported(tmp_path):
     (tmp_path / "data").mkdir()
     (tmp_path / "data/journal.cursor").write_text("c1")
     agent = journal_agent(tmp_path, ENTRIES)
-    assert [e.dedup_key for e in agent.collect_once().events] == ["journal:c2"]
+    assert [e.dedup_key for e in collect_once(agent).events] == ["journal:c2"]
 
 
 def test_pstore_sent_keys_survive_restart(tmp_path):
@@ -154,15 +188,14 @@ def test_pstore_sent_keys_survive_restart(tmp_path):
     cfg = make_cfg(tmp_path, pstore=pstore)
     first = Agent(cfg)
     first.detect()
-    assert len([e for e in first.collect_once().events if e.source == "pstore"]) == 1
-    first.cycle()  # the sent keys are committed with this batch
+    assert event_cycle(first) is True  # the sent keys are committed with the logs request
     first.outbox.close()
     second = Agent(cfg)
     second.detect()
-    assert [e for e in second.collect_once().events if e.source == "pstore"] == []
+    assert [e for e in collect_once(second).events if e.source == "pstore"] == []
 
 
-def test_rasdaemon_high_water_commits_with_the_batch(tmp_path):
+def test_rasdaemon_high_water_commits_with_the_requests(tmp_path):
     db = tmp_path / "ras.db"
     conn = sqlite3.connect(db)
     conn.execute("CREATE TABLE mc_event (id INTEGER PRIMARY KEY, timestamp TEXT, err_type TEXT, err_msg TEXT)")
@@ -171,76 +204,13 @@ def test_rasdaemon_high_water_commits_with_the_batch(tmp_path):
     conn.close()
     cfg = make_cfg(tmp_path, rasdaemon_db=db)
     lost = Agent(cfg)
-    assert len([e for e in lost.collect_once().events if e.source == "rasdaemon"]) == 1
+    assert len([e for e in collect_once(lost).events if e.source == "rasdaemon"]) == 1
     lost.outbox.close()  # crashed before enqueue
     kept = Agent(cfg)
-    b = kept.collect_once()
-    assert len([e for e in b.events if e.source == "rasdaemon"]) == 1
-    kept.outbox.enqueue(b)
+    assert event_cycle(kept) is True
     kept.outbox.close()
     final = Agent(cfg)
-    assert [e for e in final.collect_once().events if e.source == "rasdaemon"] == []
-
-
-def test_overflow_drops_samples_before_events_and_reports_count(tmp_path, caplog):
-    cfg = make_cfg(tmp_path)
-    agent = Agent(cfg)
-    agent.outbox.close()
-    agent.outbox = Outbox(cfg.data_dir / "outbox.db", max_batches=3)
-    agent.outbox.enqueue(batch(1, samples=4, events=[event("keep-me")]))
-    with caplog.at_level(logging.WARNING, logger="hostwatch.outbox"):
-        for n in range(2, 7):
-            agent.outbox.enqueue(batch(n, samples=2))
-    assert agent.outbox.depth() == 3
-    assert agent.outbox.dropped_total() == 4 + 2 + 2
-    sent: list = []
-    agent.flush(hub_client(log=sent))
-    keys = [e["dedup_key"] for b in sent for e in b["events"]]
-    assert keys == ["keep-me"]  # the event outlived the batch that first carried it
-    assert all(b["samples"] for b in sent)  # what remains are the newest samples
-    assert any("dropped" in r.getMessage() for r in caplog.records)
-
-
-def test_overflow_is_reported_as_outbox_source_status(tmp_path):
-    cfg = make_cfg(tmp_path)
-    agent = Agent(cfg)
-    agent.outbox.close()
-    agent.outbox = Outbox(cfg.data_dir / "outbox.db", max_batches=2)
-    for n in range(1, 5):
-        agent.outbox.enqueue(batch(n, samples=3))
-    out = agent.collect_once()
-    status = next(s for s in out.sources if s.source == "outbox")
-    assert status.available is False and "6 sample(s) dropped" in status.reason
-    agent.flush(hub_client())
-    agent.outbox.enqueue(batch(9))
-    agent.collect_once()
-    assert agent.status["outbox"].available is True  # drained, so the drop run is over
-
-
-def test_400_dead_letters_the_batch_and_the_next_is_sent(tmp_path, caplog):
-    agent = Agent(make_cfg(tmp_path))
-    agent.outbox.enqueue(batch(1, events=[event("bad")]))
-    agent.outbox.enqueue(batch(2, events=[event("good")]))
-    sent: list = []
-    with caplog.at_level(logging.ERROR, logger="hostwatch.outbox"):
-        agent.flush(hub_client(status=lambda body: 400 if body["batch_id"] == "b1" else 200, log=sent))
-    assert [b["batch_id"] for b in sent] == ["b1", "b2"]
-    assert agent.outbox.depth() == 0 and agent.outbox.dead_letter_count() == 1
-    assert any("400" in r.getMessage() for r in caplog.records)
-    agent.collect_once()
-    assert "dead-letter" in agent.status["outbox"].reason
-    row = sqlite3.connect(tmp_path / "data/outbox.db").execute("SELECT batch_id, status FROM dead_letters").fetchone()
-    assert row == ("b1", 400)
-
-
-def test_401_keeps_the_batch(tmp_path):
-    agent = Agent(make_cfg(tmp_path))
-    agent.outbox.enqueue(batch(1))
-    try:
-        agent.flush(hub_client(status=401))
-    except httpx.HTTPStatusError:
-        pass
-    assert agent.outbox.depth() == 1 and agent.outbox.dead_letter_count() == 0
+    assert [e for e in collect_once(final).events if e.source == "rasdaemon"] == []
 
 
 def boot_cfg(tmp_path):
@@ -255,74 +225,268 @@ def test_boot_event_survives_agent_restart_before_delivery(tmp_path):
     first = Agent(cfg)
     first.start_boot_check()
     first.heartbeat.beat()  # the heartbeat now names the new boot
-    first.outbox.close()    # crash before any batch was built
+    first.outbox.close()    # crash before any request was built
     second = Agent(cfg)
     second.start_boot_check()  # same boot, so nothing is classified again
-    (ev,) = second.collect_once().events
+    (ev,) = collect_once(second).events
     assert ev.kind == "boot.agent_stopped" and ev.dedup_key == f"boot:{NEW}"
 
 
-def test_a_cycle_that_raises_is_followed_by_a_normal_cycle(tmp_path, caplog):
-    agent = Agent(make_cfg(tmp_path))
-    real = agent.collect_once
-    calls = {"n": 0}
+# -- failed units of work ----------------------------------------------------------------------
 
-    def flaky():
+def test_an_event_cycle_that_raises_is_followed_by_a_normal_cycle(tmp_path, caplog):
+    agent = Agent(make_cfg(tmp_path))
+    real, calls = agent.event_cycle, {"n": 0}
+
+    def flaky(watch):
         calls["n"] += 1
         if calls["n"] == 1:
             raise RuntimeError("boom")
-        return real()
+        return real(watch)
 
-    agent.collect_once = flaky
+    agent.event_cycle = flaky
     with caplog.at_level(logging.ERROR, logger="hostwatch.agent"):
-        assert agent.safe_cycle() is False
-    assert any("cycle failed" in r.getMessage() for r in caplog.records)
+        assert event_cycle(agent) is False
+    assert any("event read failed" in r.getMessage() for r in caplog.records)
     assert agent.status["agent"].available is False and "boom" in agent.status["agent"].reason
     assert agent.outbox.depth() == 0
-    assert agent.safe_cycle() is True
-    assert agent.outbox.depth() == 1 and agent.status["agent"].available is True
+    assert event_cycle(agent) is True and agent.status["agent"].available is True
 
 
 def test_events_read_in_a_failed_cycle_are_not_lost(tmp_path):
     agent = Agent(make_cfg(tmp_path))
-    fake = event("lost-1", source="fake")
+    fake = event(key="lost-1", source="fake")
     agent.event_sources = {"fake": lambda: (SourceStatus(source="fake", available=True), [fake])}
     real = agent.outbox.enqueue
-    agent.outbox.enqueue = lambda b: (_ for _ in ()).throw(sqlite3.OperationalError("disk full"))
-    assert agent.safe_cycle() is False
+    agent.outbox.enqueue = lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("disk full"))
+    assert event_cycle(agent) is False
     agent.outbox.enqueue = real
-    assert agent.safe_cycle() is True
-    (_, queued) = agent.outbox.peek()
-    assert [e.dedup_key for e in queued.events] == ["lost-1"]
+    assert event_cycle(agent) is True
+    assert [r["dedup_key"] for r in drain_logs(agent)] == ["lost-1"]
 
 
-def test_404_stays_queued_and_is_retried(tmp_path):
+def test_threshold_event_is_not_lost_when_the_tier_run_fails_after_it_opened(tmp_path):
     agent = Agent(make_cfg(tmp_path))
-    agent.outbox.enqueue(batch(1, events=[event("k")]))
-    for _ in range(2):
-        with pytest.raises(httpx.HTTPStatusError):
-            agent.flush(hub_client(status=404))
-    assert agent.outbox.depth() == 1 and agent.outbox.dead_letter_count() == 0
-    sent: list = []
-    agent.flush(hub_client(log=sent))
-    assert [b["batch_id"] for b in sent] == ["b1"] and agent.outbox.depth() == 0
+    agent.detect()
+    samples = [Sample(source="mdraid", metric="degraded", value=1, labels={"array": "md0"}, ts=1.0)]
+    agent.collect_samples = lambda tier=None, watched=False: samples
+    real = agent.outbox.enqueue
+    agent.outbox.enqueue = lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("disk full"))
+    assert agent._guard("poll", lambda: agent.run_tier(tiers.STORAGE_HEALTH)) is False
+    agent.outbox.enqueue = real
+    assert agent._guard("poll", lambda: agent.run_tier(tiers.STORAGE_HEALTH)) is True
+    names = [r["event"] for r in drain_logs(agent)]
+    assert names.count("hostwatch.md.degraded") == 1
 
 
-def test_422_dead_letters_the_batch(tmp_path):
+def test_threshold_state_survives_a_restart_so_an_open_condition_is_not_repeated(tmp_path):
+    cfg = make_cfg(tmp_path)
+    samples = [Sample(source="mdraid", metric="degraded", value=1, labels={"array": "md0"}, ts=1.0)]
+    first = Agent(cfg)
+    first.detect()
+    first.collect_samples = lambda tier=None, watched=False: samples
+    first.run_tier(tiers.STORAGE_HEALTH)
+    assert [r["event"] for r in drain_logs(first)] == ["hostwatch.md.degraded"]
+    first.outbox.close()
+    second = Agent(cfg)
+    second.detect()
+    second.collect_samples = lambda tier=None, watched=False: samples
+    second.run_tier(tiers.STORAGE_HEALTH)
+    assert drain_logs(second) == []
+
+
+ENTRIES_FOR_REREAD = ENTRIES
+
+
+def test_cycle_that_fails_after_the_journal_read_rereads_the_same_entries(tmp_path, monkeypatch):
+    jdir = tmp_path / "journal"
+    jdir.mkdir()
+    (jdir / "system.journal").write_bytes(b"x")
+    agent = Agent(make_cfg(tmp_path, journal=jdir))
+    watcher = JournalWatcher(jdir, agent.cfg.data_dir, FakeReader(ENTRIES_FOR_REREAD), markers=agent.outbox)
+    background = agent.journal = BackgroundJournal(watcher)
+    agent.event_sources = {"journal": background.read}
+    agent.detect()
+
+    def cycle_and_settle():
+        ok = event_cycle(agent)
+        if background._thread is not None:
+            background._thread.join()
+        return ok
+
+    cycle_and_settle()  # starts the first worker
+    real_enqueue = agent.outbox.enqueue
+    state = {"fail": True}
+
+    def flaky(requests, entry_id):
+        if state["fail"] and any(r.signal == "logs" for r in requests):
+            state["fail"] = False
+            raise RuntimeError("disk full")
+        real_enqueue(requests, entry_id)
+
+    monkeypatch.setattr(agent.outbox, "enqueue", flaky)
+    assert cycle_and_settle() is False  # the cycle read the entries, then failed
+    assert agent.outbox.get("journal.cursor") is None
+    for _ in range(3):
+        assert cycle_and_settle() is True
+    assert [r["dedup_key"] for r in drain_logs(agent)] == ["journal:c1", "journal:c2"]
+    assert agent.outbox.get("journal.cursor") == "c2"
+
+
+# -- limits ------------------------------------------------------------------------------------
+
+def counted(box, signal):
+    return box._db.execute("SELECT COUNT(*) FROM requests WHERE signal=?", (signal,)).fetchone()[0]
+
+
+def test_over_the_count_limit_drops_metrics_before_logs_and_counts_them(tmp_path, caplog):
+    box = Outbox(tmp_path / "data/o.db", max_requests=4)
+    box.enqueue(requests_for("e0", n_records=2), "e0")
+    with caplog.at_level(logging.WARNING, logger="hostwatch.outbox"):
+        for n in range(1, 7):
+            box.enqueue(requests_for(f"m{n}", n_points=3), f"m{n}")
+    assert box.depth() == 4 and counted(box, "logs") == 1
+    assert box.dropped_total() == 3 and box.dropped_points_total() == 9 and box.dropped_records_total() == 0
+    assert any("dropped" in r.getMessage() for r in caplog.records)
+    assert box.peek().signal == "logs"  # the event outlived every metrics request that came after it
+
+
+def test_logs_are_dropped_only_when_no_metrics_request_is_left(tmp_path):
+    box = Outbox(tmp_path / "data/o.db", max_requests=2)
+    for n in range(4):
+        box.enqueue(requests_for(f"l{n}", n_records=1), f"l{n}")
+    assert box.depth() == 2 and box.dropped_records_total() == 2
+    assert [r["attrs"]["observe.dedup_key"] for r in _logs_in(box)] == ["k0", "k0"]
+
+
+def _logs_in(box):
+    out = []
+    from agent_helpers import log_records, request_json
+    while (req := box.peek()) is not None:
+        out.extend(log_records(request_json(req)))
+        box.ack(req.seq)
+    return out
+
+
+def test_over_the_byte_limit_drops_the_oldest_metrics_first(tmp_path):
+    one = requests_for("a", n_points=50)[0]
+    box = Outbox(tmp_path / "data/o.db", max_bytes=len(one.body) * 2 + 10)
+    for n in range(5):
+        box.enqueue(requests_for(f"m{n}", n_points=50), f"m{n}")
+    assert box.depth() == 2 and box.size_bytes() <= box.max_bytes
+    assert [json.loads(h)["Idempotency-Key"] for (h,) in box._db.execute(
+        "SELECT headers FROM requests ORDER BY seq")] == ["hw-m3-m0", "hw-m4-m0"]
+
+
+def test_old_requests_are_dropped_by_age_with_metrics_expiring_before_logs(tmp_path):
+    now = [1000.0]
+    box = Outbox(tmp_path / "data/o.db", max_metrics_age_s=100, max_logs_age_s=1000, clock=lambda: now[0])
+    box.enqueue(requests_for("m", n_points=2), "m")
+    box.enqueue(requests_for("l", n_records=1), "l")
+    now[0] += 200
+    box.prune()
+    assert counted(box, "metrics") == 0 and counted(box, "logs") == 1
+    assert box.dropped_points_total() == 2
+    now[0] += 900
+    box.prune()
+    assert box.depth() == 0 and box.dropped_records_total() == 1
+
+
+def test_a_failed_marker_write_leaves_no_request_behind(tmp_path):
+    box = Outbox(tmp_path / "data/o.db")
+    box.stage("k", "v")
+    box._db.execute("DROP TABLE markers")
+    with pytest.raises(sqlite3.OperationalError):
+        box.enqueue(requests_for("e", n_points=1), "e")
+    assert box.depth() == 0
+
+
+def test_overflow_is_reported_as_outbox_source_status(tmp_path):
+    cfg = make_cfg(tmp_path)
+    agent = Agent(cfg)
+    agent.outbox.close()
+    agent.outbox = Outbox(cfg.data_dir / "outbox.db", max_requests=2)
+    for n in range(1, 5):
+        agent.outbox.enqueue(requests_for(f"m{n}", n_points=3), f"m{n}")
+    agent._outbox_status()
+    status = agent.status["outbox"]
+    assert status.available is False and "6 data point(s)" in status.reason
+    with FakeObserve().client() as client:
+        agent.flush(client)
+    agent.outbox.enqueue(requests_for("m9", n_points=1), "m9")
+    agent._outbox_status()
+    assert agent.status["outbox"].available is True  # drained, so the drop run is over
+
+
+# -- dead letters ------------------------------------------------------------------------------
+
+@pytest.mark.parametrize("code", [400, 409, 413, 415, 422])
+def test_a_status_that_can_never_succeed_dead_letters_the_request_and_the_next_is_sent(tmp_path, code, caplog):
     agent = Agent(make_cfg(tmp_path))
-    agent.outbox.enqueue(batch(1))
-    agent.flush(hub_client(status=422))
+    agent.outbox.enqueue(requests_for("bad", n_points=1), "bad")
+    agent.outbox.enqueue(requests_for("good", n_points=1), "good")
+    observe = FakeObserve(answers=[code, 200])
+    with caplog.at_level(logging.ERROR, logger="hostwatch.outbox"), observe.client() as client:
+        agent.flush(client)
+    assert [r.headers["idempotency-key"] for r in observe.posts] == ["hw-bad-m0", "hw-good-m0"]
     assert agent.outbox.depth() == 0 and agent.outbox.dead_letter_count() == 1
+    assert any(str(code) in r.getMessage() for r in caplog.records)
+    agent._outbox_status()
+    assert "dead-letter" in agent.status["outbox"].reason
+    row = sqlite3.connect(tmp_path / "data/outbox.db").execute("SELECT entry_id, status FROM dead_letters").fetchone()
+    assert row == ("bad", code)
+
+
+@pytest.mark.parametrize("code", [500, 501, 502, 503, 504, 408, 429, 401, 403, 404])
+def test_statuses_about_observe_or_the_key_never_dead_letter(tmp_path, code):
+    agent = Agent(make_cfg(tmp_path))
+    agent.outbox.enqueue(requests_for("e", n_points=1), "e")
+    for _ in range(4):
+        with FakeObserve(answers=[code]).client() as client:
+            with pytest.raises(agent_mod.DeliveryError) as err:
+                agent.flush(client)
+        assert err.value.status == code
+    assert agent.outbox.depth() == 1 and agent.outbox.dead_letter_count() == 0
 
 
 def test_network_errors_never_dead_letter(tmp_path):
     agent = Agent(make_cfg(tmp_path))
-    agent.outbox.enqueue(batch(1))
+    agent.outbox.enqueue(requests_for("e", n_points=1), "e")
     for _ in range(8):
         with pytest.raises(httpx.ConnectError):
             agent.flush(down_client())
     assert agent.outbox.depth() == 1 and agent.outbox.dead_letter_count() == 0
 
+
+def test_dead_letter_table_is_capped(tmp_path, monkeypatch):
+    import hostwatch.outbox as ob
+    monkeypatch.setattr(ob, "MAX_DEAD_LETTERS", 2)
+    agent = Agent(make_cfg(tmp_path))
+    for n in range(5):
+        agent.outbox.enqueue(requests_for(f"e{n}", n_points=1), f"e{n}")
+        agent.outbox.dead_letter(agent.outbox.peek().seq, 400)
+    assert agent.outbox.dead_letter_count() == 2
+
+
+def test_a_row_with_undecodable_headers_is_dead_lettered_and_later_rows_deliver(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    for n in range(3):
+        agent.outbox.enqueue(requests_for(f"e{n}", n_points=1), f"e{n}")
+    db = sqlite3.connect(tmp_path / "data/outbox.db")
+    db.execute("UPDATE requests SET headers='{not json' WHERE entry_id='e0'")
+    db.commit()
+    db.close()
+    observe = FakeObserve()
+    with observe.client() as client:
+        agent.flush(client)
+    assert [r.headers["idempotency-key"] for r in observe.posts] == ["hw-e1-m0", "hw-e2-m0"]
+    assert agent.outbox.depth() == 0 and agent.outbox.dead_letter_count() == 1
+    row = sqlite3.connect(tmp_path / "data/outbox.db").execute(
+        "SELECT entry_id, status, error FROM dead_letters").fetchone()
+    assert row[0] == "e0" and row[1] == 0 and "undecodable" in row[2]
+
+
+# -- the file itself ---------------------------------------------------------------------------
 
 def test_garbage_outbox_is_quarantined_and_the_agent_starts(tmp_path, caplog):
     cfg = make_cfg(tmp_path)
@@ -332,106 +496,10 @@ def test_garbage_outbox_is_quarantined_and_the_agent_starts(tmp_path, caplog):
     assert any("could not be opened" in r.getMessage() for r in caplog.records)
     moved = list(cfg.data_dir.glob("outbox.db.corrupt-*"))
     assert len(moved) == 1
-    agent.outbox.enqueue(batch(1))
+    agent.outbox.enqueue(requests_for("e", n_points=1), "e")
     assert agent.outbox.depth() == 1
-    agent.collect_once()
+    agent._outbox_status()
     assert "corrupt" in agent.status["outbox"].reason and moved[0].name in agent.status["outbox"].reason
-
-
-def md_agent(tmp_path):
-    cfg = make_cfg(tmp_path)
-    (cfg.sysfs / "block/md0/md").mkdir(parents=True)
-    (cfg.sysfs / "block/md0/md/degraded").write_text("1\n")
-    agent = Agent(cfg)
-    agent.detect()
-    return agent
-
-
-def seed_client(rows):
-    def handler(request):
-        return httpx.Response(200, json=rows)
-
-    return httpx.Client(transport=httpx.MockTransport(handler))
-
-
-def test_threshold_events_wait_for_a_delayed_seed_and_do_not_duplicate(tmp_path):
-    from hostwatch.events.thresholds import ThresholdEngine
-
-    prior = ThresholdEngine().evaluate(
-        [Sample(source="mdraid", metric="degraded", value=1, labels={"array": "md0"}, ts=1.0)], [], now=1.0)
-    stored = [{**e.model_dump(), "id": 1} for e in prior]
-    agent = md_agent(tmp_path)
-    assert agent.seed_thresholds(down_client()) is False
-    held = agent.collect_once()
-    assert not [e for e in held.events if e.source == "thresholds"]
-    assert agent.seed_thresholds(seed_client(stored)) is True
-    after = agent.collect_once()
-    assert not [e for e in after.events if e.kind == "md.degraded"]
-
-
-def test_threshold_event_would_be_emitted_without_a_seed_of_the_open_condition(tmp_path):
-    """Control for the test above: seeded from an empty hub, the same sample
-    does produce md.degraded, so the held-back result is meaningful."""
-    agent = md_agent(tmp_path)
-    assert agent.seed_thresholds(seed_client([])) is True
-    assert [e for e in agent.collect_once().events if e.kind == "md.degraded"]
-
-
-def test_failed_seed_is_reported_in_a_source_status_and_cleared_when_it_succeeds(tmp_path):
-    agent = md_agent(tmp_path)
-    agent._try_seed(down_client())
-    assert not agent.status["thresholds"].available
-    assert "held back" in agent.status["thresholds"].reason
-    agent._next_seed = 0.0
-    agent._try_seed(seed_client([]))
-    assert agent.seeded and "thresholds" not in agent.status
-
-
-def test_seed_and_flush_retries_back_off_and_recover(tmp_path):
-    agent = Agent(make_cfg(tmp_path, interval_s=15.0))
-    agent._try_seed(down_client())
-    assert agent._seed_failures == 1 and agent._next_seed > 0
-    first = agent._next_seed
-    agent._try_seed(seed_client([]))  # still inside the backoff window, so no attempt is made
-    assert not agent.seeded and agent._seed_failures == 1 and agent._next_seed == first
-    agent._next_seed = 0.0
-    agent._try_seed(seed_client([]))
-    assert agent.seeded
-
-    agent.outbox.enqueue(batch(1))
-    agent._try_flush(down_client())
-    assert agent._flush_failures == 1 and agent._next_flush > 0
-    agent._try_flush(hub_client())  # backoff not elapsed, nothing is sent
-    assert agent.outbox.depth() == 1
-    agent._next_flush = 0.0
-    agent._try_flush(hub_client())
-    assert agent.outbox.depth() == 0 and agent._flush_failures == 0
-
-
-@pytest.mark.parametrize("code", [500, 501, 502, 503, 504, 408, 429, 401, 404])
-def test_hub_side_statuses_never_dead_letter(tmp_path, code):
-    agent = Agent(make_cfg(tmp_path))
-    agent.outbox.enqueue(batch(1))
-    for _ in range(8):
-        with pytest.raises(httpx.HTTPStatusError):
-            agent.flush(hub_client(status=code))
-    assert agent.outbox.depth() == 1 and agent.outbox.dead_letter_count() == 0
-
-
-def test_quarantined_batches_are_not_trimmed_by_the_dead_letter_cap(tmp_path, monkeypatch):
-    import hostwatch.outbox as ob
-
-    monkeypatch.setattr(ob, "MAX_DEAD_LETTERS", 2)
-    agent = Agent(make_cfg(tmp_path))
-    agent.outbox.enqueue(batch(1))
-    seq, _ = agent.outbox.peek()
-    agent.outbox.dead_letter(seq, 500, quarantine=True)
-    for n in range(2, 7):
-        agent.outbox.enqueue(batch(n))
-        agent.outbox.dead_letter(agent.outbox.peek()[0], 400)
-    rows = sqlite3.connect(tmp_path / "data/outbox.db").execute(
-        "SELECT batch_id FROM dead_letters ORDER BY id").fetchall()
-    assert ("b1",) in rows and len(rows) == 3
 
 
 def test_locked_outbox_is_not_replaced(tmp_path, monkeypatch):
@@ -457,36 +525,25 @@ def test_no_stale_sidecar_files_remain_beside_a_fresh_outbox(tmp_path):
     box = Outbox(path)
     assert box.recovered_from is not None
     assert not (tmp_path / "data/outbox.db-journal").exists() and not (tmp_path / "data/outbox.db-wal").exists()
-    # SQLite may itself discard an invalid sidecar while probing the file; either
-    # way none may be left next to the fresh database.
-    box.enqueue(batch(1))
+    box.enqueue(requests_for("e", n_points=1), "e")
     assert box.depth() == 1
 
 
-def test_outbox_created_with_the_previous_schema_is_migrated_and_keeps_dead_letters(tmp_path):
+def test_the_old_batch_table_is_dropped_and_markers_are_kept(tmp_path):
     path = tmp_path / "data/outbox.db"
     path.parent.mkdir()
     old = sqlite3.connect(path)
     old.executescript(
-        "CREATE TABLE batches (seq INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, payload TEXT NOT NULL);"
+        "CREATE TABLE batches (seq INTEGER PRIMARY KEY AUTOINCREMENT, payload TEXT NOT NULL);"
+        "INSERT INTO batches (payload) VALUES ('{}');"
         "CREATE TABLE markers (key TEXT PRIMARY KEY, value TEXT NOT NULL);"
-        "CREATE TABLE dead_letters (id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, "
-        "status INTEGER NOT NULL, ts REAL NOT NULL, payload TEXT NOT NULL);"
-        "CREATE TABLE counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);"
-        "INSERT INTO dead_letters (batch_id, status, ts, payload) VALUES ('old-1', 422, 1.0, '{}');"
-        "INSERT INTO markers VALUES ('journal', 'cursor-1');")
+        "INSERT INTO markers VALUES ('journal.cursor', 'cursor-1');")
     old.commit()
     old.close()
     box = Outbox(path)
-    assert box.recovered_from is None
-    assert box.dead_letter_count() == 1
-    assert box.quarantined_total() == 0
-    assert box.get("journal") == "cursor-1"
-    box.enqueue(batch(1))
-    (seq, _) = box.peek()
-    box.dead_letter(seq, 500, quarantine=True)
-    assert box.dead_letter_count() == 2
-    assert box.quarantined_total() == 1
+    assert box.recovered_from is None and box.get("journal.cursor") == "cursor-1"
+    tables = {r[0] for r in sqlite3.connect(path).execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert "batches" not in tables and "requests" in tables
 
 
 def _fail_first_open(monkeypatch):
@@ -537,182 +594,92 @@ def test_failed_sidecar_move_leaves_the_corrupt_file_in_place(tmp_path, monkeypa
     assert path.read_bytes() == b"garbage " * 100
 
 
-def test_threshold_event_is_not_lost_when_the_cycle_fails_after_it_opened(tmp_path):
-    agent = Agent(make_cfg(tmp_path))
-    agent.seeded = True
-    samples = [Sample(source="mdraid", metric="degraded", value=1, labels={"array": "md0"}, ts=1.0)]
-    real_collect = agent.collect_once
-    agent.collectors = []
-    real_eval = agent.thresholds.evaluate
-    agent.thresholds.evaluate = lambda s, st, now=None: real_eval(samples, st)
-    real = agent.outbox.enqueue
-    agent.outbox.enqueue = lambda b: (_ for _ in ()).throw(sqlite3.OperationalError("disk full"))
-    assert agent.safe_cycle() is False
-    agent.outbox.enqueue = real
-    assert agent.safe_cycle() is True
-    kinds = [e.kind for e in agent.outbox.peek()[1].events]
-    assert kinds.count("md.degraded") == 1
-    assert real_collect is not None
+# -- delivery backoff and the loop -------------------------------------------------------------
 
-
-ENTRIES_FOR_REREAD = [
-    {"__CURSOR": "c1", "__REALTIME_TIMESTAMP": "1000000", "MESSAGE": "ata3: hard resetting link"},
-    {"__CURSOR": "c2", "__REALTIME_TIMESTAMP": "2000000", "MESSAGE": "md127: Disk failure on sdc"}]
-
-
-class AfterCursorReader:
-    """Serves entries after the cursor, like journalctl --after-cursor."""
-
-    def __init__(self, entries):
-        self.entries = entries
-
-    def __call__(self, directory, cursor):
-        start = [e["__CURSOR"] for e in self.entries].index(cursor) + 1 if cursor else 0
-        return [json.dumps(e) for e in self.entries[start:]]
-
-
-def _patch_client(monkeypatch):
-    import hostwatch.agent as agent_mod
-
-    real_client = httpx.Client
-    monkeypatch.setattr(agent_mod.httpx, "Client", lambda **_kw: real_client(
-        transport=httpx.MockTransport(lambda r: httpx.Response(200, json={}))))
-
-
-def test_cycle_that_fails_after_the_journal_read_rereads_the_same_entries(tmp_path, monkeypatch):
-    from hostwatch.events.journal import BackgroundJournal
-
-    jdir = tmp_path / "journal"
-    jdir.mkdir()
-    (jdir / "system.journal").write_bytes(b"x")
-    agent = Agent(make_cfg(tmp_path, journal=jdir))
-    watcher = JournalWatcher(jdir, agent.cfg.data_dir, AfterCursorReader(ENTRIES_FOR_REREAD), markers=agent.outbox)
-    background = agent.journal = BackgroundJournal(watcher)
-    agent.event_sources = {"journal": background.read}
-    agent.detect()
-
-    def cycle_and_settle():
-        ok = agent.safe_cycle()
-        if background._thread is not None:
-            background._thread.join()
-        return ok
-
-    cycle_and_settle()  # starts the first worker
-    real_enqueue = agent.outbox.enqueue
-    state = {"fail": True}
-
-    def flaky(batch):
-        if state["fail"] and batch.events:
-            state["fail"] = False
-            raise RuntimeError("disk full")
-        real_enqueue(batch)
-
-    monkeypatch.setattr(agent.outbox, "enqueue", flaky)
-    assert cycle_and_settle() is False  # the cycle read the entries, then failed
-    assert agent.outbox.get("journal.cursor") is None
-    for _ in range(3):
-        assert cycle_and_settle() is True
-    sent: list = []
-    agent.flush(hub_client(log=sent))
-    keys = [e["dedup_key"] for b in sent for e in b["events"]]
-    assert keys == ["journal:c1", "journal:c2"]
-    assert agent.outbox.get("journal.cursor") == "c2"
-
-
-def test_thirty_minute_5xx_episode_keeps_every_batch_and_delivers_after_recovery(tmp_path, monkeypatch):
-    import hostwatch.agent as agent_mod
-
+def test_thirty_minute_5xx_episode_keeps_every_request_and_delivers_after_recovery(tmp_path):
     clock = {"t": 1000.0}
-    monkeypatch.setattr(agent_mod.time, "monotonic", lambda: clock["t"])
-    agent = Agent(make_cfg(tmp_path, interval_s=15.0))
+    agent = Agent(make_cfg(tmp_path), clock=lambda: clock["t"])
     agent.detect()
-    outage = hub_client(status=503)
-    mixed = hub_client(status=500)
+    observe = FakeObserve(answers=[503, 500])
     n = 0
-    while clock["t"] < 1000.0 + 30 * 60:
-        agent.outbox.enqueue(batch(n, events=[event(f"e{n}")]))
-        n += 1
-        agent._try_flush(outage if n % 2 else mixed)
-        clock["t"] += 15.0
-    assert agent.outbox.depth() == n and agent.outbox.dead_letter_count() == 0
-    assert agent._next_flush - clock["t"] <= agent_mod.MAX_BACKOFF_S
-    agent.collect_once()
-    assert "stalled for 1" in agent.status["outbox"].reason
-    sent: list = []
-    clock["t"] = agent._next_flush
-    agent._try_flush(hub_client(log=sent))
-    assert [b["batch_id"] for b in sent] == [f"b{i}" for i in range(n)]
+    with observe.client() as client:
+        while clock["t"] < 1000.0 + 30 * 60:
+            agent.outbox.enqueue(requests_for(f"e{n}", n_records=1), f"e{n}")
+            n += 1
+            agent._try_flush(client)
+            clock["t"] += 15.0
+        assert agent.outbox.depth() == n and agent.outbox.dead_letter_count() == 0
+        assert agent._next_flush - clock["t"] <= agent_mod.MAX_BACKOFF_S
+        agent._outbox_status()
+        assert "stalled for 1" in agent.status["outbox"].reason
+        clock["t"] = agent._next_flush
+        observe.answers = [200]
+        agent._try_flush(client)
     assert agent.outbox.depth() == 0 and agent._stall_since is None
 
 
-def test_corrupt_outbox_row_is_dead_lettered_and_later_rows_deliver(tmp_path):
-    agent = Agent(make_cfg(tmp_path))
-    agent.outbox.enqueue(batch(1, events=[event("a")]))
-    agent.outbox.enqueue(batch(2, events=[event("b")]))
-    agent.outbox.enqueue(batch(3, events=[event("c")]))
-    db = sqlite3.connect(tmp_path / "data/outbox.db")
-    db.execute("UPDATE batches SET payload='{not json' WHERE batch_id='b1'")
-    db.commit()
-    db.close()
-    sent: list = []
-    agent.flush(hub_client(log=sent))
-    assert [b["batch_id"] for b in sent] == ["b2", "b3"]
-    assert agent.outbox.depth() == 0 and agent.outbox.dead_letter_count() == 1
-    row = sqlite3.connect(tmp_path / "data/outbox.db").execute(
-        "SELECT batch_id, status, error FROM dead_letters").fetchone()
-    assert row[0] == "b1" and row[1] == 0 and row[2]
-    agent.collect_once()
-    assert "could not be decoded" in agent.status["outbox"].reason
+def test_a_retry_after_longer_than_the_backoff_is_honoured_up_to_the_cap(tmp_path):
+    clock = {"t": 1000.0}
+    agent = Agent(make_cfg(tmp_path), clock=lambda: clock["t"])
+    agent.outbox.enqueue(requests_for("e", n_points=1), "e")
+    with FakeObserve(answers=[(429, {"Retry-After": "120"}, b"")]).client() as client:
+        agent._try_flush(client)
+    assert agent._next_flush == 1000.0 + 120
+    with FakeObserve(answers=[(503, {"Retry-After": "99999"}, b"")]).client() as client:
+        agent._next_flush = 0.0
+        agent._try_flush(client)
+    assert agent._next_flush == 1000.0 + agent_mod.MAX_BACKOFF_S
 
 
-def test_corrupt_row_at_the_overflow_edge_does_not_fail_enqueue(tmp_path):
-    box = Outbox(tmp_path / "data/o.db", max_batches=2)
-    box.enqueue(batch(1, samples=1))
-    box.enqueue(batch(2, events=[event("b")]))
-    db = sqlite3.connect(tmp_path / "data/o.db")
-    db.execute("UPDATE batches SET payload='garbage' WHERE batch_id='b1'")
-    db.commit()
-    db.close()
-    box.enqueue(batch(3))
-    assert box.undecodable_total() == 1 and box.depth() == 2
+def _patch_client(monkeypatch, observe=None):
+    observe = observe or FakeObserve()
+    real_client = httpx.Client
+    monkeypatch.setattr(agent_mod.httpx, "Client",
+                        lambda **_kw: real_client(transport=httpx.MockTransport(observe.handler)))
+    return observe
+
+
+def _fast_loop(agent):
+    agent.sleep_s = lambda: 0.0
 
 
 def test_start_boot_check_raising_does_not_stop_the_loop(tmp_path, monkeypatch):
-    agent = Agent(make_cfg(tmp_path, interval_s=0.01))
-    cycles = []
+    agent = Agent(make_cfg(tmp_path))
+    ticks = []
 
     def boom():
         raise RuntimeError("classifier exploded")
 
     monkeypatch.setattr(agent, "start_boot_check", boom)
-    real_cycle = agent.safe_cycle
+    real_tick = agent.tick
 
-    def counting():
-        cycles.append(1)
-        if len(cycles) >= 2:
+    def counting(client):
+        ticks.append(1)
+        if len(ticks) >= 2:
             agent.stop()
-        return real_cycle()
+        return real_tick(client)
 
-    monkeypatch.setattr(agent, "safe_cycle", counting)
+    monkeypatch.setattr(agent, "tick", counting)
+    _fast_loop(agent)
     _patch_client(monkeypatch)
-    monkeypatch.setattr(agent, "seed_thresholds", lambda c: (_ for _ in ()).throw(ValueError("bad page")))
     agent.run()
-    assert len(cycles) == 2
+    assert len(ticks) == 2
     assert agent.status["boot"].available is False
     assert "unknown" in agent.status["boot"].reason and "classifier exploded" in agent.status["boot"].reason
 
 
 def test_unexpected_error_in_the_loop_body_is_logged_and_the_loop_continues(tmp_path, monkeypatch):
-    agent = Agent(make_cfg(tmp_path, interval_s=0.01))
+    agent = Agent(make_cfg(tmp_path))
     calls = []
 
-    def flaky_seed(client):
+    def flaky_tick(client):
         calls.append(1)
         if len(calls) == 1:
             raise MemoryError("odd")
         agent.stop()
 
-    monkeypatch.setattr(agent, "_try_seed", flaky_seed)
+    monkeypatch.setattr(agent, "tick", flaky_tick)
+    _fast_loop(agent)
     _patch_client(monkeypatch)
     agent.run()
     assert len(calls) == 2
@@ -721,8 +688,9 @@ def test_unexpected_error_in_the_loop_body_is_logged_and_the_loop_continues(tmp_
 def test_sigterm_during_a_heartbeat_write_completes_shutdown_with_the_clean_flag(tmp_path, monkeypatch):
     from hostwatch.events import boot
 
-    cfg = make_cfg(tmp_path, interval_s=0.01)
+    cfg = make_cfg(tmp_path)
     agent = Agent(cfg)
+    _fast_loop(agent)
     _patch_client(monkeypatch)
     real_write = boot.Heartbeat._write
     seen = {"signalled": False}
@@ -739,11 +707,22 @@ def test_sigterm_during_a_heartbeat_write_completes_shutdown_with_the_clean_flag
     assert boot.load_heartbeat(cfg.data_dir)["agent_stopped_cleanly"] is True
 
 
-def test_first_cycle_detects_sources_on_a_freshly_booted_host(tmp_path, monkeypatch):
-    """Regression: time.monotonic() counts from host boot on Linux, so a host up
-    for less than redetect_s used to skip detection and fail every cycle."""
-    import hostwatch.agent as agent_mod
-    monkeypatch.setattr(agent_mod.time, "monotonic", lambda: 5.0)
-    agent = Agent(make_cfg(tmp_path))
-    agent.collect_once()
+def test_first_poll_detects_sources_on_a_freshly_booted_host(tmp_path):
+    """Regression: a monotonic clock counts from host boot on Linux, so a host up for less than
+    redetect_s used to skip detection and fail every poll."""
+    agent = Agent(make_cfg(tmp_path), clock=lambda: 5.0)
+    collect_once(agent)
     assert all(c.id in agent.status for c in agent.collectors)
+
+
+def test_an_idle_event_read_writes_nothing_to_the_outbox(tmp_path):
+    """The loop reads events every few seconds, and SQLite with synchronous FULL syncs on each write,
+    so a read that found nothing must not open a transaction."""
+    agent = Agent(make_cfg(tmp_path))
+    agent.detect()
+    for _ in range(2):  # the second read sees the `agent` source the first one reported
+        assert event_cycle(agent, watch=True) is True
+    before = agent.outbox._db.total_changes
+    for _ in range(3):
+        assert event_cycle(agent, watch=True) is True
+    assert agent.outbox._db.total_changes == before and agent.outbox.depth() == 0

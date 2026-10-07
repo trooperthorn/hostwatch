@@ -101,10 +101,12 @@ jobs:
           sarif_file: trivy.sarif
 
   smoke:
-    # Runs the built image the way an operator would, bound to 127.0.0.1 on the runner, and
-    # walks the first-run path: bootstrap an admin, log in, create a read:metrics key and read
-    # the Orion hosts list with it. Every secret is masked before it is stored and none is
-    # printed. The data directory is a tmpfs, so nothing outlives the container.
+    # Runs the built image the way an operator would, with the agent pointed at an address that
+    # answers nothing, and waits for the container health check to pass. That proves the agent
+    # starts as the non-root user on a read-only root file system, finds its data directory and
+    # keeps its loop turning while Observe is unreachable, queueing what it collects. The key is
+    # generated and masked before it is stored and is never printed. The data directory is a
+    # tmpfs, so nothing outlives the container.
     needs: build
     runs-on: ubuntu-latest
     steps:
@@ -113,53 +115,32 @@ jobs:
           name: hostwatch-image
           path: ${{ runner.temp }}
       - run: docker load --input "$RUNNER_TEMP/hostwatch-image.tar"
-      - name: Start the hub on 127.0.0.1
+      - name: Start the agent with Observe unreachable
         run: |
           set -euo pipefail
-          ingest_token="$(openssl rand -hex 32)"
-          echo "::add-mask::$ingest_token"
-          printf 'HOSTWATCH_ROLE=hub\nHOSTWATCH_HUB_BIND=127.0.0.1\nHOSTWATCH_HUB_PORT=8090\nHOSTWATCH_INGEST_TOKEN=%s\n' \
-            "$ingest_token" > "$RUNNER_TEMP/smoke.env"
+          ingest_key="$(openssl rand -hex 24)"
+          echo "::add-mask::$ingest_key"
+          printf 'HOSTWATCH_OBSERVE_URL=http://127.0.0.1:9\nHOSTWATCH_INGEST_KEY=%s\nHOSTWATCH_HOST_NAME=smoke\n' \
+            "$ingest_key" > "$RUNNER_TEMP/smoke.env"
           docker run --detach --name hostwatch-smoke --network host \
             --read-only --cap-drop ALL --security-opt no-new-privileges:true \
             --tmpfs /tmp --tmpfs /data:uid=10001,gid=10001,mode=0700 \
             --env-file "$RUNNER_TEMP/smoke.env" hostwatch:ci > /dev/null
           rm -f "$RUNNER_TEMP/smoke.env"
-          for _ in $(seq 1 30); do
-            if curl -fsS -o /dev/null http://127.0.0.1:8090/internal/v1/health; then exit 0; fi
-            sleep 2
-          done
-          echo "The hub did not answer its health endpoint within 60 seconds." >&2
-          docker logs hostwatch-smoke >&2 || true
-          exit 1
-      - name: Bootstrap an admin, log in and read the Orion hosts list
+      - name: Wait for the agent loop to report healthy
         run: |
           set -euo pipefail
-          base=http://127.0.0.1:8090
-          jar="$RUNNER_TEMP/jar.txt"
-          # The bootstrap password is the only line the command writes to stdout.
-          password="$(docker exec hostwatch-smoke python -m hostwatch bootstrap-admin 2>/dev/null)"
-          echo "::add-mask::$password"
-          body="$(PASSWORD="$password" jq -n '{username: "admin", password: env.PASSWORD}')"
-          login="$(printf '%s' "$body" | curl -fsS -c "$jar" -H 'Content-Type: application/json' \
-            --data @- "$base/api/v1/login")"
-          csrf="$(printf '%s' "$login" | jq -r .csrf_token)"
-          echo "::add-mask::$csrf"
-          printf 'X-CSRF-Token: %s\n' "$csrf" > "$RUNNER_TEMP/csrf.hdr"
-          created="$(curl -fsS -b "$jar" -H @"$RUNNER_TEMP/csrf.hdr" -H 'Content-Type: application/json' \
-            --data '{"scopes":["read:metrics"],"owner":"smoke"}' "$base/api/v1/admin/keys")"
-          secret="$(printf '%s' "$created" | jq -r .secret)"
-          echo "::add-mask::$secret"
-          printf 'Authorization: Bearer %s\n' "$secret" > "$RUNNER_TEMP/key.hdr"
-          status="$(curl -sS -o /dev/null -w '%{http_code}' -H @"$RUNNER_TEMP/key.hdr" \
-            "$base/api/v1/orion/hosts")"
-          echo "GET /api/v1/orion/hosts answered $status"
-          test "$status" = 200
+          for _ in $(seq 1 30); do
+            if docker exec hostwatch-smoke python -m hostwatch healthcheck; then exit 0; fi
+            sleep 2
+          done
+          echo "The agent loop did not report healthy within 60 seconds." >&2
+          docker logs hostwatch-smoke >&2 || true
+          exit 1
       - name: Tear down
         if: always()
         run: |
           docker rm --force hostwatch-smoke > /dev/null 2>&1 || true
-          rm -f "$RUNNER_TEMP/jar.txt" "$RUNNER_TEMP/csrf.hdr" "$RUNNER_TEMP/key.hdr"
 
   image:
     needs: [test, scan, smoke]

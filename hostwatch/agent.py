@@ -1,17 +1,26 @@
-"""Agent loop: detect sources, collect, and push batches to the hub.
+"""Agent loop: detect sources, collect them by polling tier, and send OTLP to Observe.
 
-Even in the single-container "all" role the agent reaches the hub over HTTP
-on loopback, so the wire schema is exercised exactly as a remote agent would.
-If the hub is unreachable, batches are held in a bounded in-memory queue and
-sent oldest-first when it returns. The queue is not persisted: an agent
-restart during a hub outage loses at most HOSTWATCH_INTERVAL * MAX_QUEUE.
+Collection is scheduled per tier (tiers.py). Observe tells the agent each tier's rate through
+GET /internal/v1/agent-config; until it answers, and whenever it cannot be reached, the defaults
+apply, and every rate is clamped to the limits Observe itself enforces. Each tier run becomes one
+outbox entry: the metrics of that tier and any logs they produced, encoded as OTLP requests.
+
+Events are not held to a tier. Every EVENT_POLL_S seconds the agent reads its event sources
+(boot classification, kernel journal, pstore, rasdaemon, TrueNAS alerts) and, every WATCH_S
+seconds, the cheap local sources whose state changes are events (RAID, ZFS, UPS), and sends what it
+finds as OTLP logs at once. A storage poll that runs every fifteen minutes therefore never delays
+a RAID failure.
+
+Requests go to POST /v1/metrics and POST /v1/logs only. They are written to a durable outbox
+first and leave it only after Observe answers 2xx, so an Observe outage or an agent restart does
+not lose events. A replay sends the same bytes under the same Idempotency-Key.
 """
 
 from __future__ import annotations
 
 import json
-from collections.abc import Callable
 import logging
+import math
 import platform as _platform
 import socket
 import ssl
@@ -19,33 +28,54 @@ import sys
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from pathlib import Path
-from urllib.parse import urlsplit
 
 import httpx
 
-from . import __version__
+from . import __version__, otel_map, otlp, tiers
 from .collectors import build_collectors
 from .config import Config
 from .events import boot, pstore
 from .events.journal import BackgroundJournal, JournalWatcher, ReaderError
 from .events.rasdaemon import RasdaemonReader
 from .events.thresholds import ThresholdEngine
+from .model import Event, Sample, SourceStatus
+from .otel_map import LogRecord, MapContext, Point
 from .outbox import OUTBOX_FILE, Outbox
-from .schema import Batch, Event, SourceStatus
 from .windows import WindowsSeam
 
 log = logging.getLogger("hostwatch.agent")
-MAX_QUEUE = 240  # one hour at the default 15s interval
 PENDING_BOOT_MARKER = "boot.pending_events"
 PSTORE_SENT_MARKER = "pstore.sent_keys"
-DEAD_LETTER_STATUSES = {400, 422}
+THRESHOLD_MARKER = "thresholds.state"
+ALIVE_FILE = "agent.alive"
+# Statuses that can never succeed for the request that was sent, so it is dead-lettered and the
+# queue moves on: malformed (400), a reused idempotency key with another body (409), too large
+# (413), an unsupported type (415) and unprocessable (422). Everything else describes Observe,
+# the network or the key (401, 403, 404, 429 and every 5xx), so the request stays queued.
+DEAD_LETTER_STATUSES = {400, 409, 413, 415, 422}
+BACKOFF_BASE_S = 5.0
 MAX_BACKOFF_S = 300.0
 MAX_SEEN_KEYS = 10000
+# The boot heartbeat is written this often, whatever the availability rate is, so the end of an
+# unclean boot is known to within this many seconds.
+HEARTBEAT_S = 15.0
+# Watched sources (RAID, ZFS, UPS) are read this often for state changes that are events.
+WATCH_S = 15.0
 
 # A send that is slow must not hold a stop request for long.
 SEND_TIMEOUT_S = 5.0
 EventSource = Callable[[], tuple[SourceStatus, list[Event]]]
+
+
+class DeliveryError(Exception):
+    """Observe did not accept a request and the request stays queued."""
+
+    def __init__(self, message: str, status: int | None = None, retry_after: float = 0.0) -> None:
+        super().__init__(message)
+        self.status = status
+        self.retry_after = retry_after
 
 
 def detect_platform(sysfs: Path | None = None) -> str:
@@ -61,23 +91,40 @@ def detect_platform(sysfs: Path | None = None) -> str:
     return "x86" if _platform.machine() == "x86_64" else _platform.machine()
 
 
+def observe_tls_verify(cfg: Config) -> ssl.SSLContext | bool:
+    """Default verification, so an Observe behind a public certificate needs no setting."""
+    return True
+
+
 class Agent:
-    def __init__(self, cfg: Config, seam: WindowsSeam | None = None, platform: str | None = None) -> None:
+    def __init__(self, cfg: Config, seam: WindowsSeam | None = None, platform: str | None = None,
+                 clock: Callable[[], float] = time.monotonic, wall: Callable[[], float] = time.time) -> None:
         self.cfg = cfg
         self.seam = seam
+        self._clock = clock
+        self._wall = wall
         self._warn_if_name_differs()
         # The platform is a parameter so the Windows agent can be built and tested on Linux.
         self.platform = platform or detect_platform(cfg.sysfs)
         self.collectors = build_collectors(cfg, seam, platform=self.platform)
         self.status: dict[str, SourceStatus] = {}
-        self.outbox = Outbox(cfg.data_dir / OUTBOX_FILE, MAX_QUEUE)
-        # None means detection has never run. A numeric zero would compare
-        # against time.monotonic(), which counts from host boot on Linux, so a
-        # host up for less than redetect_s would never detect its sources.
+        self.outbox = Outbox(cfg.data_dir / OUTBOX_FILE)
+        self.resource = otel_map.resource_attributes(cfg.host_name, self.platform, __version__,
+                                                     arch=_platform.machine())
+        self.map_context = MapContext(ups_name=cfg.nut_ups or "ups")
+        self.started_at = self._wall()
+        self.schedule = tiers.TierSchedule()
+        self._config_next = 0.0
+        self._config_ok: bool | None = None
+        # None means detection has never run. A numeric zero would compare against a monotonic
+        # clock, which counts from host boot on Linux, so a host up for less than redetect_s would
+        # never detect its sources.
         self._last_detect: float | None = None
         self._stop = threading.Event()
         self.heartbeat: boot.Heartbeat | None = None
+        self._next_beat = 0.0
         self.thresholds = ThresholdEngine()
+        self.thresholds.load(self.outbox.get(THRESHOLD_MARKER))
         self.journal_watcher = JournalWatcher(cfg.journal, cfg.data_dir, markers=self.outbox,
                                               volatile=cfg.journal_volatile)
         journal = self.journal = BackgroundJournal(self.journal_watcher)
@@ -87,19 +134,18 @@ class Agent:
             "rasdaemon": rasdaemon.read,
             "journal": journal.read,
         }
-        # TrueNAS alerts come from the same API reads as the truenas collector, so they are read
-        # after the collectors have run this cycle. Registered only when TrueNAS is configured.
+        # TrueNAS alerts come from the same API reads as the truenas collector. Registered only when
+        # TrueNAS is configured.
         for c in self.collectors:
             if c.id == "truenas" and not c.is_absent():
                 self.event_sources["truenas_alerts"] = c.read_events
-        # Pstore and rasdaemon re-read whole records, so keys already handed to a
-        # batch are remembered and not sent again by this process.
+        # Pstore and rasdaemon re-read whole records, so keys already handed to a request are
+        # remembered and not sent again by this process.
         self._seen_keys: dict[str, None] = {}
         self._cycle_keys: list[str] = []
-        # Threshold events are held back until the seed from the hub succeeds.
-        self.seeded = False
-        self._seed_failures = 0
-        self._next_seed = 0.0
+        self._next_events = 0.0
+        self._next_watch = 0.0
+        self._failsafe_open: set[tuple[str, str]] = set()
         self._flush_failures = 0
         self._next_flush = 0.0
         # Monotonic time of the first failed delivery of the current stall.
@@ -108,7 +154,7 @@ class Agent:
 
     @property
     def pending_events(self) -> list[Event]:
-        """Events waiting for the next batch, held in the outbox so a restart
+        """Events waiting for the next event read, held in the outbox so a restart
         before delivery does not lose them."""
         raw = self.outbox.get(PENDING_BOOT_MARKER)
         if not raw:
@@ -120,12 +166,13 @@ class Agent:
             return []
 
     def _stage_pending(self, events: list[Event]) -> None:
-        self.outbox.stage(PENDING_BOOT_MARKER,
-                          json.dumps([e.model_dump() for e in events]) if events else None)
+        value = json.dumps([e.model_dump() for e in events]) if events else None
+        if value != self.outbox.get(PENDING_BOOT_MARKER):  # a write per pass would cost an fsync every few seconds
+            self.outbox.stage(PENDING_BOOT_MARKER, value)
 
     def _read_pstore(self) -> tuple[SourceStatus, list[Event]]:
         """Pstore records are re-read whole, so the keys already queued are
-        kept as a marker and committed with the batch that carries the rest."""
+        kept as a marker and committed with the requests that carry the rest."""
         status, found = pstore.read_pstore(self.cfg.pstore)
         try:
             sent = json.loads(self.outbox.get(PSTORE_SENT_MARKER) or "[]")
@@ -137,64 +184,74 @@ class Agent:
                               json.dumps((sent + [e.dedup_key for e in new])[-MAX_SEEN_KEYS:]))
         return status, new
 
-    def seed_thresholds(self, client: httpx.Client) -> bool:
-        """Seed threshold state from events the hub already stores. Returns True
-        once seeded. On failure it returns False and the run loop retries with
-        backoff; threshold events are held back until it succeeds, so a repeat
-        of an open condition cannot be emitted from empty state.
-        Only source=thresholds events are requested and every page is read, so
-        other event floods cannot push an open condition out of view."""
-        headers = {"Authorization": f"Bearer {self.cfg.agent_credential}"}
-        params: dict = {"host": self.cfg.host_name, "source": "thresholds", "limit": 1000}
-        stored: list[dict] = []
+    def _stage_pending(self, events: list[Event]) -> None:
+        self.outbox.stage(PENDING_BOOT_MARKER,
+                          json.dumps([e.model_dump() for e in events]) if events else None)
+
+    def _read_pstore(self) -> tuple[SourceStatus, list[Event]]:
+        """Pstore records are re-read whole, so the keys already queued are
+        kept as a marker and committed with the request that carries the rest."""
+        status, found = pstore.read_pstore(self.cfg.pstore)
         try:
-            while True:
-                r = client.get(f"{self.cfg.hub_url}/internal/v1/events", params=params, headers=headers, timeout=10)
-                r.raise_for_status()
-                stored.extend(r.json())
-                cursor = r.headers.get("X-Next-Before")
-                if cursor is None:
-                    break
-                params = {**params, "before": cursor}
-                if r.headers.get("X-Next-Before-Id") is not None:
-                    params["before_id"] = r.headers["X-Next-Before-Id"]
+            sent = json.loads(self.outbox.get(PSTORE_SENT_MARKER) or "[]")
+        except ValueError:
+            sent = []
+        new = [e for e in found if e.dedup_key not in sent]
+        if new:
+            self.outbox.stage(PSTORE_SENT_MARKER,
+                              json.dumps((sent + [e.dedup_key for e in new])[-MAX_SEEN_KEYS:]))
+        return status, new
+
+    # -- rates from Observe ------------------------------------------------------------------
+
+    def fetch_config(self, client: httpx.Client) -> bool:
+        """Ask Observe for this host's tier rates and apply them. Returns True when the rates
+        changed. A failure of any kind keeps the rates in force and is logged once per change of
+        outcome, so an Observe that is down does not fill the log."""
+        url = self.cfg.observe_url + tiers.AGENT_CONFIG_PATH
+        try:
+            r = client.get(url, headers={"Authorization": f"Bearer {self.cfg.ingest_key}"},
+                           timeout=tiers.CONFIG_TIMEOUT_S)
+            if r.status_code in (401, 403):
+                self._config_failed(f"Observe refused the ingest key ({r.status_code}); check "
+                                    "HOSTWATCH_INGEST_KEY")
+                return False
+            r.raise_for_status()
+            body = r.json()
         except httpx.HTTPStatusError as exc:
-            if exc.response.status_code == 401:
-                log.error("hub rejected the agent credential (401) while seeding threshold state; "
-                          "check HOSTWATCH_INGEST_KEY (or the legacy HOSTWATCH_INGEST_TOKEN) on the agent and the hub")
-            elif exc.response.status_code == 403:
-                log.error("hub refused the read (403) while seeding threshold state: the shared ingest token "
-                          "has the ingest scope only; set HOSTWATCH_INGEST_KEY to a scoped key with ingest and read:events")
-            else:
-                log.warning("hub answered %s while seeding threshold state", exc.response.status_code)
+            self._config_failed(f"Observe answered {exc.response.status_code} for agent-config")
             return False
-        except Exception as exc:
-            log.warning("hub unreachable, could not seed threshold state: %s", exc)
+        except Exception as exc:  # unreachable, a bad answer or invalid JSON: all keep the current rates
+            self._config_failed(f"Observe could not be reached for agent-config: {type(exc).__name__}: {exc}")
             return False
-        self.thresholds.seed(stored)
-        self.seeded = True
-        return True
+        rates = tiers.parse_agent_config(body)
+        if rates is None:
+            self._config_failed("the agent-config answer has no usable intervals")
+            return False
+        if isinstance(body, dict) and isinstance(body.get("host"), str) \
+                and body["host"].strip().lower() != self.cfg.host_name.strip().lower():
+            log.warning("Observe's agent-config names host %r but HOSTWATCH_HOST_NAME is %r",
+                        body["host"], self.cfg.host_name)
+        before = self.schedule.rates()
+        self.schedule.apply(rates)
+        self.schedule.reschedule(self._clock())
+        self._config_next = self._clock() + tiers.CONFIG_REFRESH_S
+        changed = self.schedule.rates() != before
+        if self._config_ok is not True or changed:
+            log.info("polling rates from Observe: %s", self._rates_text())
+        self._config_ok = True
+        return changed
 
-    def _try_seed(self, client: httpx.Client) -> None:
-        if self.seeded or time.monotonic() < self._next_seed:
-            return
-        try:
-            seeded = self.seed_thresholds(client)
-        except Exception as exc:  # a bad answer must not end the loop
-            log.warning("threshold seeding failed: %s: %s", type(exc).__name__, exc)
-            seeded = False
-        if seeded:
-            log.info("threshold state seeded; threshold events are enabled")
-            self.status.pop("thresholds", None)
-            return
-        self._seed_failures += 1
-        self.status["thresholds"] = SourceStatus(
-            source="thresholds", available=False,
-            reason=f"threshold events are held back until the hub seed succeeds ({self._seed_failures} failed attempt(s))")
-        self._next_seed = time.monotonic() + self._backoff(self._seed_failures)
+    def _rates_text(self) -> str:
+        return ", ".join(f"{t}={v:g}s" for t, v in self.schedule.rates().items())
 
-    def _backoff(self, failures: int) -> float:
-        return min(self.cfg.interval_s * 2 ** max(0, failures - 1), MAX_BACKOFF_S)
+    def _config_failed(self, reason: str) -> None:
+        self._config_next = self._clock() + tiers.CONFIG_RETRY_S
+        if self._config_ok is not False:
+            log.warning("%s; using the polling rates in force (%s)", reason, self._rates_text())
+        self._config_ok = False
+
+    # -- events ------------------------------------------------------------------------------
 
     def _collect_events(self) -> list[Event]:
         events: list[Event] = []
@@ -237,7 +294,7 @@ class Agent:
 
     def start_boot_check(self) -> None:
         """Classify how the previous boot ended, once, then start the heartbeat.
-        The event is queued for the next batch; the hub deduplicates by boot_id.
+        The event is queued for the next event read; Observe deduplicates by boot_id.
         The pending event is committed to the outbox at once, so an agent restart
         before it is delivered does not lose it (the heartbeat already names the
         new boot, so it could not be classified again)."""
@@ -327,11 +384,53 @@ class Agent:
         except Exception:
             return False
 
-    def collect_once(self) -> Batch:
-        if self._last_detect is None or time.monotonic() - self._last_detect > self.cfg.redetect_s:
-            self.detect()
-        samples = []
+    def detect(self) -> None:
         for c in self.collectors:
+            absent = False
+            if self.platform == "windows" and c.linux_only:
+                # Nothing was probed: these sources read sysfs, procfs or /run, which a Windows host
+                # does not have, so they are not present rather than present but unavailable.
+                ok, reason, absent = False, f"{c.id} reads Linux-only locations and is not present on Windows", True
+            else:
+                try:
+                    ok, reason = c.detect()
+                except Exception as exc:
+                    ok, reason = False, f"detect error: {type(exc).__name__}: {exc}"
+            prev = self.status.get(c.id)
+            if prev is None or prev.available != ok:
+                log.info("source %s: %s %s", c.id, "available" if ok else "unavailable", reason)
+            if not ok and not absent:
+                try:
+                    absent = c.is_absent()
+                except Exception as exc:
+                    log.warning("source %s: could not establish absence: %s", c.id, exc)
+            self.status[c.id] = SourceStatus(source=c.id, available=ok, reason=reason, present=not absent)
+        self._last_detect = self._clock()
+
+    def _retry_now(self, c) -> bool:
+        """A configured polled source is tried again every cycle after a failure."""
+        if not c.retry_each_cycle:
+            return False
+        try:
+            return not c.is_absent()
+        except Exception:
+            return False
+
+    # -- collection --------------------------------------------------------------------------
+
+    def _ensure_detected(self) -> None:
+        if self._last_detect is None or self._clock() - self._last_detect > self.cfg.redetect_s:
+            self.detect()
+
+    def collect_samples(self, tier: str | None = None, watched: bool = False) -> list[Sample]:
+        """Samples from the collectors of one tier (or all when `tier` is None), or from the
+        watched collectors. A source that is unavailable is skipped until the next detection,
+        except a configured network source, which is tried every time."""
+        self._ensure_detected()
+        samples: list[Sample] = []
+        for c in self.collectors:
+            if (watched and not c.event_watch) or (tier is not None and c.tier != tier):
+                continue
             if not self.status[c.id].available and not self._retry_now(c):
                 continue
             try:
@@ -343,119 +442,201 @@ class Agent:
                 log.warning("collector %s failed: %s", c.id, exc)
                 self.status[c.id] = SourceStatus(source=c.id, available=False,
                                                  reason=f"collect error: {type(exc).__name__}: {exc}")
-        events = self.pending_events
-        self._stage_pending([])
-        events.extend(self._collect_events())
-        self._outbox_status()
-        if self.seeded:
-            events.extend(self.thresholds.evaluate(samples, self.status.values()))
-        return Batch(agent_version=__version__, host=self.cfg.host_name, platform=self.platform,
-                     sent_at=time.time(), sources=list(self.status.values()), samples=samples,
-                     events=events, batch_id=str(uuid.uuid4()))
+        return samples
 
     def _outbox_status(self) -> None:
         dropped = self.outbox.dropped_since_drain()
         dead = self.outbox.dead_letter_count()
         notes = []
         if dropped:
-            notes.append(f"outbox full: {dropped} sample(s) dropped since the queue last drained "
-                         f"({self.outbox.dropped_total()} in total); events were kept")
+            notes.append(f"outbox over a limit: {self.outbox.dropped_points_total()} data point(s) and "
+                         f"{self.outbox.dropped_records_total()} log record(s) dropped in total; events are dropped last")
         if dead:
-            notes.append(f"{dead} batch(es) refused by the hub or undecodable are in the dead-letter table")
-        undecodable = self.outbox.undecodable_total()
-        if undecodable:
-            notes.append(f"{undecodable} outbox row(s) could not be decoded and were moved to the dead-letter table")
+            notes.append(f"{dead} request(s) refused by Observe are in the dead-letter table")
+        rejected = self.outbox.rejected_points_total() + self.outbox.rejected_records_total()
+        if rejected:
+            notes.append(f"Observe accepted but rejected {rejected} item(s) in total")
         if self._stall_since is not None:
-            notes.append(f"delivery to the hub has stalled for {time.monotonic() - self._stall_since:.0f}s; "
-                         f"{self.outbox.depth()} batch(es) are queued and kept")
+            notes.append(f"delivery to Observe has stalled for {self._clock() - self._stall_since:.0f}s; "
+                         f"{self.outbox.depth()} request(s) are queued and kept")
         if self.outbox.recovered_from is not None:
             notes.append(f"the outbox file was corrupt and was moved to {self.outbox.recovered_from.name}; "
-                         "batches and progress markers in it were lost")
+                         "requests and progress markers in it were lost")
         self.status["outbox"] = SourceStatus(source="outbox", available=not dropped, reason="; ".join(notes))
 
-    def cycle(self) -> None:
-        """Collect one batch and write it, with the source markers it covers,
-        to the outbox in a single transaction."""
-        self.outbox.enqueue(self.collect_once())
+    def _new_failsafe_logs(self, samples: list[Sample]) -> list[LogRecord]:
+        """A failsafe is logged when a reason first appears, not on every poll while it lasts."""
+        current = {(r.scope, r.attributes["observe.thermal.reason"]): r for r in otel_map.failsafe_logs(samples)}
+        scopes = {otel_map.scope_name(s.source) for s in samples if s.metric == "failsafe"}
+        fresh = [r for key, r in current.items() if key not in self._failsafe_open]
+        self._failsafe_open = {k for k in self._failsafe_open if k[0] not in scopes} | set(current)
+        return fresh
 
-    def safe_cycle(self) -> bool:
-        """Run one cycle without letting an exception end the loop. On failure
-        the staged markers and the in-process dedup keys of the failed cycle are
-        discarded so nothing is skipped, the failure is logged, and the agent
-        source is reported unavailable with the reason until a cycle succeeds."""
+    def run_tier(self, tier: str) -> None:
+        """Collect one tier and queue the result. The availability tier carries the heartbeat, the
+        source status report and the rates in force instead of collector readings."""
+        samples = self.collect_samples(tier)
+        now = self._wall()
+        points: list[Point] = otel_map.map_samples(samples, self.map_context)
+        logs = self._new_failsafe_logs(samples)
+        events = self._threshold_events(samples)
+        if tier == tiers.AVAILABILITY:
+            self._outbox_status()
+            points += [otel_map.heartbeat_point(now), *otel_map.map_source_status(self.status.values(), now),
+                       *otel_map.tier_interval_points(self.schedule.rates(), now)]
+        logs += [otel_map.map_event(e) for e in events]
+        self._enqueue(points, logs)
+
+    def _threshold_events(self, samples: list[Sample]) -> list[Event]:
+        events = self.thresholds.evaluate(samples, self.status.values())
+        state = self.thresholds.dump()
+        if state != self.outbox.get(THRESHOLD_MARKER):
+            self.outbox.stage(THRESHOLD_MARKER, state)
+        return events
+
+    def _enqueue(self, points: list[Point], logs: list[LogRecord]) -> None:
+        """Encode points and logs as OTLP requests and write them, with the staged markers, to the
+        outbox in one transaction. Nothing is queued for an empty list."""
+        entry_id = uuid.uuid4().hex
+        opts = {"fmt": self.cfg.otlp_format, "compress": self.cfg.otlp_gzip}
+        built = [otlp.build_metrics_requests(entry_id, self.resource, points, start_ts=self.started_at, **opts),
+                 otlp.build_logs_requests(entry_id, self.resource, logs, **opts)]
+        for b in built:
+            if b.skipped:
+                log.warning("%d item(s) were left out of a request because Observe would refuse them", b.skipped)
+        self.outbox.enqueue([r for b in built for r in b.requests], entry_id)
+
+    def event_cycle(self, watch: bool) -> None:
+        """Read the event sources, and the watched sources when `watch` is set, and queue everything
+        found as logs, so it leaves for Observe on this pass."""
+        events = self.pending_events
+        self._stage_pending([])
+        events.extend(self._collect_events())
+        if watch:
+            events.extend(self._threshold_events(self.collect_samples(watched=True)))
+        self._enqueue([], [otel_map.map_event(e) for e in events])
+
+    def _guard(self, what: str, run: Callable[[], None]) -> bool:
+        """Run one unit of work without letting an exception end the loop. On failure the staged
+        markers and the in-process dedup keys of the failed unit are discarded so nothing is
+        skipped, the failure is logged, and the agent source is reported unavailable with the
+        reason until a unit succeeds."""
         self._cycle_keys = []
         threshold_state = dict(self.thresholds.state)
         try:
-            self._beat()
-            self.cycle()
+            run()
         except Exception as exc:
-            log.exception("agent cycle failed; the loop continues")
+            log.exception("agent %s failed; the loop continues", what)
             self.outbox.discard_staged()
-            # Threshold conditions opened by the failed cycle were never queued, so
-            # forget them and let the next cycle emit them again.
+            # Conditions opened by the failed unit were never queued, so forget them and let the
+            # next unit emit them again.
             self.thresholds.state = threshold_state
             self.journal.rewind()
             for key in self._cycle_keys:
                 self._seen_keys.pop(key, None)
             self.status["agent"] = SourceStatus(source="agent", available=False,
-                                                reason=f"cycle error: {type(exc).__name__}: {exc}")
+                                                reason=f"{what} error: {type(exc).__name__}: {exc}")
             return False
         self.status["agent"] = SourceStatus(source="agent", available=True, reason="")
         return True
 
+    def tick(self, client: httpx.Client) -> None:
+        """One pass of the loop: refresh the rates when due, run every tier that is due, read the
+        events when due, then try to deliver. Nothing here may raise."""
+        now = self._clock()
+        if now >= self._config_next:
+            self.fetch_config(client)
+        self._beat_if_due(now)
+        # Events come first, so the first availability report already names the event sources.
+        if now >= self._next_events:
+            watch = now >= self._next_watch
+            self._guard("event read", lambda: self.event_cycle(watch))
+            self._next_events = now + tiers.EVENT_POLL_S
+            if watch:
+                self._next_watch = now + WATCH_S
+        for tier in self.schedule.due(self._clock()):
+            self._guard(f"{tier} poll", lambda tier=tier: self.run_tier(tier))
+            self.schedule.done(tier, self._clock())
+        self._try_flush(client)
+
+    def sleep_s(self) -> float:
+        """How long the loop may wait before the next thing is due."""
+        now = self._clock()
+        return max(0.1, min(tiers.EVENT_POLL_S, self.schedule.seconds_until_next(now),
+                            self._next_events - now))
+
+    # -- delivery ----------------------------------------------------------------------------
+
     def flush(self, client: httpx.Client, deadline: float | None = None, honour_stop: bool = True) -> None:
-        """Send queued batches oldest first. A batch leaves the outbox only after
-        a 2xx answer. A 400 or 422 can never succeed and is dead-lettered so the
-        head is not blocked. Any other failure, including every 5xx, raises and
-        the batch stays queued: those describe the hub, not the batch.
+        """Send queued requests oldest first. A request leaves the outbox only after a 2xx answer.
+        A 200 that reports rejected items is acknowledged all the same, because the rejected items
+        would be rejected again, and the count is kept. A status in DEAD_LETTER_STATUSES can never
+        succeed and is dead-lettered so the head is not blocked. Any other failure raises
+        DeliveryError and the request stays queued: those describe Observe, the key or the network.
 
         Each send times out after SEND_TIMEOUT_S seconds. A stop request ends the loop between sends
         (unless honour_stop is False, as in the final flush), and a monotonic deadline caps the total
-        time. Unsent batches stay in the outbox either way."""
-        while (head := self.outbox.peek()) is not None:
+        time. Unsent requests stay in the outbox either way."""
+        self.outbox.prune()
+        while (req := self.outbox.peek()) is not None:
             if honour_stop and self._stop.is_set():
                 return
             timeout = SEND_TIMEOUT_S
             if deadline is not None:
-                remaining = deadline - time.monotonic()
+                remaining = deadline - self._clock()
                 if remaining <= 0:
                     raise TimeoutError("delivery time budget used up")
                 timeout = min(timeout, remaining)
-            seq, batch = head
-            r = client.post(f"{self.cfg.hub_url}/internal/v1/ingest", content=batch.model_dump_json(),
-                            headers={"Authorization": f"Bearer {self.cfg.agent_credential}",
-                                     "Content-Type": "application/json"}, timeout=timeout)
+            headers = {**req.headers, "Authorization": f"Bearer {self.cfg.ingest_key}",
+                       "User-Agent": f"hostwatch/{__version__}"}
+            r = client.post(self.cfg.observe_url + req.path, content=req.body, headers=headers, timeout=timeout)
             if r.status_code in DEAD_LETTER_STATUSES:
-                self.outbox.dead_letter(seq, r.status_code)
+                self.outbox.dead_letter(req.seq, r.status_code, _problem_text(r))
                 continue
             if r.is_success:
-                self.outbox.ack(seq)
+                if r.status_code == 200:
+                    rejected, message = otlp.parse_partial_success(
+                        r.content, r.headers.get("content-type", ""), req.signal)
+                    if rejected or message:
+                        self.outbox.note_rejected(req.signal, rejected)
+                        log.warning("Observe accepted %s request %s but rejected %d item(s): %s",
+                                    req.signal, req.entry_id, rejected, message or "no reason given")
+                self.outbox.ack(req.seq)
                 continue
-            raise httpx.HTTPStatusError(f"hub answered {r.status_code}", request=r.request, response=r)
+            if r.status_code in (401, 403):
+                log.error("Observe answered %d. Check that HOSTWATCH_INGEST_KEY is valid and is bound to "
+                          "the host name %r. Requests stay queued.", r.status_code, self.cfg.host_name)
+            raise DeliveryError(f"Observe answered {r.status_code}", r.status_code, _retry_after(r))
 
     def _try_flush(self, client: httpx.Client) -> None:
-        if time.monotonic() < self._next_flush:
+        if self._clock() < self._next_flush:
             return
         try:
             self.flush(client)
         except Exception as exc:
             self._flush_failures += 1
             if self._stall_since is None:
-                self._stall_since = time.monotonic()
+                self._stall_since = self._clock()
             wait = self._backoff(self._flush_failures)
-            self._next_flush = time.monotonic() + wait
-            log.warning("delivery failed (%s); %d batch(es) queued, next attempt in %.0fs", exc,
+            if isinstance(exc, DeliveryError):
+                wait = min(max(wait, exc.retry_after), MAX_BACKOFF_S)
+            self._next_flush = self._clock() + wait
+            log.warning("delivery failed (%s); %d request(s) queued, next attempt in %.0fs", exc,
                         self.outbox.depth(), wait)
         else:
             self._flush_failures, self._next_flush = 0, 0.0
             self._stall_since = None
+
+    @staticmethod
+    def _backoff(failures: int) -> float:
+        return min(BACKOFF_BASE_S * 2 ** max(0, failures - 1), MAX_BACKOFF_S)
 
     def _warn_if_name_differs(self) -> None:
         """One warning, never a stop: a container often reports a name other than its host's."""
         own = socket.gethostname()
         wanted = self.cfg.host_name.strip().lower()
         if wanted and wanted not in {own.lower(), own.lower().split(".")[0]}:
-            log.warning("HOSTWATCH_HOST_NAME is %r but this machine is named %r; batches are reported under "
+            log.warning("HOSTWATCH_HOST_NAME is %r but this machine is named %r; data is reported under "
                         "%r. Check that this is the host you meant, unless this is a container.",
                         self.cfg.host_name, own, self.cfg.host_name)
 
@@ -465,18 +646,31 @@ class Agent:
         try:
             self.detect()
             self._guarded_boot_check()
-            with httpx.Client(verify=hub_tls_verify(self.cfg)) as client:
+            with httpx.Client(verify=observe_tls_verify(self.cfg)) as client:
                 while not self._stop.is_set():
-                    started = time.monotonic()
                     try:
-                        self._try_seed(client)
-                        self.safe_cycle()
-                        self._try_flush(client)
+                        self.tick(client)
                     except Exception:  # last resort: nothing may end the loop
                         log.exception("unexpected error in the agent loop; continuing")
-                    self._stop.wait(max(0.0, self.cfg.interval_s - (time.monotonic() - started)))
+                    self._stop.wait(self.sleep_s())
         finally:
             self.finish()
+
+    def _beat_if_due(self, now: float) -> None:
+        if now >= self._next_beat:
+            self._next_beat = now + HEARTBEAT_S
+            self._beat()
+            self._touch_alive()
+
+    def _touch_alive(self) -> None:
+        """Record that the loop is running, for the container health check. This says the agent
+        loop turns; whether Observe receives the data is what the outbox status reports."""
+        try:
+            tmp = self.cfg.data_dir / (ALIVE_FILE + ".tmp")
+            tmp.write_text(str(self._wall()), encoding="utf-8")
+            tmp.replace(self.cfg.data_dir / ALIVE_FILE)
+        except OSError as exc:
+            log.warning("cannot write %s: %s", ALIVE_FILE, exc)
 
     def _beat(self) -> None:
         if self.heartbeat is None:
@@ -507,26 +701,19 @@ class Agent:
         finally:
             self._stopped.set()
 
-    def stop_and_wait(self, timeout: float = 15.0) -> bool:
-        """Stop and wait for the run loop to finish, for callers that are not a
-        signal handler (the hub shutdown hook)."""
-        self.stop()
-        return self._stopped.wait(timeout)
+
+def _retry_after(r: httpx.Response) -> float:
+    """Retry-After in seconds. A date form or anything else unusable counts as no hint."""
+    try:
+        value = float(r.headers.get("retry-after", ""))
+    except ValueError:
+        return 0.0
+    return value if math.isfinite(value) and value > 0 else 0.0
 
 
-def hub_tls_verify(cfg: Config) -> ssl.SSLContext | bool:
-    """TLS verification for the agent's connection to the hub.
-
-    In the all role the agent posts to https://127.0.0.1, but the hub's
-    certificate names the LAN host, so a hostname check would always fail and
-    batches would queue until dropped. When the hub URL is loopback and this
-    process holds the hub certificate, trust exactly that certificate (pinning)
-    and skip only the hostname check. Every other case uses default
-    verification.
-    """
-    host = urlsplit(cfg.hub_url).hostname or ""
-    if cfg.tls_cert and host in ("127.0.0.1", "::1", "localhost"):
-        ctx = ssl.create_default_context(cafile=cfg.tls_cert)
-        ctx.check_hostname = False
-        return ctx
-    return True
+def _problem_text(r: httpx.Response) -> str:
+    try:
+        body = r.json()
+        return str(body.get("detail") or body.get("title") or "") if isinstance(body, dict) else ""
+    except ValueError:
+        return ""

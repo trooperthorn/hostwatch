@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent_helpers import collect_once
 import json
 from pathlib import Path
 
@@ -18,7 +19,7 @@ from hostwatch.collectors.win_storage import (
 )
 from hostwatch.config import Config
 from hostwatch.events.thresholds import ThresholdEngine
-from hostwatch.schema import Sample
+from hostwatch.model import Sample
 from hostwatch.windows import CommandResult, SeamError, WindowsSeam
 
 FIXTURES = Path(__file__).parent / "fixtures" / "windows"
@@ -229,12 +230,12 @@ def test_warning_then_critical_raises_twice_and_first_sight_unhealthy_raises():
     assert eng.evaluate(storage_samples("disk_health", 1, "3", "win_storage"), [], now=3) == []
 
 
-def test_smart_failure_event_and_seed_survives_restart():
+def test_smart_failure_event_and_saved_state_survives_restart():
     eng = ThresholdEngine()
     events = eng.evaluate(storage_samples("smart_passed", 0, "/dev/sda", "win_smartctl"), [], now=1)
     assert kinds(events) == [("winstorage.health_raised", "critical")]
     fresh = ThresholdEngine()
-    fresh.seed([e.model_dump() for e in events])
+    fresh.load(eng.dump())
     assert fresh.evaluate(storage_samples("smart_passed", 0, "/dev/sda", "win_smartctl"), [], now=2) == []
     assert kinds(fresh.evaluate(storage_samples("smart_passed", 1, "/dev/sda", "win_smartctl"), [], now=3)) == [
         ("winstorage.health_cleared", "info")]
@@ -245,8 +246,7 @@ def test_agent_cycle_carries_samples_and_events(tmp_path):
     seam = seam_for(CIM["degraded_pool"], results=[CommandResult(0, "x")] * 4)
     agent = Agent(cfg, seam, platform="windows")
     agent.collectors = [c for c in agent.collectors if c.id == "win_storage"]
-    agent.seeded = True
-    batch = agent.collect_once()
+    batch = collect_once(agent)
     assert any(e.kind == "winstorage.health_raised" and "Tank" in e.title for e in batch.events)
     assert next(s for s in batch.sources if s.source == "win_storage").available
 

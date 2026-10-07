@@ -24,6 +24,7 @@ import re
 from typing import Any
 
 from ..windows import SeamError
+from .. import tiers
 from .base import Collector
 
 NAMESPACE = "root/Microsoft/Windows/Storage"
@@ -109,6 +110,7 @@ def _text(value: Any) -> str:
 
 class WinStorageCollector(Collector):
     id = "win_storage"
+    tier = tiers.STORAGE_HEALTH
 
     def detect(self) -> tuple[bool, str]:
         if self.seam is None:
@@ -213,6 +215,7 @@ class WinSmartctlCollector(Collector):
     """Optional SMART health from `smartctl -j`. Absent when smartctl cannot be started."""
 
     id = "win_smartctl"
+    tier = tiers.SMART
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)

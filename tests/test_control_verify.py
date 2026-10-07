@@ -484,7 +484,7 @@ def test_loader_rejects_invalid_values(signer, patch, message):
 # --- isolation ---------------------------------------------------------------------------
 
 def test_collector_does_not_import_the_control_package():
-    code = ("import sys, hostwatch.agent, hostwatch.hub, hostwatch.cli; "
+    code = ("import sys, hostwatch.agent, hostwatch.__main__, hostwatch.cli; "
             "print(any(m.startswith('hostwatch.control') for m in sys.modules))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)
     assert out.stdout.strip() == "False", out.stderr

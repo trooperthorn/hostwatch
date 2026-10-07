@@ -6,12 +6,13 @@ import json
 
 import pytest
 
+from agent_helpers import drain_logs, event_cycle
 from fakes_windows import FakeCimQuery, FakeCommandRunner, FakeEventLogReader, FakePipeStatusReader
 
 from hostwatch.events import boot, winevent
 from hostwatch.events.winevent import (PROVIDER_BUGCHECK, PROVIDER_EVENTLOG, PROVIDER_POWER, PROVIDER_WHEA,
                                        WinEventReader, classify_windows_boot)
-from hostwatch.schema import Event
+from hostwatch.model import Event
 from hostwatch.windows import WindowsSeam
 
 T0 = 1_790_000_000.0
@@ -174,28 +175,20 @@ def _agent_with_reader(tmp_path, logs, clock):
     return agent, r
 
 
-def _drain(agent):
-    out = []
-    while (item := agent.outbox.peek()) is not None:
-        out.extend(item[1].events)
-        agent.outbox.ack(item[0])
-    return out
-
-
 def test_failed_send_then_retry_re_emits_the_same_events_once(tmp_path):
     import sqlite3
     logs = [whea(19, T0 + i, "A corrected hardware error has occurred.") for i in range(3)]
     agent, _ = _agent_with_reader(tmp_path, logs, lambda: NOW)
     real = agent.outbox.enqueue
-    agent.outbox.enqueue = lambda b: (_ for _ in ()).throw(sqlite3.OperationalError("disk full"))
-    assert agent.safe_cycle() is False
+    agent.outbox.enqueue = lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("disk full"))
+    assert event_cycle(agent) is False
     assert winevent.load_bookmark(tmp_path / "data" / "winevent") is None
     agent.outbox.enqueue = real
-    assert agent.safe_cycle() is True
-    first = _drain(agent)
-    assert len([e for e in first if e.source == "winevent"]) == 3
-    assert agent.safe_cycle() is True
-    assert [e for e in _drain(agent) if e.source == "winevent"] == []
+    assert event_cycle(agent) is True
+    first = drain_logs(agent)
+    assert len([e for e in first if e["source"] == "winevent"]) == 3
+    assert event_cycle(agent) is True
+    assert [e for e in drain_logs(agent) if e["source"] == "winevent"] == []
 
 
 def test_1200_events_are_all_delivered_across_cycles_in_order(tmp_path):
@@ -203,10 +196,10 @@ def test_1200_events_are_all_delivered_across_cycles_in_order(tmp_path):
     agent, _ = _agent_with_reader(tmp_path, logs, lambda: NOW)
     got = []
     for _ in range(6):
-        assert agent.safe_cycle() is True
-        got.extend(e for e in _drain(agent) if e.source == "winevent")
-    assert [e.ts for e in got] == [T0 + i for i in range(1200)]
-    assert len({e.dedup_key for e in got}) == 1200
+        assert event_cycle(agent) is True
+        got.extend(e for e in drain_logs(agent) if e["source"] == "winevent")
+    assert [e["ts"] for e in got] == pytest.approx([T0 + i for i in range(1200)])
+    assert len({e["dedup_key"] for e in got}) == 1200
 
 
 def test_capped_read_in_the_reader_alone_advances_only_to_the_newest_returned(tmp_path):

@@ -6,51 +6,28 @@ Read this file first. It is the authoritative guide for work in this repo.
 
 ## What this project is
 
-A containerized monitor that collects power, crash, RAID, and disk health from
-a host and serves it behind a login, with API access for Home Assistant and
-SolarWinds Orion (API Poller). One image, three roles (`HOSTWATCH_ROLE=all|hub|agent`).
+A host agent that collects power, crash, RAID and disk health from a host and sends it to Observe as
+OpenTelemetry (OTLP) metrics and logs. The agent serves nothing and has no database of its own. One image
+and one role. The hostwatch hub, its web UI, login, API keys, audit log, Home Assistant, Orion and Prometheus
+outputs and the old batch wire format are retired: there is no migration path, and the owner destroys and
+redeploys. `hostwatch-control` is a separate daemon, unchanged by that conversion.
 
 ## Current state
 
-- Phase 0 (host prep): complete on MediaIn-SVR. ai-pi deferred by the owner.
-- Phase 1 (collector core): code complete and unit-tested (`pytest`).
-  **Not yet deployed or verified on real hardware.**
-- Phase 2 (event engine): code complete and unit-tested, including the
-  read-only journal, pstore and rasdaemon mounts and `journalctl` in the image.
-  **Not yet deployed or verified on real hardware.**
-- Phase 3 (API and auth): code complete and unit-tested, including the exit
-  test in `tests/test_phase3_exit.py`. Enforced: default deny on every route
-  except health, argon2id logins with lockout, server-side sessions with CSRF
-  tokens, hashed scoped API keys revoked on the next request, an append-only
-  audit log (application layer only), and refusal of a non-loopback bind
-  without TLS, TLS or a specific-address bind with a source allowlist being
-  the accepted alternatives. Advisory: the reverse proxy behind proxy-mode client
-  certificates, the loopback default bind as a deployment choice, and the CLI
-  trust boundary (shell access to the data directory). **Not yet deployed or
-  verified on real hardware**; see `UNVERIFIED.md`.
-- Phase 4 (integrations): code complete and unit-tested, including the exit
-  test in `tests/test_phase4_exit.py`. Home Assistant MQTT discovery and events
-  (off unless `HOSTWATCH_MQTT_HOST` is set), Orion API Poller endpoints and an
-  optional Prometheus `/metrics`, all behind `read:metrics` keys and the Phase 3
-  allowlist. **Not yet verified against a real broker, Home Assistant, Orion or
-  Prometheus**; see `UNVERIFIED.md`.
-- Phase 6 (power witnesses): code complete and unit-tested, including the exit
-  test in `tests/test_phase6_exit.py`. A read-only NUT client (off unless
-  `HOSTWATCH_NUT_HOST` and `HOSTWATCH_NUT_UPS` are set) raises on-battery,
-  low-battery and on-line events, and the hub reads a Home Assistant smart plug
-  history (token from a file) to classify a witnessed outage as `boot.power_loss`.
-  **Not yet verified against a real UPS, NUT server or Home Assistant**; see
+- The OTLP conversion is code complete and unit-tested (`pytest`): `hostwatch/otel_map.py` maps every collector
+  to the names, units and attributes in the Observe data API design (sections 3.1 to 3.3 and 3.9),
+  `hostwatch/otlp.py` is the hand-written protobuf and JSON encoder, `hostwatch/tiers.py` and
+  `hostwatch/agent.py` schedule collectors by polling tier with rates fetched from Observe, send events at
+  once as logs, and deliver from a durable outbox with `Idempotency-Key`s, partial success handling and
+  dead-lettering. **Not yet deployed or verified against a running Observe or on real hardware**; see
   `UNVERIFIED.md`.
-- Phase 7 (hardening and release): code and documents complete and unit-tested. Hash-locked
-  dependency install, SBOM and image scan in CI, container healthcheck, audit log retention,
-  versioned release workflow, `docs/THREAT-MODEL.md` and a README quick start checked by
-  `tests/test_docs.py`. **The CI workflow has never run, and the 15-minute fresh-host exit check
-  has not been done**; see `UNVERIFIED.md`.
-- Platform support: the `zfs`, `truenas` and `rpi` sources, the TrueNAS custom app and the remote agent
-  compose file (`deploy/agent/`) are code complete and unit-tested. The three-host layout is in
-  `docs/deploy-agents.md`. **None of it is verified on TrueNAS-SVR or ai-pi**; see `UNVERIFIED.md`.
-- Next: deploy on MediaIn-SVR, confirm all six sources, run the 24h gap test,
-  then run the four Phase 2 exit scenarios and the open Phase 3 checks.
+- The collectors and event sources (md, ZFS, TrueNAS, NUT, Scrutiny, hwmon, RAPL, rpi, thermalctl, the Windows
+  set, boot classification, journal, pstore, rasdaemon, WHEA) are code complete and unit-tested. None is
+  verified on TrueNAS-SVR, ai-pi or a Windows host.
+- Environment: `HOSTWATCH_OBSERVE_URL` (alias `HOSTWATCH_HUB_URL`), `HOSTWATCH_INGEST_KEY` and
+  `HOSTWATCH_HOST_NAME` are the settings every host needs.
+- Next: deploy on MediaIn-SVR with a new ingest key, confirm the heartbeat and the sources in Observe, run the
+  four boot and RAID scenarios in the README, and work through the open items in `UNVERIFIED.md`.
 
 ## Rules
 
@@ -73,13 +50,9 @@ SolarWinds Orion (API Poller). One image, three roles (`HOSTWATCH_ROLE=all|hub|a
    as what, no em dashes, no attribution footers or generation notices, no
    model names, no real credentials. Hostnames of the owner's own lab hosts are
    acceptable in `UNVERIFIED.md` and `docs/`.
-7. **Do not widen exposure ahead of the plan.** The hub binds to 127.0.0.1 by
-   default. Phase 3 added login, scoped API keys and TLS. A non-loopback bind
-   is accepted in three cases only: TLS, one specific address (never a wildcard)
-   with a non-empty `HOSTWATCH_ALLOWED_CLIENTS` source allowlist, or the explicit
-   insecure override. In the all role a specific-address bind also listens on
-   127.0.0.1 so the local agent keeps delivering. The Phase 3 checks
-   in `UNVERIFIED.md` should pass on hardware before the port is published.
+7. **Open no port.** The agent only dials out. Do not add a listener, a debug endpoint or a status page.
+   The ingest key goes only in the `Authorization` header and is never logged, stored in the outbox or put in
+   a reason. The liveness check reads a marker file, not a socket.
 8. **Do not mount the host `/proc`** into the container. The files read are
    system-wide from the container's own `/proc`.
 
@@ -87,7 +60,7 @@ SolarWinds Orion (API Poller). One image, three roles (`HOSTWATCH_ROLE=all|hub|a
 
 ```
 pip install -e '.[test]' && pytest                     # tests
-python -m hostwatch collect-once                       # one cycle, no hub (set HOSTWATCH_SYSFS=/sys outside Docker)
+python -m hostwatch collect-once                       # one pass, nothing sent (set HOSTWATCH_SYSFS=/sys outside Docker)
 ./scripts/host-prep.sh [--json]                        # Phase 0 check
 cd deploy && sudo docker compose up -d --build         # deploy
 ```

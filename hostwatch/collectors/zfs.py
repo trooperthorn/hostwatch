@@ -5,20 +5,22 @@ privilege and no API call is needed. Reported per pool:
   pool_state   1 when the state was read, with labels pool=<name> and state=<ONLINE|DEGRADED|...>;
                None when the state file could not be read
 
-The hub maps the state text to a status: ONLINE ok, DEGRADED, FAULTED, UNAVAIL and SUSPENDED
-critical, any other text unknown.
+The state text is sent as it is; deciding which states are healthy is the receiver's job.
 """
 
 from __future__ import annotations
 
 from pathlib import Path
 
+from .. import tiers
 from .base import Collector, read_text
 
 
 class ZfsCollector(Collector):
     linux_only = True
     id = "zfs"
+    event_watch = True
+    tier = tiers.STORAGE_HEALTH
 
     @property
     def _root(self) -> Path:

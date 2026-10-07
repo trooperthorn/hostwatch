@@ -27,7 +27,7 @@ Health rules, worst wins:
 
 Alerts (including dismissed ones, which are reported as info with dismissed true) are events of kind truenas.alert from `read_events`, keyed by
 alert uuid and last_occurrence so a repeat of the same occurrence is the same event. The agent
-drops keys it has already handed to a batch, which is how an alert is not repeated next cycle.
+drops keys it has already handed to an outbox entry, which is how an alert is not repeated on the next read.
 
 The agent loop is synchronous, so the collector keeps one private event loop and runs the async
 client on it. This keeps one WebSocket open across cycles.
@@ -38,7 +38,8 @@ from __future__ import annotations
 import asyncio
 from typing import Any
 
-from ..schema import Event, SourceStatus
+from .. import tiers
+from ..model import Event, SourceStatus
 from .base import Collector
 
 CRITICAL_POOL_STATES = frozenset({"DEGRADED", "FAULTED", "UNAVAIL", "SUSPENDED", "REMOVED"})
@@ -87,6 +88,7 @@ def _leaves(vdev: dict, group: str) -> list[tuple[str, dict]]:
 
 class TruenasCollector(Collector):
     id = "truenas"
+    tier = tiers.STORAGE_HEALTH
     # A configured network source is polled every cycle even after a failure.
     retry_each_cycle = True
 

@@ -1,40 +1,20 @@
 # Deploy the agent on TrueNAS-SVR
 
-This guide runs the hostwatch agent on TrueNAS-SVR as a custom app and pushes its
-data to the hub on MediaIn-SVR. It is written for TrueNAS 26 SCALE. Measured facts
-about the host are in `docs/hosts/truenas-svr.md`. Two points are not yet confirmed
-on the host and are tracked in `UNVERIFIED.md`: the WebSocket path
-`wss://<host>/api/current`, and how TrueNAS treats an API key used over a connection
-it considers insecure. The URL is configurable in `HOSTWATCH_TRUENAS_URL`.
+This guide runs the hostwatch agent on TrueNAS-SVR as a custom app and sends its data to Observe as OTLP. It is
+written for TrueNAS 26 SCALE. Measured facts about the host are in `docs/hosts/truenas-svr.md`. Two points are not
+yet confirmed on the host and are tracked in `UNVERIFIED.md`: the WebSocket path `wss://<host>/api/current`, and
+how TrueNAS treats an API key used over a connection it considers insecure. The URL is configurable in
+`HOSTWATCH_TRUENAS_URL`.
 
-Security labels: the hub source allowlist and the ingest key are enforced controls.
-Binding to one LAN address is exposure control only, not authentication. The agent
-container limits (read-only root, no capabilities, non-root) are enforced by Docker.
+Security labels: the ingest key is bound to one host by Observe, which is an enforced control there. The agent
+container limits (read-only root, no capabilities, non-root) are enforced by Docker. Traffic to Observe is plain
+HTTP unless the URL is `https://`.
 
-## 1. Hub side on MediaIn-SVR
+## 1. Observe side
 
-The hub binds to 127.0.0.1 by default, so a remote agent cannot reach it. Bind it to
-the host's LAN address and list the agent's address in the allowlist. In
-`deploy/.env` on MediaIn-SVR set:
-
-```
-HOSTWATCH_HUB_BIND=<MediaIn-SVR LAN address>
-HOSTWATCH_ALLOWED_CLIENTS=10.10.11.98
-```
-
-`10.10.11.98` is TrueNAS-SVR. A specific address is required: the hub refuses a
-wildcard bind, and a non-loopback bind without TLS needs a non-empty allowlist. In the
-`all` role the hub also keeps listening on 127.0.0.1 so the local agent keeps working.
-Restart with `cd deploy && sudo docker compose up -d`. Add the address of any other
-agent, such as ai-pi, to the same comma separated list.
-
-Create an ingest key for this agent, bound to the host name it will report. The key carries only
-the `ingest` scope, and the hub refuses batches from it that name any other host. The secret is
-printed once:
-
-```
-sudo docker exec hostwatch python -m hostwatch key create --scopes ingest --host TrueNAS-SVR --owner agent-truenas
-```
+In Observe, create an ingest key for this host, bound to the host name it will report, `TrueNAS-SVR`. Keep it out
+of files you commit. Nothing else changes on the Observe side, and the polling rates for this host are set in
+Observe.
 
 ## 2. Create the TrueNAS API key
 
@@ -60,12 +40,12 @@ chown 10001:10001 /mnt/Apps/hostwatch/truenas-api-key
 chmod 0400 /mnt/Apps/hostwatch/truenas-api-key
 ```
 
-Create `/mnt/Apps/hostwatch/agent.env` with the hub URL and the ingest key from step 1,
+Create `/mnt/Apps/hostwatch/agent.env` with the Observe URL and the ingest key from step 1,
 then protect it the same way:
 
 ```
-HOSTWATCH_HUB_URL=http://<MediaIn-SVR LAN address>:8090
-HOSTWATCH_INGEST_KEY=<the key printed in step 1>
+HOSTWATCH_OBSERVE_URL=https://<Observe address>
+HOSTWATCH_INGEST_KEY=<the key created in step 1>
 ```
 
 ```
@@ -105,9 +85,9 @@ and correct the compose file when it differs.
 
 In the UI open Apps, Discover Apps, the three dot menu, Install via YAML. Name the app
 hostwatch and paste `deploy/truenas/compose.yaml`, with the dataset paths and the
-second group id adjusted. The file runs the `agent` role as uid 10001 with a read-only
+second group id adjusted. The file runs the agent as uid 10001 with a read-only
 root filesystem, all capabilities dropped, no privileged mode, `/sys` mounted read-only
-and host networking. The API client ignores proxy environment variables on purpose, so the TrueNAS URL must be reachable directly from the container. Each pool appears once in the outputs, at the worse of the kstat and API states. The host `/proc` is not mounted; ZFS pool state comes from the
+and host networking. The API client ignores proxy environment variables on purpose, so the TrueNAS URL must be reachable directly from the container. A pool seen by both the kstat and API sources is reported by both. The host `/proc` is not mounted; ZFS pool state comes from the
 container's own `/proc/spl/kstat`.
 
 The compose file sets `HOSTWATCH_TRUENAS_INSECURE` to 1 because the API is reached at
@@ -118,8 +98,7 @@ the host name in `HOSTWATCH_TRUENAS_URL`.
 
 ## 6. Check the result
 
-On MediaIn-SVR, sign in to the hub UI and confirm TrueNAS-SVR appears with a recent
-sample. The sources `zfs` and `truenas` should be available, and `rapl` becomes
+In Observe, confirm TrueNAS-SVR appears with a recent heartbeat and recent samples. The sources `zfs` and `truenas` should be available, and `rapl` becomes
 available after the group id is correct. Check the agent log on the Apps page for
 the line naming a failing source and its reason. Any source that cannot be read is
 reported unavailable with a reason rather than as zero.

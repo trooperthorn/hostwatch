@@ -14,7 +14,7 @@ from otlp_decoder import decode
 
 from hostwatch import otel_map as m
 from hostwatch import otlp
-from hostwatch.schema import Event, Sample
+from hostwatch.model import Event, Sample
 
 RES = m.resource_attributes("host1", "linux", "1.2.3", machine_id="abc")
 FIXTURES = Path(__file__).parent / "fixtures" / "otel"

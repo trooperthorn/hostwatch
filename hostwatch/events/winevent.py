@@ -15,7 +15,7 @@ told apart without an outside witness.
 The bookmark is the time of the newest record that is finished with, kept in winevent_bookmark.json.
 The keys of records already turned into events are kept with load_classified and save_classified from
 the boot module, in a data directory of their own, so a restart does not repeat an event. State is
-staged in the agent outbox, so they become durable together with the batch that carries the events. A
+staged in the agent outbox, so they become durable together with the requests that carry the events. A
 failed cycle discards them and the next cycle reads the same records again. Without an outbox they are
 written to files before the events are returned. A read is oldest first and capped at MAX_EVENTS; a full
 window moves the bookmark only to the newest record returned, and the rest is read next cycle. A bookmark
@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from ..outbox import Markers
-from ..schema import Event, SourceStatus
+from ..model import Event, SourceStatus
 from ..windows import SeamError, WindowsSeam
 from . import boot
 
@@ -193,7 +193,7 @@ class WinEventReader:
     def __init__(self, seam: WindowsSeam, data_dir: Path, clock: Callable[[], float] = time.time,
                  markers: Markers | None = None) -> None:
         """With markers (the agent outbox) the bookmark and the classified keys are staged and become
-        durable with the batch that carries the events. Without markers they are saved to files at once."""
+        durable with the requests that carry the events. Without markers they are saved to files at once."""
         self.seam = seam
         self.state_dir = data_dir / STATE_SUBDIR
         self.clock = clock

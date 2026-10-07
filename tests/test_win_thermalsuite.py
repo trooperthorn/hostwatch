@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent_helpers import collect_once
 import copy
 import io
 import json
@@ -204,7 +205,7 @@ def test_collector_runs_through_the_agent(tmp_path):
     seam = seam_for({PIPE_NAME: DOCS["failsafe"]})
     agent = Agent(cfg, seam)
     agent.collectors = [WinThermalSuiteCollector(seam=seam)]
-    batch = agent.collect_once()
+    batch = collect_once(agent)
     [status] = [s for s in batch.sources if s.source == "win_thermalsuite"]
     assert status.available and status.present
     assert find(batch.samples, "fan_duty", sensor="f2")
@@ -215,7 +216,7 @@ def test_an_absent_pipe_marks_the_source_not_present_in_the_agent(tmp_path):
     seam = seam_for({})
     agent = Agent(cfg, seam)
     agent.collectors = [WinThermalSuiteCollector(seam=seam)]
-    batch = agent.collect_once()
+    batch = collect_once(agent)
     [status] = [s for s in batch.sources if s.source == "win_thermalsuite"]
     assert (status.available, status.present) == (False, False)
 
@@ -324,21 +325,15 @@ def test_real_reader_times_out_on_a_silent_service(monkeypatch):
         release.set()
 
 
-def test_fans_appear_in_the_summary_with_failsafe_as_a_warning(tmp_path):
-    import time
-
-    from test_zfs import H, Store, build_host_summary
-
+def test_fans_are_reported_with_failsafe_reasons(tmp_path):
     data = tmp_path / "data"
     data.mkdir()
-    cfg = Config(procfs=tmp_path / "proc", sysfs=tmp_path / "sys", data_dir=data, ingest_token="x" * 32, host_name=H,
+    cfg = Config(procfs=tmp_path / "proc", sysfs=tmp_path / "sys", data_dir=data, host_name="h1",
                  journal=tmp_path / "j", journal_volatile=tmp_path / "jv", pstore=tmp_path / "p", scrutiny_url="")
     seam = seam_for({PIPE_NAME: DOCS["failsafe"]})
     agent = Agent(cfg, seam)
     agent.collectors = [WinThermalSuiteCollector(seam=seam)]
-    store = Store(tmp_path / "db.sqlite")
-    store.ingest_batch(agent.collect_once().model_copy(update={"host": H, "sent_at": time.time()}))
-    fans = {c.labels["sensor"]: c for c in build_host_summary(store, H, time.time()).fans
-            if c.labels.get("chip") == "thermalsuite"}
-    assert fans["f2"].state == "warning" and "control:PassFailed" in fans["f2"].reason
+    fans = {s.labels["sensor"]: s for s in collect_once(agent).samples
+            if s.source == "win_thermalsuite" and s.metric == "fan"}
+    assert "control:PassFailed" in fans["f2"].labels.get("reasons", "")
     assert fans["f1"].value == 1650.0

@@ -13,8 +13,8 @@ assumptions that are not yet confirmed on hardware; see UNVERIFIED.md.
 
 The reader keeps one high-water row id per table as a marker. With the agent
 outbox as the marker store, the new high-water id is committed in the same
-transaction as the batch that carries the events, so a restart resumes from
-what was durably queued. Without a store the ids live in memory. The hub also
+transaction as the requests that carry the events, so a restart resumes from
+what was durably queued. Without a store the ids live in memory. Observe also
 keeps one row per dedup key, so a re-read of old rows does not create
 duplicates there.
 """
@@ -28,7 +28,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from ..outbox import MemoryMarkers, Markers
-from ..schema import Event, SourceStatus
+from ..model import Event, SourceStatus
 
 SOURCE = "rasdaemon"
 KIND = "hardware_error"
@@ -165,7 +165,7 @@ class RasdaemonReader:
             # The row last read must still exist with the same timestamp text.
             # A lower maximum id is not enough: a recreated database can grow
             # past the old mark before the next read. The timestamp in the dedup
-            # key keeps the hub from merging new rows with old rows that reused an id.
+            # key keeps Observe from merging new rows with old rows that reused an id.
             stored = self.markers.get(f"rasdaemon.last_ts.{table}")
             at_mark = conn.execute(f"SELECT {'timestamp' if 'timestamp' in cols else 'NULL'} "
                                    f"FROM {table} WHERE id = ?", (last,)).fetchone()

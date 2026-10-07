@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent_helpers import collect_once
 import socket
 import threading
 
@@ -207,7 +208,7 @@ def test_config_rejects_whitespace_in_ups_and_user(field, bad):
 
 def test_config_accepts_plain_ups_name():
     from hostwatch.config import Config
-    Config(nut_ups="cyberpower", nut_user="monuser").validate()
+    Config(nut_ups="cyberpower", nut_user="monuser", observe_url="http://observe.test", ingest_key="k").validate()
 
 
 def test_failed_poll_is_retried_next_cycle_and_ob_raises(fake, tmp_path):
@@ -217,34 +218,30 @@ def test_failed_poll_is_retried_next_cycle_and_ob_raises(fake, tmp_path):
     srv = fake([listing("OL", FULL), listing("OL", FULL), "ERR UNKNOWN-UPS\n", listing("OB", FULL)])
     for d in ("sys", "proc", "data"):
         (tmp_path / d).mkdir()
-    cfg = Config(sysfs=tmp_path / "sys", procfs=tmp_path / "proc", data_dir=tmp_path / "data",
-                 ingest_token="t" * 32, host_name="h1", pstore=tmp_path / "none",
+    cfg = Config(sysfs=tmp_path / "sys", procfs=tmp_path / "proc", data_dir=tmp_path / "data", host_name="h1", pstore=tmp_path / "none",
                  journal=tmp_path / "none", rasdaemon_db=tmp_path / "none.db")
     agent = Agent(cfg)
     agent.collectors = [collector(srv.port)]
-    agent.seeded = True
     agent.detect()
     agent._last_detect = time.monotonic() + 1e6  # no re-detection: only the per-cycle retry may recover
-    first = agent.collect_once()
+    first = collect_once(agent)
     assert agent.status["nut"].available
     assert not [e for e in first.events if e.kind.startswith("ups.")]
-    agent.collect_once()  # the poll fails
+    collect_once(agent)  # the poll fails
     assert not agent.status["nut"].available
-    third = agent.collect_once()  # retried without waiting for re-detection
+    third = collect_once(agent)  # retried without waiting for re-detection
     assert agent.status["nut"].available
     assert "ups.on_battery" in [e.kind for e in third.events]
 
 
 def test_config_repr_contains_no_secret_values(tmp_path):
     from hostwatch.config import Config
-    secrets = ["ingest-token-" + "a" * 32, "hw_ingestkeyvalue123456", "mqtt-pass-xyzzy-42"]
-    cfg = Config(ingest_token=secrets[0], ingest_key=secrets[1], mqtt_password=secrets[2],
-                 mqtt_username="u", mqtt_host="broker", nut_user="monuser",
-                 nut_password_file=str(tmp_path / "nut.pw"), ha_token_file=str(tmp_path / "ha.tok"))
+    secrets = ["wpi_ingestkeyvalue123456"]
+    cfg = Config(ingest_key=secrets[0], nut_user="monuser", nut_password_file=str(tmp_path / "nut.pw"))
     text = repr(cfg) + str(cfg) + f"{cfg!r}" + repr(vars(cfg)) + repr(__import__("dataclasses").asdict(cfg))
     for s in secrets:
         assert s not in text
     import dataclasses
-    replaced = dataclasses.replace(cfg, ingest_key="hw_replacedsecret999")
-    assert "hw_replacedsecret999" not in repr(replaced)
-    assert cfg.ingest_token == secrets[0]  # still usable as a str
+    replaced = dataclasses.replace(cfg, ingest_key="wpi_replacedsecret999")
+    assert "wpi_replacedsecret999" not in repr(replaced)
+    assert cfg.ingest_key == secrets[0]  # still usable as a str

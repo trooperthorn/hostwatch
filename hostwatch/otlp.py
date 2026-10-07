@@ -8,7 +8,7 @@ cannot drift apart. Nothing here touches the network or the clock.
 Limits match what Observe accepts on POST /v1/metrics and /v1/logs: a body of at most 1 MiB as
 sent, at most 4 MiB once inflated, an inflate ratio below 100, at most 5000 points or 500 log
 records per request, 64 resource attributes, 32 attributes per point or record, keys of at most
-128 characters and string values of at most 1024. A batch that does not fit is split into several
+128 characters and string values of at most 1024. A set of items that does not fit is split into several
 requests, each carrying the full resource. A point that Observe would refuse outright (a value
 that is not finite, a name that is too long) is skipped and counted instead of failing its
 whole request, because unavailable beats wrong.
@@ -337,3 +337,74 @@ def build_logs_requests(entry_id: str, resource: dict[str, Attr], records: Itera
     good = [r for r in every if _record_ok(r)]
     return BuiltRequests(_build("logs", good, lambda c: logs_json(resource, c), entry_id, fmt,
                                 compress, MAX_RECORDS), len(every) - len(good))
+
+
+# -- responses ------------------------------------------------------------------------------
+
+def _read_varint(data: bytes, pos: int) -> tuple[int, int]:
+    shift = value = 0
+    while True:
+        if pos >= len(data) or shift > 63:
+            raise OtlpError("the response is not a valid protobuf message")
+        byte = data[pos]
+        pos += 1
+        value |= (byte & 0x7F) << shift
+        if not byte & 0x80:
+            return value, pos
+        shift += 7
+
+
+def _fields(data: bytes) -> Iterable[tuple[int, int, Any]]:
+    """The (field number, wire type, value) triples of one protobuf message. Fixed width and
+    length-delimited values are returned as bytes; a varint is returned as an int."""
+    pos = 0
+    while pos < len(data):
+        tag, pos = _read_varint(data, pos)
+        number, wire = tag >> 3, tag & 7
+        if wire == _VARINT:
+            value, pos = _read_varint(data, pos)
+        elif wire == _LEN:
+            size, pos = _read_varint(data, pos)
+            if pos + size > len(data):
+                raise OtlpError("the response is not a valid protobuf message")
+            value, pos = data[pos:pos + size], pos + size
+        elif wire == _FIXED64:
+            value, pos = data[pos:pos + 8], pos + 8
+        elif wire == 5:
+            value, pos = data[pos:pos + 4], pos + 4
+        else:
+            raise OtlpError("the response is not a valid protobuf message")
+        yield number, wire, value
+
+
+def parse_partial_success(body: bytes, content_type: str, signal: str) -> tuple[int, str]:
+    """(rejected count, message) from the body of a 200 answer. An empty body or an empty JSON
+    object means everything was accepted. A body that cannot be read is treated the same way,
+    because the request was acknowledged with a 2xx and a repeat would change nothing."""
+    if not body:
+        return 0, ""
+    try:
+        if content_type.split(";")[0].strip().lower() == PROTOBUF:
+            for number, wire, value in _fields(body):
+                if number == 1 and wire == _LEN:
+                    rejected, message = 0, ""
+                    for n, w, v in _fields(value):
+                        if n == 1 and w == _VARINT:
+                            rejected = v - (1 << 64) if v >= 1 << 63 else v
+                        elif n == 2 and w == _LEN:
+                            message = v.decode("utf-8", "replace")
+                    return max(rejected, 0), message
+            return 0, ""
+        data = json.loads(body)
+    except (OtlpError, ValueError):
+        return 0, ""
+    partial = data.get("partialSuccess") if isinstance(data, dict) else None
+    if not isinstance(partial, dict):
+        return 0, ""
+    field = "rejectedDataPoints" if signal == "metrics" else "rejectedLogRecords"
+    try:
+        rejected = max(int(partial.get(field) or 0), 0)
+    except (TypeError, ValueError):
+        rejected = 0
+    message = partial.get("errorMessage")
+    return rejected, message if isinstance(message, str) else ""

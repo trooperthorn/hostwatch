@@ -1,12 +1,12 @@
 # hostwatch agent as a TrueNAS custom app (Apps > Discover Apps > Custom App > Install via YAML).
 #
-# The agent role collects on this host and pushes to the hub. The hub URL and the
+# The agent collects on this host and sends OTLP to Observe. The Observe URL and the
 # ingest key are not in this file: both live in agent.env on the data dataset (see
 # docs/deploy-truenas.md), so no secret value is stored in the app definition.
 # The TrueNAS API key is a file mounted read-only and named by an environment
 # variable; its value is never placed in the environment.
 #
-# Host networking lets the agent reach the hub and Scrutiny without published ports.
+# Host networking lets the agent reach Observe and Scrutiny without published ports.
 # The host /proc is deliberately not mounted: ZFS pool state is read from the
 # container's own /proc/spl/kstat. Adjust /mnt/Apps/hostwatch to your dataset path.
 services:
@@ -35,7 +35,6 @@ services:
     env_file:
       - /mnt/Apps/hostwatch/agent.env
     environment:
-      HOSTWATCH_ROLE: agent
       HOSTWATCH_HOST_NAME: TrueNAS-SVR
       HOSTWATCH_TRUENAS_URL: wss://127.0.0.1/api/current
       HOSTWATCH_TRUENAS_API_KEY_FILE: /secrets/truenas-api-key

@@ -14,11 +14,13 @@ from __future__ import annotations
 
 import httpx
 
+from .. import tiers
 from .base import Collector
 
 
 class ScrutinyCollector(Collector):
     id = "scrutiny"
+    tier = tiers.STORAGE_HEALTH
 
     def __init__(self, sysfs, procfs, url: str) -> None:
         super().__init__(sysfs, procfs)

@@ -50,9 +50,10 @@ LABEL org.opencontainers.image.title="hostwatch" \
 
 USER hostwatch
 VOLUME ["/data"]
-# The check uses the Python standard library, so the image needs no curl. It probes the
-# local health endpoint on the configured port and scheme. The start period gives the first
-# collection cycle and database setup time before failures count.
+# The agent serves nothing, so the check reads the marker file the agent loop rewrites every
+# few seconds in the data directory and fails when it is stale. It says the loop is turning, not
+# that Observe is receiving; delivery trouble is reported by the outbox source. The start period
+# gives the first detection pass time before failures count.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
   CMD ["python", "-m", "hostwatch", "healthcheck"]
 ENTRYPOINT ["python", "-m", "hostwatch"]

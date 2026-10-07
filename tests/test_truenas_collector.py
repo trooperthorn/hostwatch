@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from agent_helpers import collect_once
 import copy
 import dataclasses
 
@@ -185,7 +186,7 @@ def test_new_last_occurrence_of_the_same_alert_is_a_new_key(tmp_path):
 
 def agent_with(tmp_path, client):
     cfg = dataclasses.replace(Config(), data_dir=tmp_path / "data", sysfs=tmp_path / "sys",
-                              procfs=tmp_path / "proc", host_name="nas", hub_url="http://127.0.0.1:1",
+                              procfs=tmp_path / "proc", host_name="nas",
                               journal=tmp_path / "nojournal", pstore=tmp_path / "nopstore",
                               rasdaemon_db=tmp_path / "nodb", truenas_url="")
     (tmp_path / "data").mkdir(exist_ok=True)
@@ -199,8 +200,8 @@ def agent_with(tmp_path, client):
 
 def test_alert_is_recorded_once_and_not_repeated_next_cycle(tmp_path):
     agent = agent_with(tmp_path, FakeClient())
-    first = [e for e in agent.collect_once().events if e.kind == "truenas.alert"]
-    second = [e for e in agent.collect_once().events if e.kind == "truenas.alert"]
+    first = [e for e in collect_once(agent).events if e.kind == "truenas.alert"]
+    second = [e for e in collect_once(agent).events if e.kind == "truenas.alert"]
     assert len(first) == 1 and second == []
     assert agent.status["truenas"].available and agent.status["truenas_alerts"].available
 
@@ -208,7 +209,7 @@ def test_alert_is_recorded_once_and_not_repeated_next_cycle(tmp_path):
 def test_api_failure_is_unavailable_with_a_reason(tmp_path):
     bad = Result(False, reason="connection failed: OSError")
     agent = agent_with(tmp_path, FakeClient(**{"pool.query": bad}))
-    batch = agent.collect_once()
+    batch = collect_once(agent)
     status = next(s for s in batch.sources if s.source == "truenas")
     assert not status.available and "pool.query failed" in status.reason and status.present
     assert not [s for s in batch.samples if s.source == "truenas"]
@@ -239,23 +240,11 @@ def test_configured_but_unreachable_is_present_and_unavailable(tmp_path):
     assert c.client.closed
 
 
-def test_summary_shows_the_corrected_error_pool_as_a_warning_naming_the_disk(tmp_path):
-    import time
-
-    from hostwatch.integrations.summary import build_host_summary
-    from hostwatch.schema import Batch, SourceStatus
-    from hostwatch.store import Store
-
+def test_the_corrected_error_pool_is_a_warning_naming_the_disk(tmp_path):
     samples = collector(tmp_path).collect()
-    store = Store(tmp_path / "db.sqlite")
-    store.ingest_batch(Batch(agent_version="t", host="nas", platform="x86", sent_at=time.time(),
-                             sources=[SourceStatus(source="truenas", available=True)], samples=samples))
-    summary = build_host_summary(store, "nas", time.time())
-    pools = {c.labels["pool"]: c for c in summary.pools}
-    assert pools["Apps"].state == "warning" and pools["Apps"].status == 1
-    assert SDM_SERIAL in pools["Apps"].reason and "sdm" in pools["Apps"].reason
-    assert pools["Vault"].state == "ok"
-    assert summary.status == 1
+    apps, vault = health(samples, "Apps"), health(samples, "Vault")
+    assert apps.value == 1.0 and SDM_SERIAL in apps.labels["reason"] and "sdm" in apps.labels["reason"]
+    assert vault.value == 0.0
 
 
 @pytest.mark.parametrize("state", ["CANT_OPEN", "UNKNOWN", "", "OFFLINE", "DEGRADED"])

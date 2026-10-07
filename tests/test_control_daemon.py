@@ -697,7 +697,7 @@ def test_no_collector_module_imports_the_control_package_at_import_time():
 
 
 def test_importing_every_collector_entry_does_not_load_the_control_package():
-    code = ("import sys, hostwatch.__main__, hostwatch.agent, hostwatch.hub, hostwatch.cli, hostwatch.store, "
+    code = ("import sys, hostwatch.__main__, hostwatch.agent, hostwatch.cli, hostwatch.config, "
             "hostwatch.windows.service as s; hostwatch.cli._parser(); "
             "print(sorted(m for m in sys.modules if m.startswith('hostwatch.control')))")
     out = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, timeout=120)

@@ -1,15 +1,11 @@
 [project]
 name = "hostwatch"
 version = "0.1.0"
-description = "Host health, power, and crash monitoring with authenticated API access"
+description = "Host health, power, and crash agent that sends OpenTelemetry data to Observe"
 requires-python = ">=3.11"
 dependencies = [
-  "fastapi>=0.110",
-  "uvicorn>=0.29",
   "httpx>=0.27",
   "pydantic>=2.6",
-  "argon2-cffi>=23.1",
-  "paho-mqtt>=2.0",
   "websockets>=13",
 ]
 
@@ -26,9 +22,6 @@ build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
 include = ["hostwatch*"]
-
-[tool.setuptools.package-data]
-hostwatch = ["web/*.html", "web/*.css", "web/*.js", "web/icons/*.svg", "web/icons/LICENSE", "web/icons/README", "web/icons/VERSION"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

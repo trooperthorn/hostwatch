@@ -1,10 +1,8 @@
-# hostwatch, single-container "all" role (hub + Linux agent).
+# hostwatch Linux agent. It collects on this host and sends OTLP to Observe; it serves nothing.
 #
-# network_mode host: the agent reaches Scrutiny on localhost, and the hub binds
-# to 127.0.0.1 by default (HOSTWATCH_HUB_BIND). The bind address is exposure
-# control, not authentication. The hub refuses a non-loopback bind unless
-# HOSTWATCH_TLS_CERT and HOSTWATCH_TLS_KEY are set (mount the files read-only
-# and use container paths) or HOSTWATCH_ALLOW_INSECURE_BIND=1 is set.
+# network_mode host: the agent reaches Scrutiny, a NUT server or a TrueNAS API on localhost
+# without published ports. The Observe URL and the ingest key come from .env (copy
+# .env.example, mode 0600); no secret value is stored in this file.
 services:
   hostwatch:
     build: ..

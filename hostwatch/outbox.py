@@ -1,61 +1,72 @@
 """Durable agent outbox.
 
-Batches wait in a SQLite file in the data directory until the hub answers 2xx,
-so an agent restart or a hub outage delays delivery but does not lose events.
-Progress markers (journal cursor, rasdaemon high-water ids, pstore sent keys,
-the pending boot event) live in the same file. A source stages a marker while it
-reads, and `enqueue` writes the batch and every staged marker in one
-transaction. A crash therefore leaves either both or neither: a marker never
-runs ahead of the events that were queued for it.
+The outbox holds OTLP requests, already encoded, until Observe answers 2xx, so an agent restart or
+an Observe outage delays delivery but does not lose events. A request is stored with its headers,
+including the Idempotency-Key, and its exact body. A replay after a restart therefore sends the
+same bytes under the same key, which Observe recognises as a repeat and stores once.
 
-Overflow policy: when more than `max_batches` batches wait, the oldest batch is
-stripped of its samples (counted as dropped). Its events are kept by moving
-them into the next batch, which then gets a new batch_id, because the hub may
-already have acknowledged the old id. A batch left with nothing is deleted.
+Progress markers (journal cursor, rasdaemon high-water ids, pstore sent keys, the pending boot
+events, the threshold state) live in the same file. A source stages a marker while it reads, and
+`enqueue` writes the requests and every staged marker in one transaction. A crash therefore leaves
+either both or neither: a marker never runs ahead of the events that were queued for it.
 
-A batch the hub refuses with 400 or 422 can never succeed, so it moves to the
-dead_letters table with the status and no longer blocks the queue head. No
-other hub answer moves a batch: a 5xx is the hub's problem, so the batch waits.
+The queue is bounded in count, in bytes and in age, and each limit is enforced when a request is
+added and again before each delivery pass. Metrics are the cheaper loss, because the next poll
+brings a fresh reading, so they go first: a metrics request older than MAX_METRICS_AGE_S is
+dropped, and when the queue is over a limit the oldest metrics request is dropped before any log
+request. Log requests carry events, and an event is the thing the owner most wants to keep, so
+they are kept for MAX_LOGS_AGE_S and are dropped only when no metrics request is left to drop.
+Every drop is counted and reported through the agent's outbox source status.
 
-A row whose payload cannot be decoded can never be sent either. It moves to
-dead_letters with status 0 and the decode error, is counted as undecodable, and
-the queue moves on. Quarantined rows are never trimmed by the dead-letter cap.
+A request that Observe refuses with a status that can never succeed (see agent.DEAD_LETTER_STATUSES)
+moves to the dead_letters table with the status and no longer blocks the queue head. No other
+answer moves a request: a 5xx, a 429, a 401 or a 403 describes the receiver, the key or the
+network, so the request waits for them to be put right.
+
+A row whose headers cannot be decoded can never be sent. It moves to dead_letters with status 0
+and the decode error, and the queue moves on.
 
 A file that SQLite reports as not a database or as malformed is renamed to
-outbox.db.corrupt-<timestamp> together with any -wal, -shm or -journal sidecar,
-an error is logged, and a fresh outbox starts. Other errors, such as a locked
-database or an I/O error, say nothing about the file contents, so they are
-raised and the file is left alone. `recovered_from` names the renamed file so
-the agent can report the loss.
+outbox.db.corrupt-<timestamp> together with any -wal, -shm or -journal sidecar, an error is
+logged, and a fresh outbox starts. Other errors, such as a locked database or an I/O error, say
+nothing about the file contents, so they are raised and the file is left alone. `recovered_from`
+names the renamed file so the agent can report the loss.
 """
 
 from __future__ import annotations
 
+import json
 import logging
 import sqlite3
 import threading
 import time
-import uuid
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
-from .schema import Batch
+from .otlp import OtlpRequest
 
 log = logging.getLogger("hostwatch.outbox")
 
 OUTBOX_FILE = "outbox.db"
 MAX_DEAD_LETTERS = 1000
+MAX_REQUESTS = 2000
+MAX_BYTES = 32 * 1024 * 1024
+MAX_METRICS_AGE_S = 6 * 3600.0
+MAX_LOGS_AGE_S = 7 * 86400.0
 
 _SCHEMA = """
-CREATE TABLE IF NOT EXISTS batches (
-  seq INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, payload TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS requests (
+  seq INTEGER PRIMARY KEY AUTOINCREMENT, entry_id TEXT NOT NULL, signal TEXT NOT NULL,
+  path TEXT NOT NULL, headers TEXT NOT NULL, body BLOB NOT NULL, count INTEGER NOT NULL,
+  created REAL NOT NULL);
 CREATE TABLE IF NOT EXISTS markers (key TEXT PRIMARY KEY, value TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS dead_letters (
-  id INTEGER PRIMARY KEY AUTOINCREMENT, batch_id TEXT NOT NULL, status INTEGER NOT NULL,
-  ts REAL NOT NULL, payload TEXT NOT NULL, quarantined INTEGER NOT NULL DEFAULT 0, error TEXT);
+  id INTEGER PRIMARY KEY AUTOINCREMENT, entry_id TEXT NOT NULL, signal TEXT NOT NULL,
+  status INTEGER NOT NULL, ts REAL NOT NULL, headers TEXT NOT NULL, body BLOB NOT NULL, error TEXT);
 CREATE TABLE IF NOT EXISTS counters (name TEXT PRIMARY KEY, value INTEGER NOT NULL);
+DROP TABLE IF EXISTS batches;
 """
-
 
 CORRUPT_MARKERS = ("file is not a database", "malformed", "file is encrypted")
 SIDECAR_SUFFIXES = ("-wal", "-shm", "-journal")
@@ -70,7 +81,7 @@ def _is_corruption(exc: sqlite3.DatabaseError) -> bool:
 class Markers(Protocol):
     """What an event source needs: read a marker, stage a new value (None
     clears it). Staged values are visible to `get` at once and become durable
-    when the batch that carries them is enqueued."""
+    when the request that carries them is enqueued."""
 
     def get(self, key: str) -> str | None: ...
     def stage(self, key: str, value: str | None) -> None: ...
@@ -92,11 +103,29 @@ class MemoryMarkers:
             self.values[key] = value
 
 
+@dataclass(frozen=True)
+class QueuedRequest:
+    seq: int
+    entry_id: str
+    signal: str
+    path: str
+    headers: dict[str, str]
+    body: bytes
+    count: int
+    created: float
+
+
 class Outbox:
-    def __init__(self, path: Path, max_batches: int = 240) -> None:
-        if max_batches < 2:
-            raise ValueError("max_batches must be at least 2")
-        self.max_batches = max_batches
+    def __init__(self, path: Path, max_requests: int = MAX_REQUESTS, max_bytes: int = MAX_BYTES,
+                 max_metrics_age_s: float = MAX_METRICS_AGE_S, max_logs_age_s: float = MAX_LOGS_AGE_S,
+                 clock=time.time) -> None:
+        if max_requests < 2:
+            raise ValueError("max_requests must be at least 2")
+        self.max_requests = max_requests
+        self.max_bytes = max_bytes
+        self.max_metrics_age_s = max_metrics_age_s
+        self.max_logs_age_s = max_logs_age_s
+        self._clock = clock
         path.parent.mkdir(parents=True, exist_ok=True)
         self._lock = threading.RLock()
         self.recovered_from: Path | None = None
@@ -121,7 +150,7 @@ class Outbox:
                     side.rename(moved.with_name(moved.name + suffix))
             path.rename(moved)
             log.error("outbox %s could not be opened (%s); moved to %s and a fresh outbox was started. "
-                      "Queued batches and source progress markers in it are lost", path, exc, moved)
+                      "Queued requests and source progress markers in it are lost", path, exc, moved)
             self.recovered_from = moved
             self._db = self._open(path)
         self._staged: dict[str, str | None] = {}
@@ -134,22 +163,15 @@ class Outbox:
             db.execute("PRAGMA synchronous=FULL")
             with db:
                 db.executescript(_SCHEMA)
-            cols = [r[1] for r in db.execute("PRAGMA table_info(dead_letters)")]
-            if "quarantined" not in cols:
-                with db:
-                    db.execute("ALTER TABLE dead_letters ADD COLUMN quarantined INTEGER NOT NULL DEFAULT 0")
-            if "error" not in cols:
-                with db:
-                    db.execute("ALTER TABLE dead_letters ADD COLUMN error TEXT")
-            db.execute("SELECT COUNT(*) FROM batches").fetchone()
+            db.execute("SELECT COUNT(*) FROM requests").fetchone()
         except sqlite3.DatabaseError:
             db.close()
             raise
         return db
 
     def discard_staged(self) -> None:
-        """Forget staged markers, used when a cycle failed before its batch was
-        written so no marker runs ahead of events that were never queued."""
+        """Forget staged markers, used when a cycle failed before its requests were written so no
+        marker runs ahead of events that were never queued."""
         with self._lock:
             self._staged.clear()
 
@@ -169,22 +191,6 @@ class Outbox:
         with self._lock:
             self._staged[key] = value
 
-    # queue
-    def enqueue(self, batch: Batch) -> None:
-        """Write the batch and all staged markers in one transaction."""
-        with self._lock:
-            with self._db:
-                self._db.execute("INSERT INTO batches (batch_id, payload) VALUES (?, ?)",
-                                 (batch.batch_id or str(uuid.uuid4()), batch.model_dump_json()))
-                self._write_staged()
-                self._enforce_cap()
-            self._staged.clear()
-            dropped = self.dropped_since_drain()
-            if dropped > self._warned_drop:
-                log.warning("outbox over its cap of %d batches: %d sample(s) dropped since the queue last "
-                            "drained; events were kept", self.max_batches, dropped)
-                self._warned_drop = dropped
-
     def _write_staged(self) -> None:
         for key, value in self._staged.items():
             if value is None:
@@ -193,13 +199,14 @@ class Outbox:
                 self._db.execute("INSERT OR REPLACE INTO markers (key, value) VALUES (?, ?)", (key, value))
 
     def commit_staged(self) -> None:
-        """Make staged markers durable without a batch. Used for the boot event,
-        which must survive a restart before the first batch is built."""
+        """Make staged markers durable without a request. Used for the boot event, which must
+        survive a restart before the first request is built."""
         with self._lock:
             with self._db:
                 self._write_staged()
             self._staged.clear()
 
+    # counters
     def _bump(self, name: str, by: int) -> None:
         self._db.execute("INSERT INTO counters (name, value) VALUES (?, ?) "
                          "ON CONFLICT(name) DO UPDATE SET value = value + excluded.value", (name, by))
@@ -208,104 +215,140 @@ class Outbox:
         row = self._db.execute("SELECT value FROM counters WHERE name=?", (name,)).fetchone()
         return row[0] if row else 0
 
-    def _move_undecodable(self, seq: int, batch_id: str, payload: str, exc: Exception) -> None:
-        """Move a row that cannot be decoded to dead_letters. The caller owns the
-        transaction."""
-        self._db.execute("INSERT INTO dead_letters (batch_id, status, ts, payload, quarantined, error) "
-                         "VALUES (?, 0, ?, ?, 1, ?)", (batch_id, time.time(), payload, f"{type(exc).__name__}: {exc}"[:500]))
-        self._db.execute("DELETE FROM batches WHERE seq=?", (seq,))
-        self._bump("undecodable", 1)
-        log.error("outbox row %s (batch %s) could not be decoded (%s); moved to the dead-letter table",
-                  seq, batch_id, exc)
+    # queue
+    def enqueue(self, requests: list[OtlpRequest], entry_id: str) -> None:
+        """Write the requests of one entry and all staged markers in one transaction. An entry with
+        no requests still commits the staged markers."""
+        with self._lock:
+            if not requests and not self._staged:
+                return  # nothing to write, so no transaction and no fsync
+            now = self._clock()
+            with self._db:
+                for r in requests:
+                    self._db.execute(
+                        "INSERT INTO requests (entry_id, signal, path, headers, body, count, created) "
+                        "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                        (entry_id, r.signal, r.path, json.dumps(r.headers, sort_keys=True), r.body, r.count, now))
+                self._write_staged()
+                self._enforce(now)
+            self._staged.clear()
+            dropped = self.dropped_total()
+            if dropped > self._warned_drop:
+                log.warning("outbox over a limit (%d requests, %d bytes, or too old): %d data point(s) and "
+                            "%d log record(s) dropped in total; events are dropped last",
+                            self.max_requests, self.max_bytes, self.dropped_points_total(),
+                            self.dropped_records_total())
+                self._warned_drop = dropped
 
-    def _enforce_cap(self) -> None:
-        while self._db.execute("SELECT COUNT(*) FROM batches").fetchone()[0] > self.max_batches:
-            seq, old_id, payload = self._db.execute(
-                "SELECT seq, batch_id, payload FROM batches ORDER BY seq LIMIT 1").fetchone()
-            try:
-                old = Batch.model_validate_json(payload)
-            except ValueError as exc:
-                self._move_undecodable(seq, old_id, payload, exc)
-                continue
-            dropped = len(old.samples)
-            if dropped:
-                self._bump("dropped_samples", dropped)
-                self._bump("dropped_since_drain", dropped)
-            nxt_seq, nxt_id, nxt_payload = self._db.execute(
-                "SELECT seq, batch_id, payload FROM batches WHERE seq > ? ORDER BY seq LIMIT 1", (seq,)).fetchone()
-            if old.events:
-                try:
-                    nxt = Batch.model_validate_json(nxt_payload)
-                except ValueError as exc:
-                    self._move_undecodable(nxt_seq, nxt_id, nxt_payload, exc)
-                    continue
-                nxt = nxt.model_copy(update={"events": [*old.events, *nxt.events],
-                                             "batch_id": str(uuid.uuid4())})
-                self._db.execute("UPDATE batches SET batch_id=?, payload=? WHERE seq=?",
-                                 (nxt.batch_id, nxt.model_dump_json(), nxt_seq))
-            self._db.execute("DELETE FROM batches WHERE seq=?", (seq,))
+    def prune(self) -> None:
+        """Apply the age and size limits now. The agent calls it before each delivery pass, so a
+        long outage does not leave stale readings to be sent when Observe comes back."""
+        with self._lock, self._db:
+            self._enforce(self._clock())
+
+    def _drop(self, seq: int, signal: str, count: int) -> None:
+        self._db.execute("DELETE FROM requests WHERE seq=?", (seq,))
+        self._bump("dropped_requests", 1)
+        self._bump("dropped_points" if signal == "metrics" else "dropped_records", count)
+        self._bump("dropped_since_drain", 1)
+
+    def _enforce(self, now: float) -> None:
+        for signal, age in (("metrics", self.max_metrics_age_s), ("logs", self.max_logs_age_s)):
+            for seq, count in self._db.execute(
+                    "SELECT seq, count FROM requests WHERE signal=? AND created < ?",
+                    (signal, now - age)).fetchall():
+                self._drop(seq, signal, count)
+        while True:
+            n, size = self._db.execute("SELECT COUNT(*), COALESCE(SUM(LENGTH(body)), 0) FROM requests").fetchone()
+            if n <= self.max_requests and size <= self.max_bytes:
+                return
+            row = (self._db.execute("SELECT seq, signal, count FROM requests WHERE signal='metrics' "
+                                    "ORDER BY seq LIMIT 1").fetchone()
+                   or self._db.execute("SELECT seq, signal, count FROM requests ORDER BY seq LIMIT 1").fetchone())
+            if row is None:
+                return
+            self._drop(*row)
 
     def depth(self) -> int:
         with self._lock:
-            return self._db.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+            return self._db.execute("SELECT COUNT(*) FROM requests").fetchone()[0]
 
-    def peek(self) -> tuple[int, Batch] | None:
-        """The oldest decodable batch. A row that cannot be decoded is moved to
-        dead_letters on the way, so one bad row never blocks the ones behind it."""
+    def size_bytes(self) -> int:
+        with self._lock:
+            return self._db.execute("SELECT COALESCE(SUM(LENGTH(body)), 0) FROM requests").fetchone()[0]
+
+    def peek(self) -> QueuedRequest | None:
+        """The oldest request. A row whose headers cannot be decoded is moved to dead_letters on the
+        way, so one bad row never blocks the ones behind it."""
         with self._lock:
             while True:
                 row = self._db.execute(
-                    "SELECT seq, batch_id, payload FROM batches ORDER BY seq LIMIT 1").fetchone()
+                    "SELECT seq, entry_id, signal, path, headers, body, count, created FROM requests "
+                    "ORDER BY seq LIMIT 1").fetchone()
                 if row is None:
                     return None
                 try:
-                    return row[0], Batch.model_validate_json(row[2])
+                    headers = json.loads(row[4])
+                    if not isinstance(headers, dict):
+                        raise ValueError("headers are not an object")
+                    return QueuedRequest(row[0], row[1], row[2], row[3], headers, bytes(row[5]), row[6], row[7])
                 except ValueError as exc:
-                    with self._db:
-                        self._move_undecodable(row[0], row[1], row[2], exc)
+                    self.dead_letter(row[0], 0, f"undecodable headers: {exc}")
 
     def ack(self, seq: int) -> None:
-        """Remove a delivered batch. Called only after a 2xx answer."""
+        """Remove a delivered request. Called only after a 2xx answer."""
         with self._lock, self._db:
-            self._db.execute("DELETE FROM batches WHERE seq=?", (seq,))
-            if self._db.execute("SELECT COUNT(*) FROM batches").fetchone()[0] == 0:
+            self._db.execute("DELETE FROM requests WHERE seq=?", (seq,))
+            if self._db.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0:
                 self._db.execute("DELETE FROM counters WHERE name='dropped_since_drain'")
                 self._warned_drop = 0
 
-    def dead_letter(self, seq: int, status: int, quarantine: bool = False) -> None:
+    def dead_letter(self, seq: int, status: int, error: str = "") -> None:
         with self._lock, self._db:
-            row = self._db.execute("SELECT batch_id, payload FROM batches WHERE seq=?", (seq,)).fetchone()
+            row = self._db.execute("SELECT entry_id, signal, headers, body FROM requests WHERE seq=?",
+                                   (seq,)).fetchone()
             if row is None:
                 return
-            self._db.execute("INSERT INTO dead_letters (batch_id, status, ts, payload, quarantined) "
-                             "VALUES (?, ?, ?, ?, ?)", (row[0], status, time.time(), row[1], int(quarantine)))
-            self._db.execute("DELETE FROM batches WHERE seq=?", (seq,))
-            self._db.execute("DELETE FROM dead_letters WHERE quarantined=0 AND id <= "
-                             "(SELECT MAX(id) FROM dead_letters) - ?", (MAX_DEAD_LETTERS,))
-            if quarantine:
-                self._bump("quarantined", 1)
-        if quarantine:
-            log.error("batch %s failed repeatedly with status %d; quarantined to the dead-letter table",
-                      row[0], status)
-        else:
-            log.error("hub refused batch %s with status %d; moved to the dead-letter table", row[0], status)
+            self._db.execute("INSERT INTO dead_letters (entry_id, signal, status, ts, headers, body, error) "
+                             "VALUES (?, ?, ?, ?, ?, ?, ?)",
+                             (row[0], row[1], status, time.time(), row[2], row[3], error[:500] or None))
+            self._db.execute("DELETE FROM requests WHERE seq=?", (seq,))
+            self._db.execute("DELETE FROM dead_letters WHERE id <= (SELECT MAX(id) FROM dead_letters) - ?",
+                             (MAX_DEAD_LETTERS,))
+        log.error("request %s (%s) was refused with status %d and moved to the dead-letter table%s",
+                  row[0], row[1], status, f": {error}" if error else "")
 
-    def undecodable_total(self) -> int:
-        with self._lock:
-            return self._counter("undecodable")
-
-    def quarantined_total(self) -> int:
-        with self._lock:
-            return self._counter("quarantined")
+    def note_rejected(self, signal: str, count: int) -> None:
+        """Count data points or log records Observe accepted the request for but refused."""
+        if count > 0:
+            with self._lock, self._db:
+                self._bump("rejected_points" if signal == "metrics" else "rejected_records", count)
 
     def dead_letter_count(self) -> int:
         with self._lock:
             return self._db.execute("SELECT COUNT(*) FROM dead_letters").fetchone()[0]
 
     def dropped_total(self) -> int:
+        """Requests dropped for age or size since the file was created."""
         with self._lock:
-            return self._counter("dropped_samples")
+            return self._counter("dropped_requests")
+
+    def dropped_points_total(self) -> int:
+        with self._lock:
+            return self._counter("dropped_points")
+
+    def dropped_records_total(self) -> int:
+        with self._lock:
+            return self._counter("dropped_records")
 
     def dropped_since_drain(self) -> int:
         with self._lock:
             return self._counter("dropped_since_drain")
+
+    def rejected_points_total(self) -> int:
+        with self._lock:
+            return self._counter("rejected_points")
+
+    def rejected_records_total(self) -> int:
+        with self._lock:
+            return self._counter("rejected_records")

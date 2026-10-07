@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 
 from hostwatch import otel_map as m
-from hostwatch.schema import Event, Sample, SourceStatus
+from hostwatch.model import Event, Sample, SourceStatus
 
 FIXTURES = Path(__file__).parent / "fixtures" / "otel"
 COLLECTORS = sorted(p.stem for p in FIXTURES.glob("*.json") if p.stem != "events")

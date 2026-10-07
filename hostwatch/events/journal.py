@@ -26,7 +26,7 @@ from collections.abc import Callable, Iterable
 from pathlib import Path
 
 from ..outbox import Markers
-from ..schema import Event, SourceStatus
+from ..model import Event, SourceStatus
 
 SOURCE = "journal"
 CURSOR_FILE = "journal.cursor"
@@ -292,7 +292,7 @@ class JournalWatcher:
                  previous_boot_reader: Callable[[Path, str], Iterable[str]] | None = None,
                  list_boots_reader: Callable[[Path], Iterable[str]] | None = None) -> None:
         """With markers (the agent outbox), the cursor is staged and becomes
-        durable together with the batch that carries the events read. Without
+        durable together with the requests that carry the events read. Without
         markers the cursor is saved to a file at once, for standalone use."""
         self.directory = directory
         self.cursor_path = data_dir / CURSOR_FILE

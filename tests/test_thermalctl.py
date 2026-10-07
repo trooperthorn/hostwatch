@@ -2,15 +2,18 @@
 
 from __future__ import annotations
 
+from agent_helpers import collect_once
 import json
 import time
 
 import pytest
-from test_zfs import H, Agent, Config, Store, build_host_summary
+from hostwatch.agent import Agent
+from hostwatch.config import Config
+
+H = "h1"
 
 from hostwatch.collectors import build_collectors
 from hostwatch.collectors.thermalctl import FUTURE_SKEW_S, STALE_AFTER_S, ThermalctlCollector, ThermalctlError
-from hostwatch.integrations.summary import group_documents
 
 NOW = 1_000_000.0
 
@@ -96,7 +99,7 @@ def test_stale_timestamp_is_unavailable(tmp_path):
 
 
 def test_thermalctl_is_registered_with_configured_path(tmp_path):
-    cfg = Config(ingest_token="x" * 32, data_dir=tmp_path, thermalctl_status=str(tmp_path / "s.json"))
+    cfg = Config( data_dir=tmp_path, thermalctl_status=str(tmp_path / "s.json"))
     found = [c for c in build_collectors(cfg) if c.id == "thermalctl"]
     assert len(found) == 1 and str(found[0].path) == str(tmp_path / "s.json")
 
@@ -105,27 +108,26 @@ def run(tmp_path, document):
     f = write(tmp_path, document)
     data = tmp_path / "data"
     data.mkdir()
-    agent = Agent(Config(procfs=tmp_path / "proc", sysfs=tmp_path / "sys", data_dir=data, ingest_token="x" * 32,
+    agent = Agent(Config(procfs=tmp_path / "proc", sysfs=tmp_path / "sys", data_dir=data,
                          host_name=H, journal=tmp_path / "j", journal_volatile=tmp_path / "jv",
                          pstore=tmp_path / "p", scrutiny_url="", thermalctl_status=str(f)))
-    batch = agent.collect_once()
-    store = Store(tmp_path / "db.sqlite")
-    store.ingest_batch(batch.model_copy(update={"host": H, "sent_at": time.time()}))
-    return batch, build_host_summary(store, H, time.time())
+    return collect_once(agent)
 
 
-def test_headers_appear_under_fans(tmp_path):
-    _, s = run(tmp_path, doc(ts=time.time(), state="failsafe", reasons=("stall",)))
-    fan = next(c for c in s.fans if c.labels.get("chip") == "thermalctl")
-    assert fan.value == 1200.0 and fan.state == "warning" and "stall" in fan.reason
-    fans = next(g for g in group_documents(s) if g["id"] == "fans")
-    assert fans["status"] == "warning" and any("thermalctl" in m["name"] for m in fans["members"])
+def thermal(cycle, metric):
+    return [x for x in cycle.samples if x.source == "thermalctl" and x.metric == metric]
 
 
-def test_normal_header_is_ok_in_fans(tmp_path):
-    _, s = run(tmp_path, doc(ts=time.time()))
-    fan = next(c for c in s.fans if c.labels.get("chip") == "thermalctl")
-    assert fan.state == "ok"
+def test_headers_are_reported_as_fans_with_their_failsafe_reasons(tmp_path):
+    cycle = run(tmp_path, doc(ts=time.time(), state="failsafe", reasons=("stall",)))
+    [fan] = thermal(cycle, "fan")
+    assert fan.value == 1200.0 and fan.labels.get("state") == "failsafe" and "stall" in fan.labels.get("reasons", "")
+
+
+def test_normal_header_has_no_failsafe_reason(tmp_path):
+    cycle = run(tmp_path, doc(ts=time.time()))
+    [fan] = thermal(cycle, "fan")
+    assert fan.labels.get("state") == "active" and not fan.labels.get("reasons")
 
 
 def test_host_without_controller_reports_present_false(tmp_path):
@@ -133,12 +135,12 @@ def test_host_without_controller_reports_present_false(tmp_path):
     (tmp_path / "proc").mkdir()
     data = tmp_path / "data"
     data.mkdir()
-    agent = Agent(Config(procfs=tmp_path / "proc", sysfs=tmp_path / "sys", data_dir=data, ingest_token="x" * 32,
+    agent = Agent(Config(procfs=tmp_path / "proc", sysfs=tmp_path / "sys", data_dir=data,
                          host_name=H, journal=tmp_path / "j", journal_volatile=tmp_path / "jv",
                          pstore=tmp_path / "p", scrutiny_url="",
                          thermalctl_status=str(tmp_path / "run" / "thermalctl" / "status.json")))
     (tmp_path / "run").mkdir()
-    st = {x.source: x for x in agent.collect_once().sources}["thermalctl"]
+    st = {x.source: x for x in collect_once(agent).sources}["thermalctl"]
     assert st.available is False and st.present is False
 
 
@@ -165,10 +167,10 @@ def test_agent_marks_a_collector_that_went_stale_unavailable_with_its_reason(tmp
     (tmp_path / "proc").mkdir()
     data = tmp_path / "data"
     data.mkdir()
-    agent = Agent(Config(procfs=tmp_path / "proc", sysfs=tmp_path / "sys", data_dir=data, ingest_token="x" * 32,
+    agent = Agent(Config(procfs=tmp_path / "proc", sysfs=tmp_path / "sys", data_dir=data,
                          host_name=H, journal=tmp_path / "j", journal_volatile=tmp_path / "jv",
                          pstore=tmp_path / "p", scrutiny_url="", thermalctl_status=str(f)))
     agent.detect()
     f.write_text(json.dumps(doc(ts=time.time() - STALE_AFTER_S - 30)))
-    st = {x.source: x for x in agent.collect_once().sources}["thermalctl"]
+    st = {x.source: x for x in collect_once(agent).sources}["thermalctl"]
     assert st.available is False and "stale" in st.reason and st.present is True

@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from ..schema import Event
+from ..model import Event
 
 log = logging.getLogger("hostwatch.boot")
 
@@ -50,7 +50,7 @@ PRECEDENCE = (
     "watchdog_reset: watchdog bootstatus card_reset",
     "clean_shutdown: journal shutdown sequence completed",
     "watchdog_reset: journal watchdog message without a completed shutdown",
-    "power_loss: a hub-side witness (smart plug outage or UPS on battery) overlaps the unclean end",
+    "power_loss: an outside witness (smart plug outage or UPS on battery) overlaps the unclean end",
     "unknown_unclean: journal read and ended abruptly, even if the agent stopped",
     "agent_stopped: agent stopped and the journal could not be read",
     "unknown",
@@ -351,7 +351,7 @@ def missed_boot_classification(rec: dict, hints: dict[str, bool] | None, unavail
 
 
 def boot_event(c: Classification, now: float | None = None) -> Event:
-    """Build the wire event. dedup_key carries boot_id so the hub keeps one row
+    """Build the event. dedup_key carries boot_id so Observe keeps one row
     per boot even if the agent resends. The event time is the previous heartbeat
     (last known alive); the time of detection is in detail.detected_at. With no
     previous heartbeat, the current time is used."""

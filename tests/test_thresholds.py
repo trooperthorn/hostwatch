@@ -1,11 +1,12 @@
-"""Threshold rules and their wiring into the agent batch."""
+"""Threshold rules and their wiring into the agent."""
 
 from __future__ import annotations
 
+from agent_helpers import collect_once
 from hostwatch.agent import Agent
 from hostwatch.config import Config
 from hostwatch.events.thresholds import ThresholdEngine
-from hostwatch.schema import Event, Sample, SourceStatus
+from hostwatch.model import Event, Sample, SourceStatus
 
 
 def md(metric, value, **labels):
@@ -64,12 +65,11 @@ def test_sync_change_and_scrutiny_growth():
     assert kinds(eng.evaluate([sc(0)], [], now=6)) == ["scrutiny.status_cleared"]
 
 
-def test_seed_from_store_prevents_repeat_on_restart():
+def test_saved_state_prevents_repeat_on_restart():
     first = ThresholdEngine()
-    ev = first.evaluate([md("degraded", 1)], [], now=10)
-    stored = [{**e.model_dump(), "id": 1} for e in ev]
+    first.evaluate([md("degraded", 1)], [], now=10)
     second = ThresholdEngine()
-    second.seed(stored)
+    second.load(first.dump())
     assert second.evaluate([md("degraded", 1)], [], now=20) == []
     assert kinds(second.evaluate([md("degraded", 0)], [], now=30)) == ["md.degraded_cleared"]
 
@@ -80,18 +80,17 @@ def test_agent_batch_includes_events_from_event_source_and_thresholds(tmp_path):
     procfs.mkdir()
     data.mkdir()
     (sysfs / "block/md0/md/degraded").write_text("1\n")
-    cfg = Config(sysfs=sysfs, procfs=procfs, data_dir=data, ingest_token="x" * 32, host_name="h",
+    cfg = Config(sysfs=sysfs, procfs=procfs, data_dir=data, host_name="h",
                  pstore=tmp_path / "none", journal=tmp_path / "none", rasdaemon_db=tmp_path / "none.db")
     agent = Agent(cfg)
     fake = Event(kind="fake.thing", severity="info", source="fake", ts=1.0, title="t", dedup_key="fake:1")
     agent.event_sources = {"fake": lambda: (SourceStatus(source="fake", available=True), [fake])}
-    agent.seeded = True  # threshold events are held back until the hub seed succeeds
     agent.detect()
-    batch = agent.collect_once()
+    batch = collect_once(agent)
     got = kinds(batch.events)
     assert "fake.thing" in got and "md.degraded" in got
     assert any(s.source == "fake" and s.available for s in batch.sources)
-    assert "fake.thing" not in kinds(agent.collect_once().events)  # not resent
+    assert "fake.thing" not in kinds(collect_once(agent).events)  # not resent
 
 
 def ups_flags(status):
@@ -124,11 +123,54 @@ def test_ups_steady_states_repeat_nothing_and_unknown_is_ignored():
     assert eng.evaluate(ups_flags("OB"), [], now=7) == []
 
 
-def test_ups_open_condition_survives_restart_via_seed():
+def test_ups_open_condition_survives_restart_via_saved_state():
     eng = ThresholdEngine()
     eng.evaluate(ups_flags("OL"), [], now=1)
-    stored = [e.model_dump() for e in eng.evaluate(ups_flags("OB"), [], now=2)]
+    eng.evaluate(ups_flags("OB"), [], now=2)
     eng2 = ThresholdEngine()
-    eng2.seed(stored)
+    eng2.load(eng.dump())
     assert eng2.evaluate(ups_flags("OB"), [], now=3) == []
     assert kinds(eng2.evaluate(ups_flags("OL"), [], now=4)) == ["ups.on_line"]
+
+
+def test_unreadable_saved_state_is_ignored():
+    eng = ThresholdEngine()
+    for raw in (None, "", "not json", "[1, 2]"):
+        eng.load(raw)
+        assert eng.state == {}
+    eng.load('{"a": true, "b": [1], "c": "x"}')
+    assert eng.state == {"a": True, "c": "x"}
+
+
+def test_vanished_source_is_critical_once_and_returns_once():
+    eng = ThresholdEngine()
+    up = SourceStatus(source="mdraid", available=True)
+    gone = SourceStatus(source="mdraid", available=False, present=False, reason="no md arrays")
+    assert eng.evaluate([], [up], now=1) == []
+    first = eng.evaluate([], [gone], now=2)
+    assert kinds(first) == ["source.disappeared"] and first[0].severity == "critical"
+    assert eng.evaluate([], [gone], now=3) == []
+    assert kinds(eng.evaluate([], [up], now=4)) == ["source.returned"]
+
+
+def test_a_source_that_never_was_present_raises_nothing():
+    eng = ThresholdEngine()
+    gone = SourceStatus(source="mdraid", available=False, present=False)
+    assert eng.evaluate([], [gone], now=1) == [] and eng.evaluate([], [gone], now=2) == []
+
+
+def test_present_but_unreadable_is_unavailable_not_disappeared():
+    eng = ThresholdEngine()
+    eng.evaluate([], [SourceStatus(source="mdraid", available=True)], now=1)
+    ev = eng.evaluate([], [SourceStatus(source="mdraid", available=False, present=True)], now=2)
+    assert kinds(ev) == ["source.unavailable"]
+
+
+def test_disappeared_source_is_not_repeated_after_a_restart():
+    eng = ThresholdEngine()
+    eng.evaluate([], [SourceStatus(source="mdraid", available=True)], now=1)
+    gone = SourceStatus(source="mdraid", available=False, present=False)
+    eng.evaluate([], [gone], now=2)
+    fresh = ThresholdEngine()
+    fresh.load(eng.dump())
+    assert fresh.evaluate([], [gone], now=3) == []

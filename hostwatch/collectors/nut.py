@@ -154,6 +154,7 @@ class NutClient:
 
 class NutCollector(Collector):
     id = "nut"
+    event_watch = True
     # A failed poll must not hide the source until the next re-detection: an on-battery
     # transition in that window would be missed. The agent polls it every cycle instead.
     retry_each_cycle = True

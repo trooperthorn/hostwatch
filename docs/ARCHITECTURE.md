@@ -4,25 +4,27 @@ This document describes how hostwatch is put together so that new work fits
 the existing shape. `PLAN.md` holds the phase goals and exit tests, and
 `CLAUDE.md` holds the working rules.
 
-## Processes and roles
+## Process
 
-One Python package and one container image. `HOSTWATCH_ROLE` selects the role:
+One Python package and one container image, with one role: the agent. It runs collectors and
+event sources on the host it is installed on and sends what it finds to Observe as OpenTelemetry
+(OTLP) over HTTP with a bearer ingest key. It listens on no port. Observe stores the data, shows it
+and raises the alerts. The hostwatch hub, its web UI, its database, its API keys and its Home
+Assistant, Orion and Prometheus outputs were retired with this conversion, and the old batch wire
+format went with them: nothing reads a `Batch` or posts to `/internal/v1/ingest` any more. There is
+no migration path from the old format; a host is redeployed with the new agent and a new ingest key.
 
-- `agent` runs collectors on a fixed interval and posts a `Batch`
-  (`hostwatch/schema.py`) to a hub over HTTP with a bearer token.
-- `hub` is a FastAPI app (`hostwatch/hub.py`) served by uvicorn. It validates
-  batches, stores them through `hostwatch/store.py` (SQLite on the `/data`
-  volume), and serves read endpoints.
-- `all` runs both in one process. The agent still posts over loopback HTTP, so
-  the wire schema is exercised exactly as a remote agent would use it.
+`hostwatch-control` is a separate daemon and is unchanged by the conversion. See the section on its
+verification below.
 
 ## Collectors
 
 Each collector in `hostwatch/collectors/` subclasses the base in `base.py`,
 detects whether its source exists on this host, and returns samples. A source
 that is absent or unreadable is reported in `SourceStatus` as unavailable with
-a reason. A sample whose value is `None` is stored as unavailable, never as
-zero. Collectors read from roots given in config (`HOSTWATCH_SYSFS`,
+a reason. A sample whose value is `None` is dropped by the mapping, never sent as
+zero. A collector declares its polling tier (`tier`) and whether the agent also
+watches it for events between polls (`event_watch`); see Polling tiers and sending. Collectors read from roots given in config (`HOSTWATCH_SYSFS`,
 `HOSTWATCH_PROCFS`) so tests can point them at fake trees built in
 `tests/conftest.py`.
 
@@ -46,25 +48,19 @@ pool). Health rules: a DEGRADED, FAULTED, UNAVAIL, SUSPENDED or REMOVED pool is 
 after a corrected error; any non-zero read, write or checksum count on a device is at least a
 warning that names the disk and its serial; a leaf device in any state other than ONLINE
 (CANT_OPEN and UNKNOWN included; a spare may also be AVAIL or INUSE), or a scan that
-found errors, is a warning. The summary merges the kstat `zfs` row and the `truenas` row of the
-same host and pool into one `pool.<name>` component whose state is the worse of the two. An
-unmeasured part outranks ok, so one readable source never claims health the other could not
-measure. The component keeps both sources' details as labels prefixed `zfs_` and `truenas_`
-and a `source` label (`zfs`, `truenas` or `zfs+truenas`). Prometheus emits one
-`hostwatch_pool_status` series per pool with that `source` label, and Home Assistant and Orion
-publish one entity or item per pool. The WebSocket client passes `proxy=None`, so an
+found errors, is a warning. The kstat `zfs` source and the `truenas` source report the same pool
+separately, and Observe, not the agent, decides how to present them together. The WebSocket client passes `proxy=None`, so an
 `HTTPS_PROXY` or `ALL_PROXY` variable in the container never carries the login frame.
 
 Alerts are events of kind `truenas.alert` from a second event source, `truenas_alerts`, read
 after the collectors in the same cycle. Dismissed alerts are included but are always info, with `dismissed` true in the detail. Otherwise levels map to severity:
 INFO and NOTICE to info, WARNING to warning, ERROR, CRITICAL, ALERT and EMERGENCY to critical,
 and an unknown level to warning. The dedup key is the alert uuid plus its `last_occurrence`, so
-the agent sends an occurrence once and the hub keeps one row per key across restarts.
+the agent sends an occurrence once and Observe keeps one row per key across restarts.
 
 ### NUT client (`nut`)
 
-The `nut` collector asks a Network UPS Tools server for UPS state so a UPS can
-witness a power loss. It is off unless `HOSTWATCH_NUT_HOST` and
+The `nut` collector asks a Network UPS Tools server for UPS state. It is off unless `HOSTWATCH_NUT_HOST` and
 `HOSTWATCH_NUT_UPS` are both set; unconfigured it is reported not present, not
 unavailable. `HOSTWATCH_NUT_PORT` (default 3493), `HOSTWATCH_NUT_USER` and
 `HOSTWATCH_NUT_PASSWORD_FILE` are optional, and the password is read from the
@@ -84,54 +80,84 @@ line containing a CR or LF, and config validation refuses a `HOSTWATCH_NUT_UPS`
 or `HOSTWATCH_NUT_USER` containing whitespace or control characters, so a value
 cannot smuggle a second protocol line past the command allow-list. Second, a
 failed poll does not wait for the next re-detection: the agent polls a configured
-`nut` source every cycle (the collector sets `retry_each_cycle`), marks it
+`nut` source on every read (the collector sets `retry_each_cycle`), marks it
 unavailable for the cycle that failed, and marks it available again as soon as a
 poll succeeds, so an on-battery transition in between is not missed. Third, the
-credentials held in `Config` (`ingest_token`, `ingest_key`, `mqtt_password`) use
-the `Secret` string type, whose repr is redacted, so a printed or logged `Config`
-never shows them. The NUT password, the Home Assistant token and the MQTT
-password file are held only as file paths. The redaction covers repr only; code
-that formats a secret with `str()` still gets the value.
-
-### Home Assistant plug witness (`hostwatch/witness/homeassistant.py`)
-
-A smart plug on the same circuit as a host drops off the network when the power
-fails, so its history can confirm an outage the host cannot see. The hub reads
-it; the agent does not. It is off unless `HOSTWATCH_HA_URL`,
-`HOSTWATCH_HA_TOKEN_FILE` and `HOSTWATCH_POWER_WITNESS` (`host=entity_id` pairs
-separated by commas) are set. The long-lived token is read from the file at call
-time, sent only as a bearer header, and never logged or placed in a reason. TLS
-verification is always on. `outages(host, start, end)` asks the REST history
-endpoint for the entity and returns intervals, in epoch UTC and clipped to the
-window, where the state was `unavailable`, `unknown` or `off`. An unreachable
-server, a 401 or 403, another HTTP error, an empty history (a missing entity) or
-an unexpected shape returns `available=False` with a reason. An empty interval
-list is returned only when Home Assistant did answer with history, so a missing
-witness is never read as proof of no outage. The hub applies this reader to unclean boots; see Witness-confirmed power loss.
-
-A host may list several entities (`host=entity1|entity2`), each with a role: `switch`, `node_status`
-or `power`, given as a prefix or inferred from the entity id. A Z-Wave plug cannot report its own
-power loss, so a `node_status` entity counts `dead`, `unavailable` and `unknown` as outage while
-`alive`, `awake` and `asleep` do not. `outages` asks each switch and node status entity separately and
-combines the intervals, each carrying its `entity_id`; it is available when at least one entity
-answered, and the entities that did not are named in the reason. The controller's detection time
-means an outage shorter than it is not witnessed and the boot stays `unknown_unclean`.
-
-A `power` entity is not history. `read_power(host)` reads `/api/states/<entity>` and gives watts
-(W or kW), or an unavailable reading with a reason, reused for 10 seconds. The hub's `summarize`
-helper calls `read_wall_power` before every summary build (UI, Orion, Prometheus) and the Home
-Assistant publisher calls the same function before its own build. It stores a `wall_watts` sample
-under the source `wall`, with a NULL value and the reason in the labels when unavailable.
-`HostSummary.wall_power` is built from that sample and is absent for a host with no power entity. It
-does not affect the host's overall status or the unmeasured groups.
+credential held in `Config` (`ingest_key`) uses the `Secret` string type, whose repr is
+redacted, so a printed or logged `Config` never shows it. The NUT password is held only as a
+file path. The redaction covers repr only; code that formats a secret with `str()` still gets
+the value.
 
 ## Data flow
 
 ```
-collectors -> agent -> POST /internal/v1/ingest -> hub -> store (SQLite)
-                                                      -> read API, later UI,
-                                                         HA MQTT, Orion poller
+collectors  --tier runs-->  otel_map  -->  otlp encoder  -->  outbox  -->  POST /v1/metrics
+event sources + watched sources --every 5 s--> otel_map --> otlp --> outbox --> POST /v1/logs
+Observe  --GET /internal/v1/agent-config-->  tier rates  --> scheduler
 ```
+
+The sender is `Agent.flush` in `hostwatch/agent.py`. It posts only to `/v1/metrics` and `/v1/logs`
+and reads only `/internal/v1/agent-config`. Each request carries `Authorization: Bearer <ingest key>`,
+the content type of the chosen encoding, `Content-Encoding: gzip` unless turned off, and an
+`Idempotency-Key`. The resource names the host (`host.name`), which Observe checks against the host
+the key is bound to.
+
+## Polling tiers and sending
+
+`hostwatch/tiers.py` holds the tiers and `TierSchedule`. A collector declares its tier in a class
+attribute: `device_metrics` (the default: CPU, memory, hwmon, RAPL, UPS, thermal controller),
+`storage_health` (md, ZFS, Scrutiny, TrueNAS, Windows storage), `smart` (`win_smartctl`) and
+`inventory` (reserved; no collector reads inventory facts yet). The `availability` tier has no
+collectors: each run sends the heartbeat (`observe.agent.heartbeat`), the source status of every
+source (`observe.source.available` and `observe.source.present`) and the rate in force for each tier
+(`observe.agent.poll.interval`, one series per tier, so Observe knows the cadence to expect). The
+design asks for the tier and its rate to travel with each batch; a separate gauge was chosen over a
+resource attribute because a resource attribute that changes with the rate would make a new
+resource every time an admin edits a rate. Whether Observe reads that gauge is recorded in
+`UNVERIFIED.md`.
+
+Defaults are 30 s, 60 s, 15 min, 1 h and 1 h for the five tiers. At start and every five minutes
+the agent calls `GET /internal/v1/agent-config` with the ingest key. Every rate in the answer is
+clamped to the lowest and highest value Observe itself accepts for the tier (5 s to 1 h,
+10 s to 1 h, 1 min to 24 h, 5 min to 24 h, 10 min to 24 h), so a bad answer can neither make the
+host spin nor silence a tier. A tier that is missing, not a number, not finite or a boolean keeps its
+current rate. When Observe cannot be reached or refuses the key, the rates in force stay (the
+defaults before the first answer) and the agent asks again after one minute, logging only when the
+outcome changes. A lowered rate applies at once: no tier waits longer than its new interval.
+
+A tier that is due runs once and is rescheduled one interval after its due time, so a slow collector
+does not stretch the cadence, and an agent that fell behind does not burst. One tier run is one
+outbox entry: the metrics of the tier and the logs it produced, as separate OTLP requests that share
+the entry id.
+
+Events are not a tier. The loop wakes at least every five seconds and, on each wake, reads the
+event sources (the pending boot events, pstore, rasdaemon, the journal, TrueNAS alerts, the Windows
+event log) and turns what it finds into OTLP logs sent on that pass. Every fifteen seconds it also
+reads the cheap local sources whose state changes are events (`event_watch`: md, ZFS and NUT) for
+threshold events only; their readings go out on their own tier, not every fifteen seconds. A RAID
+failure, a degraded pool, a UPS on battery or a kernel message therefore leaves the host within
+about twenty seconds even when the storage tier runs every fifteen minutes. A collector that blocks
+holds the loop for as long as it blocks (the TrueNAS client has its own timeout), because the loop is
+a single thread.
+
+Delivery runs after every pass. `flush` sends the outbox oldest first and removes a request only
+after a 2xx answer:
+
+* A 200 with a partial success (protobuf or JSON, as sent) is acknowledged, because the rejected
+  items would be rejected again. The rejected count and Observe's message are logged, counted in the
+  outbox and reported in the `outbox` source status.
+* 400, 409, 413, 415 and 422 can never succeed for the request that was sent. The request moves to
+  the `dead_letters` table with the status and the problem text (the last 1000 are kept), and the
+  next request is sent.
+* Everything else (a network error, 401, 403, 404, 408, 429 and every 5xx) leaves the request
+  queued. The loop waits before the next attempt, doubling from 5 s up to 5 min and never less than
+  a `Retry-After` the answer gave (also capped at 5 min), while collection continues. A 401 or 403
+  logs that the key or the host binding is wrong. The `outbox` status reports how long delivery has
+  been stalled and how many requests are kept.
+
+The credential is added when a request is sent and is never written to the outbox. Observe answers a
+repeated `Idempotency-Key` with a 200 and stores nothing, so a request sent twice because an answer
+was lost is stored once.
 
 ## OTEL mapping (`hostwatch/otel_map.py`)
 
@@ -148,7 +174,7 @@ per process. Events map to logs named `hostwatch.<kind>`, except boot classifica
 `observe.host.boot` with severity 9 or 13 as the design gives them; the original severity stays in
 the `observe.severity` attribute. Event detail is flattened under `observe.detail.*` with a cap on
 keys and value length. The golden inputs and outputs live in `tests/fixtures/otel/`, one file per
-collector plus `events.json`, so Observe can reuse them. The scheduler, the sender and the removal of the batch format come in later slices.
+collector plus `events.json`, so Observe can reuse them. The scheduler and the sender in `hostwatch/agent.py` use it, as described under Polling tiers and sending.
 
 ## OTLP encoder (`hostwatch/otlp.py`)
 
@@ -159,36 +185,21 @@ tree with a small field table, so the two encodings cannot drift apart; protobuf
 JSON is an option. Gzip is optional and uses a zero timestamp so a body is reproducible. Limits match
 Observe's ingest: 1 MiB on the wire, 4 MiB inflated, an inflate ratio under 100, 5000 points or 500
 log records per request, 64 resource attributes, 32 attributes per point or record, keys up to 128
-characters and string values up to 1024. A batch that does not fit is split into several requests,
+characters and string values up to 1024. A set of points or records that does not fit is split into several requests,
 each with the full resource, by count first and then by halving on size. Points Observe would
 refuse (a value that is not finite, an over-long name) are skipped and counted, never sent as zero.
 Each request's `Idempotency-Key` is `hw-<entry id>-<signal initial><part>`, built only from the
 outbox entry id, the signal and the position in the split, so a replay sends the same key and the
 same bytes; an id that is not short printable ASCII is replaced by a hash. The builder returns the
 path, headers (without credentials) and body of each request and does no network access. Tests
-decode the protobuf with an independent decoder in `tests/otlp_decoder.py`. The outbox still stores
-the old batch format until a later slice.
-
-## Events on the wire
-
-A batch may carry an optional `events` list (kind, severity, source, ts, title,
-detail, dedup_key). The field defaults to empty and is additive, so the wire
-`SCHEMA_VERSION` stays at 1: v1 agents without the field are accepted
-unchanged. The hub stores events through `Store.add_events`, which keeps one row
-per host and `dedup_key`, so a resent batch does not duplicate events. Events
-are read with `GET /internal/v1/events` (host, since, kind, source, before, before_id, limit), behind the
-same bearer token as the other internal endpoints. Event sources are reported in
-the batch `sources` list like any collector, with `available` false and a reason
-when the source is absent, and appear in `/internal/v1/sources`.
-
-Later phases add an event engine between the store and the outputs: it turns
-samples, journal entries, pstore records, rasdaemon records and the boot
-heartbeat into typed events stored in their own table.
+decode the protobuf with an independent decoder in `tests/otlp_decoder.py`. The same module reads an
+answer's partial success (`parse_partial_success`), from protobuf or JSON, with the same small
+hand-written field reader. The outbox stores the built requests; see Durable outbox.
 
 ## Boot classifier
 
 `hostwatch/events/boot.py` holds the heartbeat writer and the classifier. Each
-agent cycle atomically rewrites `heartbeat.json` in the data directory (temp
+agent loop atomically rewrites `heartbeat.json` every 15 seconds, in the data directory (temp
 file, fsync, rename) with the current `boot_id`, a timestamp, and
 `agent_stopped_cleanly: false`. On stop (SIGTERM) the signal handler only sets a stop flag and takes no lock,
 because the signal can arrive while a heartbeat write holds the heartbeat lock.
@@ -218,8 +229,9 @@ empty, no hints are passed and `detail.journal_previous_boot` holds the reason. 
 agent also reads `<sysfs>/class/watchdog/watchdog0/bootstatus`; the
 `WDIOF_CARDRESET` bit (0x20) is hardware watchdog evidence and the value is recorded in
 `detail.watchdog_bootstatus`. An abrupt end with no other evidence is `unknown_unclean`,
-not a power loss: a power cut and a hang cannot be told apart without a witness, which
-Phase 6 adds (see Witness-confirmed power loss). Kinds are never inferred from absence of evidence.
+not a power loss: a power cut and a hang cannot be told apart from the host alone, so the
+agent never reports `power_loss`; Observe may combine this event with its own evidence. Kinds are
+never inferred from absence of evidence.
 
 Precedence when evidence contradicts, strongest first (`boot.PRECEDENCE`):
 fresh pstore panic record, then watchdog bootstatus `card_reset`, then a
@@ -235,78 +247,6 @@ disagreement and `detail.evidence_seen` lists every piece of evidence. The
 `unknown` reason states what was actually read (journal unavailable, hints read
 but inconclusive, or journal not checked).
 
-### Witness-confirmed power loss (`hostwatch/witness/power.py`)
-
-When the hub stores a `boot.unknown_unclean` or `boot.unknown` event (or a `boot.agent_stopped`
-event whose journal hints show an abrupt end), it asks the witnesses about the window from the previous
-heartbeat minus a skew allowance to the boot time plus the allowance. The boot time is the
-event's `detail.detected_at`, when the agent noticed the new boot. The allowance is
-`HOSTWATCH_WITNESS_SKEW_S` (default 120 seconds) and absorbs clock differences between the
-host, the hub and Home Assistant. The work runs after the ingest response, so a slow Home
-Assistant never delays the agent. The witnesses are the plug history of the host's configured
-entity and the stored UPS events `ups.on_battery` and `ups.low_battery` of the same host.
-
-If a plug outage interval (`unavailable`, `unknown` or `off`) overlaps the window, or a UPS
-on-battery or low-battery event falls inside it, the hub stores a new `boot.power_loss` event
-(critical) with the same `boot_id` and the dedup key `boot:<boot_id>:power_loss`. Its detail is
-the original detail plus `power_witness`: the window, the skew used, each plug interval, the
-UPS events, and `supersedes`. The original event is kept and gets the same `power_witness`
-with `superseded_by`. Otherwise the original event stays and `detail.power_witness` records
-what was asked and why there was no confirmation. A witness that is not configured, refuses the
-token or cannot be reached is recorded as unavailable with its reason, never as no outage.
-An event that already has `power_witness` is not assessed again by a resend, so a resend adds
-nothing.
-
-An outage confirms only if it began no later than the boot time plus the allowance and ended no
-earlier than the last heartbeat minus the allowance. The witnesses are asked one hour beyond the
-window (`LOOKAHEAD_S`), and an outage found there is kept under `non_confirming` for both the plug
-and the UPS, because a host that was already back is not evidence of a power cut. UPS events are
-read with one SQL query by kind and time window and no row limit, so newer unrelated events
-cannot hide one. At most 50 are recorded in the detail; when more matched, `ups.total` holds the
-count and `ups.incomplete` is true.
-
-When any witness was unavailable and nothing confirmed an outage, the evidence carries
-`incomplete` and `retry_pending` with a `retry` record (first attempt, attempts, next attempt and
-expiry). The hub loop checks every 60 seconds, retries when the backoff (60 seconds doubling to
-one hour) has passed, retries every pending event once at hub start, and stops at
-`HOSTWATCH_WITNESS_RETRY_S` (default 86400, 0 disables) by setting `retry_expired`. A retry that
-finds an outage adds `boot.power_loss` as above. `python -m hostwatch boot reassess HOST BOOT_ID`
-assesses again regardless of the period and writes an audit row of kind `cli`.
-
-Precedence of the final classification, strongest first:
-
-| Rank | Class | Basis |
-|------|-------|-------|
-| 1 | `kernel_panic` | fresh pstore record; an overlapping outage is only noted in `detail.power_witness` |
-| 2 | `watchdog_reset` | bootstatus card reset; an overlapping outage is only noted |
-| 3 | `clean_shutdown` | journal shutdown sequence completed |
-| 4 | `watchdog_reset` | journal watchdog message with no completed shutdown |
-| 5 | `power_loss` | unclean end plus an overlapping plug outage or UPS on-battery event |
-| 6 | `unknown_unclean` | unclean end with no overlapping witness outage |
-| 7 | `agent_stopped`, `unknown` | as above |
-
-`power_loss` is critical while held with the same rules as the other crashes: it is an open
-crash condition until `python -m hostwatch event ack ID` or `HOSTWATCH_CRASH_HOLD_S` passes. The
-summary hides the `unknown_unclean` event of a boot that has a `power_loss` event, even after the
-power loss is acknowledged, so one outage is not two open conditions. Without any witness the
-result is unchanged.
-
-When more than one boot passed while the agent was down, `JournalWatcher.list_boots`
-runs `journalctl --list-boots -o json` through a pluggable reader. The heartbeat's boot
-is classified from its own journal as above, and each boot strictly between it and the
-current boot gets a `boot.unknown` event with dedup key `boot:<its boot id>`, its own
-journal hints in `detail.journal_previous_boot` or `detail.journal_hints`, and no
-guessed cause. If the list cannot be read, only the main event is emitted.
-
-The event kind is `boot.<class>` with dedup key `boot:<boot_id>`. Its `ts` is
-the previous heartbeat time (last known alive), `detail.detected_at` is when the
-agent noticed, and the `events.boot_id` column holds the new boot's id. The
-event is held in the outbox as a pending event and committed at once, so an
-agent restart before delivery does not lose it. The next batch carries it and
-clears the pending marker in the same transaction. The source `boot` is reported
-unavailable when the boot_id cannot be read or a heartbeat write fails, and
-returns to available on the next successful heartbeat write.
-
 ## pstore ingestion
 
 `hostwatch/events/pstore.py` reads the directory named by `HOSTWATCH_PSTORE`
@@ -316,7 +256,7 @@ Only `dmesg-*` files are classified, and only by explicit markers: `Kernel panic
 the same key and a rewritten record gives a new one. For a file over 1 MiB the excerpt comes from the head, the marker scan covers the head and the tail, and `detail.truncated` is true. Files are never deleted or
 modified. A missing or unreadable directory yields source `pstore` unavailable
 with a reason and no events; an empty directory is available with no events. If records exist but none could be read, the source is unavailable with a reason; if some failed, it stays available and the reason carries the failed count.
-The agent reads it every cycle and sends each record once per process.
+The agent reads it on every event read (every five seconds) and sends each record once per process.
 
 ## rasdaemon ingestion
 
@@ -333,7 +273,7 @@ with a reason; a single missing table is skipped and named in the reason of an
 otherwise available source. A timestamp with an explicit offset is parsed exactly; one without a zone is read as UTC, independent of the process time zone, and flagged `ts_uncertain` in the detail. A row whose timestamp cannot be parsed keeps the raw
 text in the detail and is stamped with the read time, flagged by
 `ts_is_read_time`. A byte value that is not valid UTF-8 is stored as hex text. A row that cannot be converted is skipped, its id is still passed, and the number skipped is stated in the source reason, so one odd row cannot stop the others. The agent reads it every cycle. The high-water ids are progress markers that
-commit with the batch carrying the rows (see the outbox section).
+commit with the requests carrying the rows (see the outbox section).
 
 ## Journal watching
 
@@ -365,7 +305,7 @@ stays available. The container needs the host `systemd-journal` group through
 `group_add` (`HOSTWATCH_JOURNAL_GID` in `deploy/.env`), and the image creates
 `/data` owned by UID 10001 so a fresh named volume is writable. The `journalctl` call runs on a worker thread
 (`BackgroundJournal`) with its own 60 second limit, so a slow journal never
-delays a sample cycle: each agent cycle collects the previous worker's result,
+delays a sample cycle: each event read collects the previous worker's result,
 parses it and starts the next read. Parsing and cursor staging stay on the
 agent thread so the cursor remains tied to the events it produced. When a cycle
 fails after the journal read, the staged cursor is discarded and the background
@@ -374,556 +314,72 @@ the same entries are read again and delivered once. The
 `ataN: SATA link up` message counts as a link reset only after a reset on the
 same port was seen, and RAID `[U_]` status needs an `mdN` or `md/raid` context.
 The cursor is a progress marker that commits
-with the batch carrying the entries read, so a crash after a read re-reads the
+with the requests carrying the entries read, so a crash after a read re-reads the
 entries instead of skipping them. An older `journal.cursor` file is imported once
 when no marker exists.
 
 ## Durable outbox
 
-`hostwatch/outbox.py` keeps `outbox.db` (SQLite, synchronous FULL) in the data
-directory, which is the `hostwatch-data` volume. Each cycle the agent writes the
-batch to the outbox and then tries to send from the oldest. A batch is removed
-only after the hub answers 2xx. The hub also deduplicates by `batch_id`, so a
-resend after a lost answer is harmless.
+`hostwatch/outbox.py` keeps `outbox.db` (SQLite, synchronous FULL) in the data directory. It holds
+encoded OTLP requests (path, headers including the `Idempotency-Key`, body, signal and the number of
+points or log records) in the `requests` table, so a replay after a restart sends the same bytes
+under the same key. The old `batches` table of earlier versions is dropped when the file is opened.
 
-- A network failure, any 5xx answer or any 4xx other than 400 and 422 leaves
-  the batch queued and is logged. A 5xx describes the hub, not the batch, so it
-  never dead-letters. The run loop then waits before the next delivery attempt,
-  doubling from the cycle interval up to five minutes, while cycles keep
-  collecting. The outbox source status reports how long delivery has been
-  stalled and how many batches are kept.
-- 400 and 422 can never succeed. The batch moves to the `dead_letters` table
-  with the status (the last 1000 are kept), an error is logged, and the next
-  batch is sent. The outbox source status names the count.
-- A row whose payload cannot be decoded can never be sent. It moves to
-  `dead_letters` with status 0 and the decode error, is exempt from the
-  1000-row trim, and the queue moves on. The outbox source status reports the
-  count.
-- If SQLite reports `outbox.db` as not a database or malformed, it is renamed,
-  with any `-wal`, `-shm` or `-journal` file, to `outbox.db.corrupt-<timestamp>`, an error is logged, and a fresh outbox is
-  started. The outbox source status names the renamed file, because the queued
-  batches and markers in it are lost. Locked or I/O errors are not treated as
-  corruption: the file is left alone and the error is raised.
-- Each agent cycle runs inside a guard. An exception is logged, markers staged
-  by that cycle are discarded so nothing is skipped, the source `agent` is
-  reported unavailable with the reason, and the next cycle runs normally.
-- Threshold state is seeded from the hub with retry and backoff. Threshold
-  events are not emitted until the seed has succeeded, so an open condition is
-  not announced again after a restart during a hub outage. While the seed is
-  failing, the source `thresholds` is reported unavailable with that reason.
-- The cap is 240 batches. Past it, the oldest batch loses its samples, which are
-  counted, and its events move into the next batch, which gets a new `batch_id`
-  because the hub may have acknowledged the old one. Events are never dropped
-  by the cap. A warning is logged and the source `outbox` is reported
-  unavailable, with the dropped count in the reason, until the queue drains.
+* **Bounds.** At most 2000 requests and 32 MiB of bodies. A metrics request older than 6 hours is
+  dropped; a logs request older than 7 days is dropped. Over a limit, the oldest metrics request goes
+  first and a logs request only when no metrics request is left, because a fresh reading replaces a
+  lost one and a lost event cannot be replaced. Every drop is counted by signal, a warning is logged
+  and the `outbox` source is reported unavailable, with the counts in the reason, until the queue
+  drains.
+* **Dead letters.** See the list of statuses above. A row whose headers cannot be decoded moves to
+  `dead_letters` with status 0 and the error.
+* **Corruption.** If SQLite reports `outbox.db` as not a database or malformed, it is renamed, with
+  any `-wal`, `-shm` or `-journal` file, to `outbox.db.corrupt-<timestamp>`, an error is logged, and a
+  fresh outbox is started. The `outbox` status names the renamed file, because the queued requests
+  and markers in it are lost. Locked or I/O errors are not treated as corruption: the file is left
+  alone and the error is raised.
+* **Guarded work.** Each tier run and each event read runs inside a guard. An exception is logged,
+  markers staged by that unit are discarded so nothing is skipped, the threshold state is restored,
+  the journal reader is rewound, the source `agent` is reported unavailable with the reason, and the
+  next unit runs normally.
 
-Progress markers (`journal.cursor`, `rasdaemon.high_water.<table>`,
-`pstore.sent_keys` and `boot.pending_events`) are rows in the `markers` table.
-Event sources read them with `get` and stage new values with `stage`. Staged
-values are visible at once but become durable only when `enqueue` writes the
-batch, in the same transaction. A crash before that point repeats the read and
-the hub deduplicates by key; a crash after it resumes after the queued events.
+Progress markers (`journal.cursor`, `rasdaemon.high_water.<table>`, `pstore.sent_keys`,
+`boot.pending_events` and `thresholds.state`) are rows in the `markers` table. Event sources read
+them with `get` and stage new values with `stage`. Staged values are visible at once but become
+durable only when `enqueue` writes the requests, in the same transaction. A crash before that point
+repeats the read and Observe deduplicates by key; a crash after it resumes after the queued events.
 
 ## Threshold events
 
-`hostwatch/events/thresholds.py` evaluates rules on every collected cycle, after
-the sources have been read. Rules are edge-triggered, with one event on entry and
-one on recovery: `md.degraded` and `md.degraded_cleared` (mdraid `degraded` above
-0 and back to 0), `md.sync_changed` (the `sync_action` label changed),
-`source.unavailable` and `source.available` (a source that was seen available
-went away or came back), and `scrutiny.status_raised` and
-`scrutiny.status_cleared` (Scrutiny `device_status` grew, or returned to 0). A
-steady state gives no repeat events. A sample value of None is unknown: it never
-triggers a rule and never counts as a recovery, so an unreadable source cannot
-look like a recovered array. A source that is unavailable from the start is not a
-flip and gives no event. The first value seen for an array's sync state is a
-baseline, not a change.
+`hostwatch/events/thresholds.py` evaluates rules on the samples of every tier run and of every
+watched read, after the sources have been read. Rules are edge-triggered, with one event on entry and
+one on recovery: `md.degraded` and `md.degraded_cleared` (mdraid `degraded` above 0 and back to 0),
+`md.sync_changed` (the `sync_action` label changed), `source.unavailable` and `source.available` (a
+source that was seen available went away or came back), `source.disappeared` and `source.returned`
+(a source that was present and available reports present false, critical), and
+`scrutiny.status_raised` and `scrutiny.status_cleared` (Scrutiny `device_status` grew, or returned to
+0), plus the Windows storage health rules. A steady state gives no repeat events. A sample value of
+None is unknown: it never triggers a rule and never counts as a recovery, so an unreadable source
+cannot look like a recovered array. A source that is unavailable from the start is not a flip and
+gives no event. The first value seen for an array's sync state is a baseline, not a change.
 
-UPS events read the `nut` `ups_status_flag` samples. The state is `OL`, `OB` or
-`LB` (low battery wins), kept under rule key `ups.power|ups` and seeded like the
-other rules. A cycle in which any of the three flags is unknown changes nothing.
-A UPS first seen on line is a baseline; first seen on battery raises
-`ups.on_battery`. Low battery that clears while the UPS is still on battery
-updates the state without an event. The host summary gains a `ups` group: on
-battery is a warning, low battery is critical, and an unavailable or stale `nut`
-source makes the group unmeasured (overall status at least 1). When NUT is not
-configured the source is not present and the group adds no warning; a host with
-no `nut` row is treated the same way. The Orion and Home Assistant outputs do not
-yet publish this group, but its status counts toward the host's overall status.
+UPS events read the `nut` `ups_status_flag` samples. The state is `OL`, `OB` or `LB` (low battery
+wins), kept under rule key `ups.power|ups`. A pass in which any of the three flags is unknown
+changes nothing. A UPS first seen on line is a baseline; first seen on battery raises
+`ups.on_battery`. Low battery that clears while the UPS is still on battery updates the state
+without an event.
 
-State is held in memory. When the agent starts it asks the hub for the host's
-stored events (`GET /internal/v1/events`) and seeds the state from the rule key
-and state in each `thresholds` event's detail, so a restart does not repeat an
-open condition. If the hub cannot be reached, the state starts empty and one
-event may repeat. Threshold events use source `thresholds` and a dedup key made
-of the kind, rule key and event time.
+State is held in memory and saved in the outbox marker `thresholds.state` in the same transaction as
+the requests that carry the events it produced (`ThresholdEngine.dump` and `load`), so a restart does
+not repeat an open condition and a failed unit does not lose one. The agent no longer asks a hub for
+stored events. Unreadable saved state is ignored, which means one event may repeat after a restart;
+Observe keeps one row per dedup key. Threshold events use source `thresholds` and a dedup key made of
+the kind, rule key and event time.
 
-The agent wires every source into the same batch: the boot classification,
-pstore, rasdaemon, the journal watcher and the threshold events all ride in
-`Batch.events`. Event sources are plain callables in `Agent.event_sources`, and
-each one's status is reported in `Batch.sources`. A source that raises is
-reported unavailable with the error as the reason.
-
-A batch may also carry an optional `batch_id` (a uuid string). The agent sets
-it once when it builds the batch and the queued batch keeps it on every resend.
-`Store.ingest_batch` writes the samples, source status, agent row, events and
-the id in one transaction, so a failure in any step leaves nothing behind. If the
-id is already recorded for that host, the hub answers 200 with
-`"duplicate": true` and stores nothing. Batches without an id behave as before.
-
-`GET /internal/v1/events` pages backwards. When a page is full, the response
-carries `X-Next-Before` and `X-Next-Before-Id` headers; passing them back as
-`before` and `before_id` returns the next older page (the id keeps rows that
-share a timestamp from being skipped). The body stays a plain list. The
-`source` filter and the cursor are bound SQL parameters. The agent seeds
-threshold state with `source=thresholds` and reads every page, and it logs an
-HTTP 401 as a rejected token, distinct from an unreachable hub.
-
-## Grouped summary
-
-`summary.py` also builds the grouped view that the dashboard draws. `group_documents` decides the
-membership of each group (`cpu`, `memory`, `power`, `temperatures`, `fans`, `pools`, `raid`, `disks`,
-`ups`, `pi_power`, `alerts`, `sources`, in that order) and its aggregate status once on the server, so
-the page never re-derives either.
-Every member also gets a plain-language `label` and `text` built on the server (for example "CPU 3 % used",
-"md127 RAID1 clean, idle" or "pstore: cannot read /host/pstore (permission denied)"), with percent rounded to
-whole numbers and watts and degrees to one decimal, and keeps its machine name in `id`. The group summary is
-built from those texts, so it carries no metric ids or `source.` prefixes, and the page never formats a value.
-The banner text is one sentence, "HOST is STATUS: worst member text.", chosen by `grouped_document` from the
-worst critical, then warning, then unknown member; the counts line sits under it. The aggregate is the worst member; it is unknown only when every
-member is unknown. A group with no members is omitted unless one of its sources is present on the host.
-The aggregate is the worst warning or critical member. When no member is warning or critical but at
-least one is unknown or unavailable, the group reads unknown and its summary names each unmeasured
-member with its reason, so a group with one good and one unreadable member is never Good. A member that
-is not present is not a measurement and is ignored.
-The alerts group holds unacknowledged crash events, a silent host, open threshold conditions, the
-TrueNAS alerts stored as `truenas.alert` events, the last boot classification and recent events. For
-TrueNAS the newest event per alert uuid decides: an active alert counts with its severity (warning and
-critical raise the group), a dismissed one is an informational member and never raises it. An alert stays
-until it is dismissed, because the collector reports no resolution. The last boot classification is
-informational unless it is an open crash, which has its own member. Recent events are warning or critical
-events inside `HOSTWATCH_ALERT_WINDOW_S` (default 86400 seconds); threshold, boot and pstore events are
-left out because open conditions, crash members and the boot classification already cover them, so an
-acknowledged crash is never shown again.
-Every group counts toward the host status, hidden or not: the overall status is never better than the
-worst group, an unknown group counts as a warning, and the banner and the host reason name the group that
-raised it. The page opens a host exactly when its status is not Good. Fans are `fan.*` components
-from the hwmon `fan` readings. A 0 RPM fan is informational unless it matches
-`HOSTWATCH_HWMON_REQUIRED_FANS` (hub side `chip:sensor` globs), where it is critical. Hosts are sorted
-worst first by `grouped_document`, which also builds the banner text and the per-status counts, and
-`GET /api/v1/hosts/summary/grouped` serves it behind the same scope as `/api/v1/ui/status`.
-
-Dashboard preferences are stored per user in `user_preferences` (schema version 11, additive). `GET /api/v1/me/preferences` returns the view (`simple`, `expanded` or `expert`, default `expanded`) and the full ordered group list with a visible flag for each group. `PUT /api/v1/me/preferences` accepts a partial body: `view` alone, `groups` alone, or `{"reset": true}`, and any field left out keeps its stored value. An empty `groups` list, an empty body, or `reset` combined with `groups` gives 422, so an empty list is never read as a reset. Reset restores the default group order with every group visible and keeps the view. The page does not send `groups` until a GET succeeded (a `prefsLoaded` flag in `app.js`); until then a view change sends only the view, a notice is shown, and the load is retried every 15 seconds, so a failed load cannot overwrite the saved order or hidden groups. Both work only for a login session, and the PUT needs the CSRF token like every other session write; API keys and certificate identities get 403. An unknown view or group id gives 422. Duplicate ids keep the first entry, and groups the request omits are appended in the default order, so a group added by a later release appears without a migration. The row is chosen from the session, never from the request, so a user can read and change only their own.
-
-## Host health summary
-
-`hostwatch/integrations/summary.py` holds the one model that the Home Assistant,
-Orion and Prometheus outputs read, so they cannot disagree about a host.
-`build_host_summary(store, host, now)` reads `Store.latest`, `Store.sources` and
-the last day of `thresholds` events, and returns a `HostSummary` with CPU
-utilization, memory used percent, package power, temperatures (hwmon and
-Scrutiny drive temperatures), md array health, Scrutiny disk health, per-source
-availability, five problem flags (`md_degraded`, `disk_failing`,
-`source_unavailable`, `temperature_high`, `memory_low`) and the open threshold
-conditions. `now` is passed in, so tests never depend on a clock.
-
-Every value is a `Component` with a value, unit, state and reason. A value that
-cannot be known is `None` with a reason, never zero. That covers a source the
-agent reports unavailable, a source with no report for 180 seconds, a sample
-older than 180 seconds, a null sample, and a metric that was never reported. A
-problem flag whose inputs are all unknown is `None`, neither true nor false.
-
-`status_for(component)` is the only mapping from state to a number: ok is 0,
-warning is 1, critical is 2, and an unknown state returns `None`. The integration
-outputs publish `None` as unavailable (Home Assistant) or omit the value and
-status (Orion). Rules: a CPU temperature at 80 C warns and 90 C is critical (drives 50
-and 60 C). The CPU limits apply only to the hwmon chips `coretemp`, `k10temp`, `zenpower` and
-`cpu_thermal`, the Raspberry Pi SoC temperature, and any `chip:sensor` glob listed in
-`HOSTWATCH_HWMON_CPU_SENSORS` on the hub. Every other hwmon temperature is reported with its value,
-status 0 and the note "informational", because the Super I/O chip on MediaIn-SVR reports unused
-inputs at over 100 C. The agent can also drop readings entirely with `HOSTWATCH_HWMON_IGNORE`
-(comma-separated `chip:sensor` globs, matched case-sensitively); both variables are validated at
-start and an entry without a chip and a sensor is rejected. Further rules: memory used at 90 percent warns and 97 is critical, an md array with
-`degraded` above 0 is critical and one that is syncing warns, a Scrutiny
-`device_status` other than 0 is critical, and an unavailable or stale source
-warns. These limits are defaults, listed in `UNVERIFIED.md`. `HostSummary.status`
-is the worst known component status, or `None` when nothing is known.
-
-Two host-level conditions also make `overall_status` 2, because a crash must be obvious at a
-glance. A host silent for longer than `HOSTWATCH_SILENT_AFTER_S` seconds (default three agent
-intervals) reads critical with the time of its last report as the reason; the last report is the
-newest of the agent batch time and any source report. A boot event classified `kernel_panic`,
-`watchdog_reset`, `unknown_unclean` or `power_loss`, or a pstore `kernel_panic` or `kernel_oops` record, is an
-open crash condition until an operator runs `python -m hostwatch event ack ID` or
-`HOSTWATCH_CRASH_HOLD_S` seconds (default 86400) have passed. The acknowledgement is stored in
-the `event_acks` table (schema version 9) and appends an audit row of kind `cli`. `clean_shutdown`
-and `agent_stopped` are never critical. The logic lives only in `summary.py`, so the UI banner,
-Orion, Prometheus and Home Assistant show both conditions without code of their own.
-
-## Orion API Poller endpoints
-
-`hostwatch/integrations/orion.py` renders the shared `HostSummary` as flat JSON
-and `hub.py` serves it under `/api/v1/orion`, read-only, each route behind
-`require_scope("read:metrics")` so the Phase 3 source allowlist and
-authentication apply unchanged. Routes: `GET /api/v1/orion/hosts`,
-`/hosts/{host}/summary` and `/hosts/{host}/{group}` for the groups `cpu`,
-`memory`, `power`, `temperatures`, `raid`, `pools`, `disks` and `sources`. A host
-is known if it has an agent row or a source row; otherwise the answer is 404, as
-it is for an unknown group.
-
-## History endpoint
-
-`GET /api/v1/hosts/{host}/history` (scope `read:metrics`) is served by
-`Store.history`. The store picks the table from the range alone: a range of
-`HISTORY_RAW_MAX_S` (two days) or less reads `samples`, a longer one reads
-`rollup_hourly`, which keeps hour resolution and averages weighted by the sample
-count. Rollups lag the raw data, so a long range also aggregates raw samples
-newer than the newest stored rollup hour into hourly rows on the fly and
-combines them with the stored rollups. The newest hours and days are therefore
-never missing, and no hour is counted twice. Buckets are `floor(ts / step) * step`, grouped per label set, and
-unavailable (NULL) samples never enter the math. The hub bounds the range to 366
-days and the result to 1000 points per series, and rejects violations with a 422
-whose body is the same `{"detail": ...}` shape as every other error. The gaps endpoint (`GET /internal/v1/gaps`) uses the same rule: for a window
-longer than two days it finds holes in that combined hourly series (points are
-hour starts), otherwise in the raw samples. Because raw
-samples are pruned after the raw retention window, a short range older than that
-window is empty rather than served from rollups. All SQL is parameterized and no
-schema change was needed.
-
-Documents are one level deep. Keys are snake_case and stable: item keys are built
-from slugged labels (`temp_k10temp_tctl_c`, `md_md0_degraded_devices`,
-`disk_<wwn>_device_status`, `source_<name>_up`). Every group has
-`<group>_status` (0, 1 or 2) and `<group>_available` (1 or 0). When nothing in a
-group is known, the value keys are omitted, `<group>_available` is 0, the group
-status is 1 (the same warning the summary gives an unavailable source) and
-`<group>_reason` says why. The `pools` group is fed by the `zfs` collector, one item per pool
-(`pool_<slug>_health` is 0 online or 2 critical); it reports unavailable while no pool has been
-reported and is not expected at all on a host whose agent never sent a `zfs` row. Nothing is stored by this layer, so a restart or a recreated
-app on the same database gives the same answers.
-
-The overall status is not the worst known component alone. The expected groups
-are `cpu`, `memory`, `power`, `temperatures`, `raid` and `disks`, each fed by one
-source (`cpu`, `memory`, `rapl`, `hwmon`, `mdraid`, `scrutiny`). A group is
-unmeasured when its source is unavailable, stale or has never reported, or when
-none of its components has a known value. While any group is unmeasured,
-`overall_status` is at least 1, `overall_unmeasured` counts the groups and
-`overall_reason` names them, so a host that never reported its RAID state does
-not read as healthy. A host with no data at all has `overall_status` 2 and
-`overall_reason` "no data". Prometheus follows the same rule through
-`hostwatch_host_status` and `hostwatch_host_unmeasured_groups`.
-
-A source that is absent by design is not unmeasured. `SourceStatus` carries an optional
-`present` field that defaults to true, so agents that never send it are read as present. A
-collector sets it false only when the place where the source would live was readable and shows
-nothing there: `mdraid` when `/proc/mdstat` is readable and lists no arrays (or does not exist
-while `/proc` is readable, which is the case on a ZFS host such as TrueNAS-SVR where the md module
-is not loaded), `rapl` when the powercap directory is readable and has no `intel-rapl` zone,
-`zfs` when `/proc/spl/kstat/zfs` is readable and holds no pools (or does not exist while `/proc` is
-readable, the zfs module not being loaded), `hwmon` when `/sys/class/hwmon` is readable and empty, and `scrutiny` when no URL is configured.
-An unreadable path stays present and unavailable, which is unmeasured and keeps the warning. The
-group of an absent source is listed in `HostSummary.not_present`, contributes no warning, and is
-reported as not present by each consumer: Orion writes `<group>_present` 0, `<group>_available` 0,
-`<group>_status` 0 and the reason "not present" (and `overall_not_present` counts them), Home
-Assistant creates no entity for it and retires one it had published, and Prometheus adds the
-`hostwatch_source_present` gauge. `hostwatch_source_up` keeps its meaning and is 0 for an absent
-source. A not-present report older than the staleness window is treated as stale, so a silent
-agent still reads as unmeasured.
-
-Absence is only by design if the host never had the source. The hub keeps a `source_seen` row per
-host and source with the times it was first and last reported present and available. A source that
-then reports `present` false is state `disappeared`: its component is critical (status 2) with a
-reason naming when it was last seen, the group is neither not present nor unmeasured, the host's
-`overall_status` is 2 with the reason "sources disappeared", and for `mdraid` the `md_degraded`
-problem flag is true. This closes the case where md arrays fail to assemble at boot and leave a
-readable, empty `/proc/mdstat`. Orion reports the group at status 2, Prometheus keeps
-`hostwatch_source_present` at 1 with `hostwatch_source_up` 0, and Home Assistant keeps the entities
-and shows the problem sensor on. The threshold engine raises `source.disappeared` (critical) once
-on the transition and `source.returned` when the source is present and available again, and it
-does not also raise `source.unavailable`. Only the operator can declare a removal deliberate with
-`python -m hostwatch source forget HOST SOURCE`, which sets `forgotten_at`, appends an audit row of
-kind `cli`, and makes `present` false read as absent again until the source is next seen present
-and available. A source that is present but unreadable is still unmeasured, not disappeared.
-
-The `hosts` document keys each entry by a slug of the host name, for example
-`host_media_svr_name` and `host_media_svr_status`, not by position, so adding a
-host never renames another host's keys. The slug is the Home Assistant rule:
-lowercase ASCII with other runs replaced by an underscore, and names whose slugs
-collide each get a short hash suffix of the exact name.
-
-## Prometheus endpoint
-
-`hostwatch/integrations/prometheus.py` renders the shared `HostSummary` in the
-Prometheus text exposition format (0.0.4) by hand, so no dependency is added.
-`GET /metrics` is registered only when `HOSTWATCH_PROMETHEUS` is true, so a
-disabled endpoint is an ordinary 404 and the default is off. When registered it
-sits behind `require_scope("read:metrics")`, so the source allowlist, key checks
-and audit log apply unchanged. Metrics: `hostwatch_cpu_utilization_percent`,
-`hostwatch_memory_used_percent`, `hostwatch_package_power_watts`,
-`hostwatch_temperature_celsius`, `hostwatch_md_degraded_devices`,
-`hostwatch_disk_device_status`, `hostwatch_host_status`,
-`hostwatch_host_unmeasured_groups` and `hostwatch_source_up`. A value that is unavailable produces no sample, never a
-zero; `hostwatch_source_up` is 0 for a source that is unavailable or stale and
-carries that fact instead. Label values are escaped (backslash, double quote and
-newline). Nothing is stored by this layer.
-
-## MQTT client (Phase 4)
-
-`hostwatch/integrations/mqtt_client.py` is the transport layer for the Home Assistant
-publisher. It is off unless `HOSTWATCH_MQTT_HOST` is set. `Config.validate` checks the
-settings: username and password (or `HOSTWATCH_MQTT_PASSWORD_FILE`, preferred) must be set
-together, only one password source is allowed, TLS CA, client certificate and key files must
-exist and the certificate and key come as a pair, the insecure flag needs TLS, and the topic
-prefixes may not contain wildcards. Setting any MQTT option without a host is an error so a
-forgotten host cannot silently leave the publisher off.
-
-`MqttClient` holds policy and talks to an `MqttTransport` protocol, so tests use an in-memory
-fake and never a broker. On connect it sets a retained last will of `offline` on
-`<base topic>/availability` (default base topic `hostwatch`), then publishes a retained
-`online`, so Home Assistant marks entities unavailable if the hub dies. Failed connects retry
-with exponential backoff (1 s doubling to a 60 s cap, jittered between 50 and 100 percent)
-driven by an injected clock: `ensure_connected()` is called from a loop and does nothing until
-the retry time has passed. The password is read when connecting and scrubbed from logged
-error text. `PahoTransport` adapts paho-mqtt 2.x. After connecting, the client subscribes to
-`<discovery prefix>/status` (Home Assistant's birth topic) and counts successful connects in
-`epoch`.
-
-### Home Assistant publisher
-
-`hostwatch/integrations/homeassistant.py` turns `build_host_summary` into entities, so Home
-Assistant agrees with Orion. `HomeAssistantPublisher.tick()` runs every 30 seconds from a hub
-background task (only when MQTT is configured). It connects if due, then for each host
-publishes:
-
-- Discovery, retained, on `<prefix>/<sensor|binary_sensor>/hostwatch_<host>/<key>/config`.
-  One device per host (`identifiers: ["hostwatch_<host>"]`), a unique id per entity, and an
-  `origin` block.
-- State, retained, on `<base>/<host>/<key>/state` (binary sensors use `ON` and `OFF`).
-- Entity availability, retained, on `<base>/<host>/<key>/availability`.
-
-Each entity lists the hub availability topic (the last will) and its own availability topic
-with `availability_mode: all`. A value the summary cannot know gets entity availability
-`offline` and no state message, so it is never reported as zero. The source connectivity
-sensors list only the hub topic, because a source being down is a real answer. If an entity
-that was published earlier, by this process or before a restart, is no longer produced, its
-availability is set to `offline` and its retained discovery config is cleared with an empty
-retained payload. The published entries per device are kept in `ha_discovery_keys.json` in the
-data directory (written atomically), so the cleanup survives restarts.
-
-Host names whose slugs collide (for example `Media-SVR` and `media_svr`) each get a six
-character SHA-256 suffix of the exact host name on the device identifier, unique ids and
-topics, and a warning names both hosts. Colliding hosts therefore get new identifiers when the
-collision first appears.
-
-Discovery is republished when the connection epoch changes (first connect, reconnect, broker
-restart), when a `online` birth message arrives (the listener only sets a flag; the next tick
-publishes), when an entity definition changes, and after any failed publish. A new hub process
-starts with nothing marked as published, so a restart on the same database republishes
-everything. Pools publish as one diagnostic sensor per pool named `pool_<slug>`, merged across the zfs and truenas sources.
-
-### Events topic
-
-`hostwatch/integrations/ha_events.py` sends boot classifications and hardware events (store
-sources `boot`, `pstore`, `rasdaemon`, `thresholds` and `journal`) to `<base>/events`, one JSON
-message per event with the store event id, host, timestamp, kind, severity, source, title,
-detail and boot id. Messages are not retained, so a new subscriber is not told about old
-events as if they were new. The publisher runs on its own thread, started and stopped from
-`__main__` through the hub `on_start` and `on_stop` hooks, and only in the hub and all roles
-and only when MQTT is configured. It shares the MQTT client with the discovery publisher; the
-client serialises connect, publish and close with a lock.
-
-Progress is the last event id sent, kept in the `publish_cursors` table (schema version 5, an
-additive migration guarded by `IF NOT EXISTS`). The cursor moves only after a publish was
-accepted, so a restart neither replays nor skips events, and a failed publish retries from the
-same event on the next tick. A crash between a publish and the cursor write sends that one
-event again, so consumers should deduplicate by `id`. The first tick starts at the newest stored
-event instead of replaying history. The cursor is set before the connectivity check, so events
-stored while the broker is down at first start are sent once it is reachable. `HOSTWATCH_MQTT_EVENTS_INTERVAL` (seconds, default 10) sets
-the poll period.
-
-The Phase 4 exit test, `tests/test_phase4_exit.py`, runs the publisher and the Orion
-endpoints together against a fake broker. It shows the device and entities, a forced warning
-giving Orion status 1 and the problem sensor on, and recovery after a hub restart and a broker
-restart. It uses fakes only; the matching hardware checks are open in `UNVERIFIED.md`.
-
-## Storage
-
-SQLite in `/data`. Raw samples are kept for `HOSTWATCH_RAW_RETENTION_DAYS`,
-rollups for `HOSTWATCH_ROLLUP_RETENTION_DAYS`, pruned by an hourly maintenance
-task in the hub. The audit log is pruned by the same task after
-`HOSTWATCH_AUDIT_RETENTION_DAYS` (default 400, 0 keeps rows forever); see the audit
-retention paragraph in the authentication section. Schema changes must be additive, versioned, and migrated with
-guards, with a test that upgrades a database built by the previous version.
-
-The schema version is stored in `PRAGMA user_version`. Phase 1 databases never
-set it, so a database with version 0 is adopted as version 1. `Store._migrate()`
-applies numbered steps in a transaction, each created with `IF NOT EXISTS` so a
-repeat run changes nothing. Version 2 adds the `events` table (unique per host
-on `dedup_key`) and the `boot_state` heartbeat table; existing tables are never
-altered. Version 6 adds the `present` column to `sources` (default 1, added only when missing). Version 7 adds the `source_seen` table (first seen, last seen and forgotten time per host and source). Version 8 adds `users.is_admin` (default 0, added only when missing); the earliest user, which is the one `bootstrap-admin` created, is marked admin by the migration so no deployment loses admin access. Version 9 adds the `event_acks` table (event id, acknowledged time, actor). Version 11 adds the `user_preferences` table (user id, view, groups JSON, updated). Version 3 adds the `batch_ids` table (unique per host and batch id) the same way;
-maintenance prunes ids older than the raw retention. If the stored version is newer than the code supports, the store
-refuses to start with `SchemaTooNewError` rather than risk damaging data.
-
-Version 4 adds the auth tables `users`, `sessions`, `api_keys`, `cert_bindings`
-and `audit_log`, with store methods for each. Password hashes are supplied by the
-caller. Session tokens and API keys are random and only their SHA-256 digests
-are stored; a full API key is returned once at creation. Revoking a key or
-session takes effect on the next lookup. The audit log has no update or delete
-method, and SQLite triggers abort UPDATE and DELETE on it. This is an
-application-layer control: anyone who can write the database file directly can
-drop the triggers or edit rows, so it is not tamper-proofing. The one exception to
-"no delete" is `Store.prune_audit`, called by the hourly maintenance task. Inside a single
-transaction it drops the delete trigger, deletes rows older than
-`HOSTWATCH_AUDIT_RETENTION_DAYS` (default 400, 0 keeps everything), recreates the trigger and
-appends one `audit_prune` row (actor `system`) whose detail holds the pruned count, the cutoff
-and the window. SQLite DDL is transactional, so a failure rolls back both the deletion and the
-trigger change. Nothing is recorded when no row is old enough. The trade-off is that history
-beyond the window is gone for good, so an operator who needs a longer record should raise the
-window or export rows first. The update trigger is never lifted, so no path edits audit rows.
-This remains an application-layer control, and the prune record itself is the only trace of
-what was removed. The tables exist
-and the hub now enforces them as described under Hub authentication below. The
-hub is still bound to 127.0.0.1.
-
-`hostwatch/auth.py` holds the auth primitives; the hub calls the store lookups, while `POST /api/v1/login` calls `check_login`.
-Passwords are hashed with argon2id, with time cost, memory and parallelism read
-from config so tests can use a low cost; a login with an outdated hash is
-rehashed. `check_login` locks a user for `HOSTWATCH_LOGIN_LOCK_S` after
-`HOSTWATCH_LOGIN_MAX_FAILURES` consecutive failures, and an unknown, locked or
-disabled user triggers a dummy verify so timing does not reveal whether the
-account exists. The lock is a fixed window, not an escalating backoff, and it
-is per account, so an attacker can lock out a known username (a denial of
-service trade-off accepted for now). Scopes are limited to `read:metrics`,
-`read:events`, `ingest` and `admin`. Password login and lockout are enforced
-over HTTP by the login endpoint described next.
-
-### Login, logout and CSRF (enforced)
-
-`POST /api/v1/login` takes a JSON username and password and calls
-`check_login`. On success it creates a server-side session and sets
-`hostwatch_session` with `HttpOnly`, `SameSite=Strict`, `Path=/`, a `Max-Age` of
-`HOSTWATCH_SESSION_TTL_S` and `Secure` whenever `Config.tls_active` is true: the hub terminates TLS (certificate and key set, enforced) or `HOSTWATCH_TLS=1` declares a TLS proxy (advisory). Without TLS the
-cookie travels in clear text, so keep the hub on loopback. Every failure
-(unknown user, wrong password, locked, disabled) returns the same 401 body with
-no cookie; the reason is written to the audit log as an `auth_failure` row under
-the actor `anonymous`. The attempted username is recorded only when it matches an
-existing account. Otherwise the row has `unknown_user: true` and `username_hmac`,
-an HMAC-SHA256 keyed with a random key generated once and stored in the data
-directory as `audit_hmac.key`, because an unknown name may be a mistyped password.
-Repeated attempts share an HMAC; the text is not recoverable from the log alone
-(whoever can read the data directory can test guesses, so this is privacy
-hygiene, not a boundary). A success is a
-`login` row and a logout is a `logout` row. Passwords are never logged.
-
-`POST /api/v1/logout` needs a session and marks it revoked in the database, so
-a copied cookie stops working at once.
-
-CSRF: `SameSite=Strict` is a second layer, not the control. The enforced control
-is a token derived from the session token (SHA-256 with a fixed prefix), returned
-in the login body and also set in the script-readable `hostwatch_csrf` cookie.
-Any POST, PUT, PATCH or DELETE authenticated by a session cookie must send it in
-the `X-CSRF-Token` header, compared in constant time; otherwise the answer is
-403 and an audit row records the reason. Safe methods and bearer-key requests
-are not subject to it, since a browser does not attach those credentials
-automatically. Known limits: the lock is per account, so anyone can lock a
-known username for the lock window, and there is no per-address throttle yet.
-
-### Hub authentication (enforced)
-
-Every route except `/internal/v1/health` depends on one `authenticate`
-function. It tries, in order: the `hostwatch_session` cookie, a bearer API key
-(`hw_` prefix, looked up by digest), the legacy `HOSTWATCH_INGEST_TOKEN`, which grants the
-`ingest` scope only and is marked deprecated in the audit detail, and last an
-mTLS identity (see below). A
-`require_scope` check then applies: `latest`, `sources` and `gaps` need
-`read:metrics`, `events` needs `read:events`, `ingest` needs `ingest`. Sessions
-carry both read scopes and never `ingest`. `admin` satisfies every scope except
-`ingest`. Missing or invalid credentials give 401, a missing scope gives 403.
-
-Admin endpoints sit behind `require_admin` (an administrator session or a key with the `admin` scope).
-`GET /api/v1/admin/keys` lists keys without secrets or hashes. `POST /api/v1/admin/keys` takes
-`scopes` and `owner`, returns the secret once with `Cache-Control: no-store`, and writes an
-`api_key_create` audit row that holds the key id, prefix, scopes and owner but never the secret.
-`POST /api/v1/admin/keys/{id}/revoke` writes an `api_key_revoke` row and takes effect on the key's
-next request. `GET /api/v1/admin/audit` is read-only and filters by `kind`, `actor`, `since`,
-`until` and `before_id`, with `limit` from 1 to 500. State changes made with a session need the CSRF
-header like every other POST. These endpoints are enforced by the same checks as the rest of the API.
-
-An HTTP middleware appends one `audit_log` row for each authenticated request
-and each 401 or 403, with actor, method, path, status and remote address.
-Secrets are never written; a failed attempt is recorded under the actor
-`anonymous` with a reason. The row is written in a `finally` block, so a request
-whose handler raises leaves a row with status 500. A rejected `hw_` key records
-`key_reason` (`unknown`, `revoked` or `bad_secret`) and `key_prefix`, the
-non-secret lookup prefix, only when it matches a stored key. If the audit write
-fails the request answers 500, so an access is never served unrecorded. Health is
-not audited. A 404 or 405 is routed before authentication, so it is audited only
-when the request carried a cookie or Authorization header, which keeps
-unauthenticated scanner traffic out of the log. A test enumerates `app.routes` and fails if any route other
-than health answers without credentials.
-
-Host binding: `api_keys.host` (schema version 10, nullable) names the one host a key is bound to.
-Creating an `ingest` key without a host is refused, and an `admin` key cannot be bound. At ingest
-a bound key whose batch names another host gets 403 and an audit row holding `key_host` and
-`batch_host`, and nothing is stored. A bound key on any read route is limited to its own host:
-a request for another host gets 403, and a request naming no host is narrowed to its own, as are
-the lists on `/api/v1/ui/status`, the Orion host list and `/metrics`. A bound ingest key may also
-read its own host's events so the agent can seed thresholds. Keys that predate the column stay
-unbound; their ingests carry `unbound_key` in the audit detail. The internal key minted in the
-`all` role is bound to `HOSTWATCH_HOST_NAME`. The legacy shared token is unbound by nature.
-
-Consequence: an agent that has only the shared token can ingest but gets 403
-when it seeds threshold state from `/internal/v1/events`. The agent therefore
-prefers `HOSTWATCH_INGEST_KEY`, a scoped key with the `ingest` scope bound to its host,
-and falls back to `HOSTWATCH_INGEST_TOKEN` only when no key is set. The agent
-role accepts either credential. In the `all` role the process mints an internal
-key for its local agent at start when none is configured: it is held in memory,
-only its digest is stored, it is never logged, and the previous internal key is
-revoked on each start.
-
-The legacy token is deprecated and still enforced as `ingest`-only. The first
-use in each hub process writes a `deprecation` audit row, and every use is
-audited as usual. Setting `HOSTWATCH_LEGACY_TOKEN_DISABLED=1` makes the hub
-reject the token with 401 (an enforced control, recorded in the audit reason).
-The token is optional for the hub and `all` roles; if set it must be at least
-32 characters.
-
-### Client certificate identity (optional, off by default)
-
-`hostwatch/mtls.py` implements `HOSTWATCH_MTLS_MODE`. In `off` mode no
-certificate or header is read. `uvicorn` mode is refused at startup:
-`Config.validate` raises because the pinned uvicorn does not expose the verified
-peer certificate to the application, so the mode could never authenticate
-anyone, and the message tells the operator to use proxy mode. The reader for the
-ASGI TLS extension (`client_cert_name`) stays in `mtls.py` only so a future
-uvicorn can be supported after the check in `UNVERIFIED.md` passes. In `proxy` mode the hub reads
-`X-SSL-Client-Verify` (must be `SUCCESS`), `X-SSL-Client-Subject` and
-`X-SSL-Client-SAN` (comma separated, e.g. `email:a@b.example`), but only when the
-TCP peer address is inside `HOSTWATCH_MTLS_TRUSTED_PROXIES`; otherwise the
-headers are ignored as if absent. The subject, then each SAN as `san:<entry>`,
-is looked up in `cert_bindings` (unrevoked binding, enabled user). A match
-yields a principal with the session read scopes, never `ingest`. A presented
-but unmapped name gives 401 and an `auth_failure` audit row with the name.
-
-Enforced: the peer allowlist, the verify header value, the binding lookup and
-the audit. Advisory (depends on deployment): that the proxy verifies the
-certificate against the intended CA, removes client supplied copies of these
-headers, and is the only network path to the hub. Header mode is only as strong
-as that configuration. How smart card certificates present their subject is
-unverified, see `UNVERIFIED.md`. Bindings are managed with
-`python -m hostwatch cert bind SUBJECT USER`, `cert list` and
-`cert revoke SUBJECT`. Each run appends a `cli` audit row, including refused
-runs. Revoking takes effect on the next request. These commands share the CLI
-trust boundary (shell access to the data directory), which is advisory.
-
-### Mixed credentials
-
-A request that carries both a session cookie and a bearer credential is rejected
-with 400 before either is checked, because silently preferring one would let a
-stale cookie mask a key or the reverse. The audit row has kind `auth_failure`
-and names both kinds (`session_cookie` and `bearer`). This is enforced in
-`hostwatch/hub.py`. A legacy `HOSTWATCH_INGEST_TOKEN` that starts with `hw_` is
-refused by `Config.validate`, because the hub routes any `hw_` bearer to the API
-key lookup and such a token could never match.
+Every event source rides in the same logs requests: the boot classification, pstore, rasdaemon, the
+journal watcher, the TrueNAS alerts and the threshold events. Event sources are plain callables in
+`Agent.event_sources`, and each one's status is reported in the availability tier. A source that
+raises is reported unavailable with the error as the reason.
 
 ## Image dependency install
 
@@ -935,16 +391,13 @@ that every lock entry carries a sha256 hash, and that the Dockerfile uses `--req
 
 ## Container healthcheck and image labels
 
-`python -m hostwatch healthcheck` builds the local health URL from the configuration: the
-configured port, https when TLS is configured, and 127.0.0.1 unless the hub role is bound to one
-specific address, which is then probed instead because it is the only address that listens. It
-uses `urllib.request`, so the image needs no curl, and a five second timeout. It exits 0 only for
-HTTP 200 with status ok. The certificate is not verified over TLS because it does not name the
-loopback address; the endpoint is unauthenticated and reveals only status and version, so this is a
-liveness probe and not an authentication control. The agent role serves nothing, so the command
-exits 0 with a message. The Dockerfile `HEALTHCHECK` uses interval 30s, timeout 10s, start period
-30s and 3 retries, and sets OCI labels from the build args `VERSION`, `REVISION` and `LICENSES`.
-`tests/test_healthcheck.py` covers the command with a mocked transport and checks the Dockerfile.
+The agent serves nothing, so `python -m hostwatch healthcheck` reads `agent.alive` in the data
+directory, which the agent loop rewrites every fifteen seconds with the time, and exits 0 only when
+it is less than two minutes old. It says the loop is turning. It does not say Observe is receiving:
+delivery trouble is reported by the `outbox` source and its stalled-delivery note. The Dockerfile
+`HEALTHCHECK` uses interval 30s, timeout 10s, start period 30s and 3 retries, and sets OCI labels
+from the build args `VERSION`, `REVISION` and `LICENSES`. `tests/test_docs.py` checks the command
+and the Dockerfile.
 
 ## CI supply chain and releases
 
@@ -954,203 +407,37 @@ anchore/sbom-action and runs trivy at severity CRITICAL with `ignore-unfixed` an
 fixable critical vulnerability fails CI; unfixed ones are not gated because nothing can be done
 about them yet. It uploads SARIF to code scanning and is the only job granted `security-events:
 write`; the SARIF upload is skipped for pull requests from forks, which get a read-only token.
-`smoke` starts the image with `--network host`, `HOSTWATCH_HUB_BIND=127.0.0.1`, a read-only root,
-all capabilities dropped and a tmpfs `/data`, then drives the first-run path over HTTP. Passwords,
-the CSRF token and keys are masked with `::add-mask::` before use and travel in files or stdin,
-never in echoed output. `image` (push only, needs all three) publishes the multi-arch image with
-`edge`, `{{version}}`, `{{major}}.{{minor}}` and sha tags and passes `VERSION` and `REVISION` build
-args. `release` runs only for `refs/tags/v*`, is the only job with `contents: write`, and attaches
-the SBOM. Every action is pinned to a 40 character commit SHA with the release in a comment. The
-SBOM describes the amd64 image; the arm64 variant is not scanned. These are CI controls on the
-build, not runtime controls. `tests/test_release.py` reads the workflow text (PyYAML is not a
-dependency) and checks the pins, the trivy gate, the loopback bind and the tag gate.
-
-## Web UI shell (Phase 5)
-
-The hub serves a static page from `hostwatch/web/`: `GET /` returns `index.html` and
-`/static/` serves `app.css` and `app.js`. There is no frontend build step. The files are
-package data in `pyproject.toml`, so the wheel and the Docker image, which installs the
-package, both contain them. The shell holds no data, so these paths need no credential; every
-data call the page makes goes through the authenticated API. The page signs in with
-`POST /api/v1/login`, keeps the returned CSRF token in memory, and sends it in the
-`X-CSRF-Token` header on state-changing calls. All text from the API is set with
-`textContent`, never `innerHTML`.
-
-An outermost middleware adds `Content-Security-Policy` (`default-src 'self'; script-src 'self';
-style-src 'self'; object-src 'none'; frame-ancestors 'none'; base-uri 'none'`),
-`X-Content-Type-Options: nosniff` and `Referrer-Policy: no-referrer` to every response,
-including allowlist refusals. The source allowlist applies to the UI paths like any other.
-Requests for `/` and `/static/` are not audited, because browsers send the session cookie with
-every asset request and the rows would hide real access. The CSS uses colour tokens with a
-`prefers-color-scheme` dark variant and a visible `:focus-visible` outline. The charts and key
-management arrive in later slices. Tests: `tests/test_ui_shell.py`.
-
-### Status tiles
-
-`GET /api/v1/ui/status` (scope `read:metrics`, so the session login and the source allowlist apply)
-returns one document built by `hostwatch/integrations/ui_status.py` from `build_host_summary`, the
-same summary the Home Assistant, Orion and Prometheus outputs use. It holds the banner (worst host,
-its state and reason), `refresh_s`, and the hosts sorted worst overall status first, then by name.
-Each host carries its 0/1/2 status and a text label, and for CPU, memory, power, temperatures, RAID,
-pools, disks and sources each component's value, state, state text and reason. Pools list each ZFS pool, or read unknown while the zfs source has not reported. Unknown and not present are shown as such, and a disappeared
-source is critical. `app.js` only renders this document with `textContent`, keeps the order it is
-given, polls at `refresh_s` without a page reload, and holds no threshold logic. State is shown by
-colour, a text badge and the text of each line, so it does not rely on colour alone. Tests:
-`tests/test_ui_status.py`.
-
-### Dashboard views
-
-The status screen is drawn from `GET /api/v1/hosts/summary/grouped`, which holds the banner with
-host and group counts, the hosts worst first, and for each host its groups with an aggregate status,
-a one-line summary and the member readings. Grouping, aggregate status and membership are computed
-once on the server; `app.js` does not group, compare or sort anything and sets all data with
-`textContent`. The header has a three-button view switcher. Simple draws one line per host with the
-overall status and one small icon per visible group, each with an accessible name such as "Fans:
-Good". Expanded draws group cards with the one-line summary; a host whose status is good starts
-collapsed to one line, hosts with a problem start open, and the host and group headers are buttons
-with `aria-expanded`, so a click opens the readings. Expert opens every host and group and shows a
-table of value, unit, labels, source, status, reason and timestamp, with unavailable values stated as
-such. The Customise panel lists every group with a visibility checkbox, a drag handle, and Move up
-and Move down buttons that work from the keyboard; each change is saved at once with `PUT
-/api/v1/me/preferences` and the CSRF header, and the saved view, visibility and order are loaded
-after sign in. The preference document also carries each group's label and icon. A Reset to default
-button restores the default order with every group shown. Hiding a group only changes what the page
-draws: the host status and the banner come from the server and still count the hidden group. When a
-hidden group is warning or critical on a host, the host header shows a marker reading "Hidden group
-needs attention" followed by the group name and its status text, with an icon so it is not conveyed by
-colour alone.
-
-Icons are the vendored Tabler outline SVGs in `hostwatch/web/icons/` (MIT, `LICENSE` shipped),
-listed as package data and served from `/static/icons/`. `app.css` draws them as CSS masks from
-relative same-origin URLs so they take the text colour in light and dark schemes, which keeps the
-strict content security policy and loads nothing from another origin. Status is shown as one of
-four icon shapes (check, triangle, cross, minus) together with the text label and a colour, never by
-colour alone. Tests: `tests/test_ui_views.py`.
-
-### Event timeline
-
-The Events view reads `GET /internal/v1/events` (scope `read:events`, so the session login and the
-source allowlist apply) and adds no endpoint. The filter form passes `host`, `source`, `kind` and
-`since` (a relative range converted to an epoch time in the browser) straight through. Paging
-follows the `X-Next-Before` and `X-Next-Before-Id` headers the endpoint sets on a full page and
-sends them back as `before` and `before_id`, so rows sharing a timestamp are not skipped. The table
-has a caption, column headers with `scope="col"`, labelled filter fields, and arrow key, Home and
-End navigation between rows using a roving tabindex. Every cell is set with `textContent`, so a host
-name or title containing markup shows as text. Tests: `tests/test_ui_events.py`.
-
-### Filter forms and tables
-
-Every filter form (Events, History, Audit log, API keys) wraps each label and control in a `.field`
-block, so the label is stacked above the control. The forms use an auto-fit grid, the text inputs and
-selects share one height and style, and the submit button sits on the bottom edge of the row. The row
-count note sits under the form, and an empty result shows an `.empty-state` message in place of the
-table. All `.events` tables and the Expert readings table share one set of rules in `app.css`: a
-sticky header row with its own background and bottom border, zebra shading, a hover highlight, right
-aligned `.num` columns and `.mono` columns for paths, ids, prefixes and detail. The tables scroll
-inside their own box, capped at 70 percent of the viewport height, so the sticky header has a scroll
-container to stay in. In the Audit log the HTTP status is a badge with an icon, the code and a word
-(Success, Warning or Error), so colour is never the only signal, and the detail JSON is shown as
-`key: value` pairs separated by commas. Everything is set with `textContent`, and no style
-attributes are used. Tests: `tests/test_ui_tables_forms.py`.
-
-### History charts
-
-The History view lists the series from `GET /internal/v1/latest` and, for the chosen series and range, reads `GET /api/v1/hosts/{host}/history` and `GET /internal/v1/gaps` (scope `read:metrics`, so the session login and the source allowlist apply). It adds no endpoint. The hub decides between raw samples and hourly rollups from the range length, so the range selector only chooses the span: up to 24 hours reads raw samples and longer ranges read rollups, and the response `resolution` field is shown to the reader. The chart is built in `app.js` with `createElementNS`: an average line and a minimum to maximum band per label set, axis labels, and a shaded, dashed rectangle for each interval the gaps endpoint reports, so missing data is visible and never interpolated. The gap threshold is twice the step, at least 120 seconds. The SVG has a title and description, and a table of the same buckets plus a list of the gaps give a text alternative. All labels are set with `textContent`, no style attributes are written, and no third-party origin is referenced. Tests: `tests/test_ui_history.py`.
+`smoke` starts the image with `--network host`, a read-only root, all capabilities dropped and a
+tmpfs `/data`, with the agent pointed at an address that answers nothing, and waits for
+`python -m hostwatch healthcheck` to pass. That shows the agent starts as the non-root user, finds its
+data directory and keeps its loop turning while Observe is unreachable. The key is generated and
+masked with `::add-mask::` before use and is never echoed. `image` (push only, needs all three)
+publishes the multi-arch image with `edge`, `{{version}}`, `{{major}}.{{minor}}` and sha tags and
+passes `VERSION` and `REVISION` build args. `release` runs only for `refs/tags/v*`, is the only job
+with `contents: write`, and attaches the SBOM. Every action is pinned to a 40 character commit SHA with
+the release in a comment. The SBOM describes the amd64 image; the arm64 variant is not scanned. These
+are CI controls on the build, not runtime controls. `tests/test_release.py` reads the workflow text
+(PyYAML is not a dependency) and checks the pins, the trivy gate, the smoke job and the tag gate.
 
 ## Security model
 
-Control summary for Phase 3, each labelled honestly. Enforced means the code
-refuses the request and a test proves it. Advisory means it depends on how the
-operator deploys it.
+Enforced by the agent or the container:
 
-| Control | Label | Test |
-|---|---|---|
-| Default deny: every route except health needs a session, key or certificate identity | Enforced | `tests/test_phase3_exit.py`, `tests/test_auth.py` |
-| Revoked key rejected on its next request | Enforced | `tests/test_phase3_exit.py` |
-| One audit row per authenticated request and per 401 or 403, none for health | Enforced; append-only at the application layer only | `tests/test_phase3_exit.py` |
-| Password lockout, uniform login failure, CSRF token on cookie writes | Enforced | `tests/test_login.py` |
-| Non-loopback bind refused without TLS | Enforced, override `HOSTWATCH_ALLOW_INSECURE_BIND=1` | `tests/test_config.py` |
-| Specific-IP plain HTTP bind with `HOSTWATCH_ALLOWED_CLIENTS`; other socket peers get 403 and a `source_denied` audit row before authentication | Enforced as exposure control only, not authentication; relies on `network_mode: host` for real client addresses | `tests/test_source_allowlist.py`, `tests/test_config.py` |
-| All role with a specific-IP bind also listens on 127.0.0.1 so the local agent delivers; failure to bind either address stops startup | Enforced | `tests/test_config.py` |
-| Loopback as the default bind | Advisory: it limits exposure and is not authentication | none |
-| Proxy mode client certificates | Peer allowlist and binding lookup enforced; proxy verification and header stripping advisory | `tests/test_mtls.py` |
-| Operator CLI | Advisory: protected only by access to the data directory | `tests/test_cli.py` |
-| Audit log tamper resistance | Advisory: a person with write access to the database file can edit it | none |
+* The agent opens no listening port, so it has no inbound surface of its own.
+* The ingest key goes only in the `Authorization` header of requests to Observe and is held in memory
+  as a `Secret`, whose repr is redacted. It is not written to the outbox, to a log line or to a reason.
+* Observe binds the key to one host name and refuses a request whose resource names another host, so
+  one host cannot report as another. That check is Observe's, not the agent's; the agent warns when
+  `HOSTWATCH_HOST_NAME` differs from Observe's name for the key.
+* Redirects are not followed, so a key is never sent to an address the operator did not configure.
+* Container limits (non-root uid 10001, read-only root, all capabilities dropped, no privileged mode,
+  host mounts read-only, the host `/proc` not mounted) are enforced by Docker from the compose files.
+* The TrueNAS API key is read from a file and never logged. The TrueNAS client sends only an
+  allowlist of read-only methods.
 
-Current (enforced): the hub binds to 127.0.0.1 by default, every endpoint
-except health and login requires a session, a scoped API key or the ingest-only legacy token (constant time compare) and is audited, the
-container runs non-root with a read-only rootfs, all capabilities dropped, and
-`no-new-privileges`. The host `/sys` is mounted read-only. The host `/proc` is
-never mounted. The Phase 2 event sources are read-only bind mounts and nothing
-else was widened (no privileged mode, no added capability, no writable host mount):
-
-| Host path | Container path | Config variable |
-|---|---|---|
-| `/var/log/journal` | `/host/journal` | `HOSTWATCH_JOURNAL` |
-| `/run/log/journal` | `/host/journal-volatile` | `HOSTWATCH_JOURNAL_VOLATILE`; read only when the persistent directory has no readable journal files |
-| `/sys/fs/pstore` | `/host/pstore` | `HOSTWATCH_PSTORE` |
-| `/var/lib/rasdaemon` | `/host/rasdaemon` | `HOSTWATCH_RASDAEMON_DB` (file `ras-mc_event.db`) |
-
-The image installs `journalctl` from the `systemd` package. Reading the journal
-may need the `systemd-journal` group, which is recorded in `UNVERIFIED.md`.
-
-Boolean environment variables (enforced): every boolean setting is read by one
-helper, `parse_bool` in `config.py`. It accepts 1, true, yes, on as true and 0,
-false, no, off or empty as false, case-insensitively, and raises a `ValueError`
-naming the variable for anything else, so a misspelt value cannot silently
-disable `HOSTWATCH_ALLOW_INSECURE_BIND` or `HOSTWATCH_LEGACY_TOKEN_DISABLED`.
-
-TLS serving (enforced): `HOSTWATCH_TLS_CERT` and `HOSTWATCH_TLS_KEY` are passed
-to uvicorn as `ssl_certfile` and `ssl_keyfile` by `uvicorn_kwargs` in
-`__main__.py`; `HOSTWATCH_TLS_CLIENT_CA` adds `ssl_ca_certs` with client
-certificates requested but not required. `Config.validate` refuses a
-non-loopback `HOSTWATCH_HUB_BIND` without a certificate and key, unless
-`HOSTWATCH_ALLOW_INSECURE_BIND=1`, which logs a warning. The bind check is
-exposure control only and is not authentication. Without TLS, a non-loopback bind
-is also accepted when `HOSTWATCH_HUB_BIND` is one specific address (not 0.0.0.0, `::`
-or any unspecified address) and `HOSTWATCH_ALLOWED_CLIENTS` is a non-empty list of
-individual IPv4 or IPv6 addresses (parsed with `ipaddress`; CIDR ranges, hostnames and
-empty entries are refused naming the entry); startup logs a warning that traffic is
-unencrypted. With TLS the list is optional. When set, a middleware that runs before
-authentication compares the socket peer (`request.client.host`, never a forwarded
-header, IPv4-mapped IPv6 normalised) with the list and always admits loopback so the
-local agent can ingest. Other peers get 403. The first denial per peer is written as an audit row (actor `anonymous`,
-kind `source_denied`); later denials from that peer are only counted, and the first one after
-60 seconds writes a single summary row whose detail carries `denied_since_last_row`. At most 4096
-peers are tracked, with extras sharing one bucket, so a scanner cannot grow the database without
-bound. Every audit writer stores the request path with control characters replaced by `?` and
-capped at 256 characters (`sanitize_audit_path` in `store.py`). Scoped IPv6 entries (a `%zone`)
-are refused in the list and in `HOSTWATCH_HUB_BIND`, the list must contain at least one unicast
-address that is not loopback, unspecified, multicast or broadcast, and multicast or broadcast bind
-addresses are refused. Audit retention is described in the README. The allowlist is exposure control, not authentication: allowed
-clients still need a session or key. It depends on `network_mode: host` so the hub
-sees real client addresses; behind NAT or a proxy, list the proxy's address, which then
-admits everything that proxy forwards. `HOSTWATCH_TLS=1` does not start
-a listener; it only marks cookies `Secure` (advisory), and a configured certificate
-and key mark them `Secure` too.
-
-Local agent delivery (enforced): in the all role the agent posts to the hub over
-loopback (`local_agent_hub_url` in `__main__.py`). A specific-address bind does not
-accept loopback connections, so `listen_addresses` returns the configured address
-plus `127.0.0.1` for the all role, and `bind_sockets` binds both before serving them
-from one uvicorn server. If either bind fails, startup raises with the address named
-rather than letting batches queue silently. The hub role and loopback or wildcard
-binds use the single configured address. The three accepted non-loopback cases are
-TLS, a specific address with a source allowlist, and the explicit insecure override.
-Covered by `tests/test_config.py`.
-
-Operator CLI (enforced by file access, not by the network): `cli.py` provides
-`bootstrap-admin`, `user create|disable|unlock|passwd|grant-admin|revoke-admin` and `key create|list|revoke`.
-It opens the SQLite database directly, so whoever can write the data directory
-can run it; it is not reachable over HTTP. Bootstrap refuses to run when any
-user exists. Passwords come from getpass or one stdin line, never from
-arguments. Secrets are printed once to stdout and only hashes are stored.
-Disabling a user or changing a password revokes that user's sessions. Every
-action, including refusals, appends an audit row of kind `cli` with the
-operating system user as actor. The audit log is append-only at the
-application layer only, as described above; it is not tamper-proof against
-someone with write access to the file, which is the same person who can run
-the CLI.
+Advisory only: traffic to Observe is plain HTTP when `HOSTWATCH_OBSERVE_URL` starts with `http://`.
+Use `https://` or a trusted LAN segment. The agent verifies the certificate with the default trust
+store; a private CA must be added to that store. `docs/THREAT-MODEL.md` has the threats and controls.
 
 ## hostwatch-control verification
 
@@ -1316,15 +603,6 @@ Import isolation is enforced by `tests/test_control_daemon.py`: a static scan of
 import of `hostwatch.control` that runs at import time, and a fresh interpreter that imports the collector entry points
 and checks that no `hostwatch.control` module is loaded.
 
-## Threat model and quick start documents
-
-`docs/THREAT-MODEL.md` lists assets, trust boundaries, threats and controls, and each control line
-carries one of three labels: enforced, advisory or planned. The README quick start is a numbered
-list for a fresh Debian 13 host. `tests/test_docs.py` checks that the threat model exists, that
-every control line has exactly one label, that the quick start steps are numbered in order, and that
-the quick start names only CLI commands the parser defines and `HOSTWATCH_` variables that appear
-in the code, the compose file or `deploy/.env.example`. It does not run any command.
-
 ## Isolation for tests and agents
 
 Nothing in the test suite touches real hardware. Collectors take their sysfs
@@ -1356,33 +634,28 @@ The client is not yet called by a collector; the TrueNAS collector slices build 
 
 ## TrueNAS deployment
 
-`deploy/truenas/compose.yaml` runs the agent role as a TrueNAS custom app with the same limits as the Debian
+`deploy/truenas/compose.yaml` runs the agent as a TrueNAS custom app with the same limits as the Debian
 compose file: read-only root, all capabilities dropped, no privileged mode, uid 10001, read-only `/sys` and
-journal mounts, host networking and the host `/proc` not mounted. The hub URL and ingest key come from an
+journal mounts, host networking and the host `/proc` not mounted. The Observe URL and ingest key come from an
 `env_file` on the data dataset and the TrueNAS API key from a mounted file, so the app definition holds no
 secret. `deploy/truenas/rapl-postinit.sh` is registered as a Post Init script because TrueNAS host changes do
 not survive updates. It is a dry run unless given `--apply`, needs root to apply, is idempotent, and changes
 only the group and mode of `energy_uj` files under the powercap tree and, read-only, of `/sys/fs/pstore` and
 its files (advisory control; it widens access to the PLATYPUS side channel and to crash dumps that can
 contain kernel memory fragments for members of the group). On Debian `scripts/pstore-access.sh` does the
-pstore part with a unit ordered after `sys-fs-pstore.mount`. The hub side uses the specific-address bind with
-`HOSTWATCH_ALLOWED_CLIENTS` and a per-agent ingest key. See `docs/deploy-truenas.md`.
+pstore part with a unit ordered after `sys-fs-pstore.mount`. See `docs/deploy-truenas.md`.
 
-## Remote agent deployment
+## Agent deployment
 
-`deploy/agent/docker-compose.yml` runs the agent role on the Raspberry Pi or any Debian host with
-the same limits as the other deployments: uid 10001, read-only root filesystem, all capabilities
-dropped, no privileged mode, host networking, read-only `/sys` and journal mounts, and the
-data volume as the only writable path. The hub URL and the per-agent ingest key come from an
-untracked `.env`. `docs/deploy-agents.md` describes the three-host layout and the hub settings
-(specific-address bind, `HOSTWATCH_ALLOWED_CLIENTS`, one ingest key per agent). `tests/test_agent_deploy.py`
-checks the compose file and the guide.
+`deploy/docker-compose.yml` (MediaIn-SVR), `deploy/agent/` (a Debian host such as the Raspberry Pi),
+`deploy/truenas/compose.yaml` (the TrueNAS custom app) and `deploy/windows/install.ps1` (the Windows
+service) all run the same agent. Each takes the Observe URL and the ingest key from an env file that
+is not committed. `docs/deploy-agents.md` and `docs/deploy-truenas.md` give the steps.
 
 ## Platforms
 
-Linux (Debian 13 amd64) first. The Raspberry Pi (arm64), TrueNAS SCALE, and a
-native Windows agent follow once the Linux path passes its exit tests. Windows
-agents will push the same `Batch` schema.
+Linux (Debian 13 amd64), the Raspberry Pi (arm64), TrueNAS SCALE and a native Windows
+agent all send the same OTLP to Observe; only the collectors and the event sources differ.
 
 ### Windows platform seam
 
@@ -1411,20 +684,20 @@ The service class is built lazily and exposed as the module attribute `Hostwatch
 import without pywin32. `HandleCommandLine` receives that string. `install.ps1` stores `-DataDir` in the service
 parameter `DataDir`, which `service_data_dir()` reads before `HOSTWATCH_DATA_DIR` and the default. `Agent.flush`
 sends with a 5 second timeout, stops between sends once a stop is requested, and takes an optional deadline; the final
-flush in `AgentHost.flush_outbox` uses a 10 second deadline, so a stop is honoured promptly and unsent batches stay in
-the outbox. `Config.validate` rejects a `HOSTWATCH_INTERVAL` below 5 seconds.
+flush in `AgentHost.flush_outbox` uses a 10 second deadline, so a stop is honoured promptly and unsent requests stay in
+the outbox.
 
 Tests use `tests/fakes_windows.py`, which loads `tests/fixtures/windows/seam.json` into fake readers and a
 recording fake runner, and `tests/test_windows_seam.py` fails if a real reader is constructed. The pipe
 protocol of the fan controller service and the PowerShell output shape are unconfirmed on Windows; see
-`UNVERIFIED.md`. No wire schema field changed.
+`UNVERIFIED.md`.
 
 ### Windows Event Log boot and crash events
 
 `hostwatch/events/winevent.py` reads the System log through the seam's `EventLogReader` for Kernel-Power 41,
 EventLog 6006 and 6008, BugCheck 1001 and WHEA-Logger records. The `PowerShellEventLogReader` script now also
 returns the record id, an additive key that fakes may omit. `classify_windows_boot()` maps one shutdown's
-records onto the existing `Classification` kinds and `boot_event()` builds the wire event: a BugCheck is
+records onto the existing `Classification` kinds and `boot_event()` builds the event: a BugCheck is
 `kernel_panic`, 41 or 6008 without a BugCheck is `unknown_unclean` (a power cut and a hang cannot be told apart
 without a witness, so it is never `power_loss`), and 6006 alone is `clean_shutdown`. Windows exposes no boot id,
 so the boot id is `win-<epoch seconds of the earliest record>`. Records within 15 minutes of each other form one
@@ -1434,7 +707,7 @@ arrive after the Kernel-Power one. WHEA records become `hardware_error` events w
 
 The bookmark is the time of the newest finished record. In the agent it and the keys of records already
 reported are staged as outbox markers (`winevent.bookmark` and `winevent.keys`), so they become durable only
-with the batch that carries the events, and a failed cycle re-reads the same records. Without an outbox they are
+with the requests that carry the events, and a failed unit re-reads the same records. Without an outbox they are
 files under `winevent/` in the data directory, saved before the events are returned. The read is oldest first
 (`Get-WinEvent -Oldest`) and capped at 500 records. A full window moves the bookmark only to the newest record
 returned and treats that record as the present when settling shutdown groups, so the rest is read next cycle.
@@ -1442,68 +715,37 @@ A bookmark that is not finite, not positive or more than five minutes in the fut
 once and replaced by the seven day lookback. A 6006 record closes its shutdown group when the next record is
 more than two minutes later, so a clean shutdown followed by a crash is two events. The first read looks back
 seven days. A log that cannot be
-read makes the source unavailable with the reason. Nothing wires this reader into the agent yet. No wire schema
-field changed. See `UNVERIFIED.md` for the unconfirmed record shapes.
+read makes the source unavailable with the reason. `build_agent` registers this reader as the `winevent` event
+source. See `UNVERIFIED.md` for the unconfirmed record shapes.
 
-## Hub validation
-
-`Sample.ts` and `Event.ts` accept only finite numbers. A batch carrying NaN or
-infinity is rejected with status 422 and nothing in it is stored or
-acknowledged, so the agent treats it as a permanent rejection. The 422 body
-omits the rejected input, because that input cannot be encoded as JSON. Events
-are inserted with `ON CONFLICT(host, dedup_key) DO NOTHING`, so only the
-uniqueness conflict is ignored and any other constraint failure raises.
-
-### Admin screens
-
-Two tabs, API keys and Audit log, are hidden until the page learns that the session belongs to an administrator. It learns this by calling `GET /api/v1/admin/keys` after sign in and revealing the tabs only when that call succeeds. Hiding the tabs is cosmetic. The enforced control is `require_admin` in `hub.py`, which answers 403 to every non-administrator on all four admin routes, and the tests assert that. The screens add no endpoint and use `GET /api/v1/admin/keys`, `POST /api/v1/admin/keys`, `POST /api/v1/admin/keys/{id}/revoke` and `GET /api/v1/admin/audit`. Every state-changing call goes through the single `apiPost` helper in `app.js`, which sends the `X-CSRF-Token` header, so the existing session CSRF check applies. The secret of a new key is placed in the page once, in an alert region, and is removed from the DOM when the reader dismisses it, switches view, creates another key, signs out or leaves the page. It is not stored anywhere else and the response is marked `Cache-Control: no-store`. Revoking asks for a second, in-place confirmation before the request is sent. The audit view only reads: the hub has no write or delete route for the audit log, and the page offers none. All values, including the audit detail JSON, are set with `textContent`. Tests: `tests/test_ui_admin.py`.
-
-### Phase 5 exit test
-
-`tests/test_phase5_exit.py` asserts what can be proved without a browser: for a hub with healthy,
-warning and degraded hosts, `GET /api/v1/ui/status` lists the degraded host first with the text
-label Critical and a banner naming it, the banner precedes the host panels in `index.html`, `app.js`
-renders the text label and a state class, and the package data in `pyproject.toml` plus the
-Dockerfile install step ship the web assets. Rendering, contrast and the 5-second criterion are
-owner checks recorded in `UNVERIFIED.md`.
-
-## Phase 6 exit test
-
-`tests/test_phase6_exit.py` runs a fake upsd bound to 127.0.0.1 through the NUT collector and the
-threshold engine and asserts `ups.on_battery` then `ups.on_line`. It then delivers the on-battery event
-to the hub, posts an abrupt-end boot event for the same host with a mocked Home Assistant plug history
-that shows an overlapping outage, and asserts a critical `boot.power_loss` event beside the kept
-`boot.unknown_unclean`, with the plug intervals and the UPS event in `detail.power_witness`. A boot
-with no witness configured stays `unknown_unclean`. The real UPS and plug pulls are owner checks in
-`UNVERIFIED.md`.
+## Collector and platform notes
 
 ### ZFS pool state
 
 The `zfs` collector reads `<procfs>/spl/kstat/zfs/<pool>/state` for every directory that holds a
 `state` entry. The file is readable without privilege on TrueNAS-SVR. Each pool yields a
-`pool_state` sample with labels `pool` and `state`. The hub maps the text: ONLINE is ok;
-DEGRADED, FAULTED, UNAVAIL and SUSPENDED are critical; any other text is unknown and never ok.
-A state file that cannot be read gives a sample with no value, which is unmeasured. The source is
+`pool_state` sample with labels `pool` and `state`, which the mapping sends as the `hw.status` metric with
+`hw.type` `logical_disk` and the state text in `hw.state`. A state file that cannot be read gives a sample with no value, which is dropped and never sent
+as healthy. The source is
 reported not present only when the zfs kstat directory is readable and empty, or is missing while
-`/proc` is readable. The pool list is a separate group from `raid`, so a host with both md and
-ZFS shows both. Pool state events are not part of this slice; the TrueNAS API view is merged into the same pool component as described under the TrueNAS source.
+`/proc` is readable. A degraded pool is a watched source, so the agent raises its events between storage polls.
 
 ### Raspberry Pi throttling
 
 The `rpi` collector detects a Pi from `<procfs>/device-tree/model` or `<sysfs>/firmware/devicetree/base/model`. It reads the firmware throttled bitmask from `<sysfs>/devices/platform/soc/soc:firmware/get_throttled`, or from the file named by `HOSTWATCH_RPI_THROTTLED_PATH`, and emits one `throttle_flag` sample per decoded bit (under-voltage, frequency capped, throttled and soft temperature limit, each as now and has-occurred), a `throttled_raw` sample and a `soc_temp` sample from the thermal zone of type `cpu-thermal`. A Pi without the bitmask file is unavailable with a reason that names the `vcgencmd get_throttled` alternative, and its flags are never reported as zero. On a Windows agent the Linux-only sources (`rapl`, `hwmon`, `mdraid`, `zfs`, `rpi`, and `thermalctl` with no configured status path) carry `linux_only` and are reported `present` false with a reason, without being probed. A host is reported not present only on positive evidence: a model file that was read and names no Pi, or model files missing from readable trees with no throttled file and no configured path. An unreadable model file with a throttled file or configured path leaves the source present, detected or unavailable with a reason.
 
-The hub summary adds a `pi_throttling` component: under-voltage now is critical, capped, throttled or soft limit now is a warning, and any has-occurred bit is a warning until a reboot clears it. The SoC temperature joins the temperature list with the CPU thresholds. The `pi` group is optional and appears in `unmeasured` or `not_present` only for hosts whose agent sent an `rpi` row. The Orion, Prometheus and Home Assistant outputs do not yet publish the Pi component separately; it does count toward the overall status.
+The flags, the raw bitmask and the SoC temperature are sent as metrics; deciding what is a warning is Observe's job. Under-voltage now, capped or throttled now, and the has-occurred bits are separate flags, so a rule can tell them apart.
 
 ### Fan controller (thermalctl)
 
-The `thermalctl` collector reads one JSON file, `/run/thermalctl/status.json` by default or the path in `HOSTWATCH_THERMALCTL_STATUS`, which the thermalctl service in the thermal-control-linux repo writes atomically each cycle. It emits `zone_temp` (C) and `zone_load` (%) per zone with a `zone` label, and for each header a `fan_duty` (%) and a `fan` (RPM) sample. The header samples carry the labels `chip=thermalctl`, `sensor=<header id>`, `state`, `mode` and `reasons` (the failsafe reasons joined with commas), so they land in the Fans group beside the hwmon fans without any schema change. A value the controller could not measure is a sample with no value, never zero.
+The `thermalctl` collector reads one JSON file, `/run/thermalctl/status.json` by default or the path in `HOSTWATCH_THERMALCTL_STATUS`, which the thermalctl service in the thermal-control-linux repo writes atomically each cycle. It emits `zone_temp` (C) and `zone_load` (%) per zone with a `zone` label, and for each header a `fan_duty` (%) and a `fan` (RPM) sample. The header samples carry the labels `chip=thermalctl`, `sensor=<header id>`, `state`, `mode` and `reasons` (the failsafe reasons joined with commas), so they are sent as fan metrics beside the hwmon fans. A value the controller could not measure is a sample with no value, never zero.
 
-The source is unavailable, with a reason, when the file cannot be read, is not a JSON object, has no numeric timestamp, or its timestamp is more than 60 seconds old, since a stopped controller leaves its last file behind. It is reported not present only on positive evidence: the directory that would hold the file is readable and the file is missing, or the directory is missing from a readable parent, which is the normal case on a host that never ran thermalctl. The summary shows a header whose state label is `failsafe` as a warning with the controller's reasons; the controller drives the fan at full speed in that state, so it is a warning and not a fan fault.
+The source is unavailable, with a reason, when the file cannot be read, is not a JSON object, has no numeric timestamp, or its timestamp is more than 60 seconds old, since a stopped controller leaves its last file behind. It is reported not present only on positive evidence: the directory that would hold the file is readable and the file is missing, or the directory is missing from a readable parent, which is the normal case on a host that never ran thermalctl. A header whose state label is `failsafe` carries the controller's reasons; the controller drives the fan at full speed in that state, so it is a warning and not a fan fault.
 
 ### Windows CPU and memory collectors
 
 `hostwatch/collectors/win_cpu.py` and `win_memory.py` read through the seam's `CimQuery` and keep the source ids `cpu`
-and `memory` and the metric names of the Linux collectors, so the hub and the dashboard need no change. On a Windows
+and `memory` and the metric names of the Linux collectors, so the mapping needs no change. On a Windows
 platform `build_collectors` builds them in place of the Linux pair, because two sources must not share an id; on any
 other platform they are not built. The platform comes from the new optional `platform` argument, which defaults from
 `sys.platform`.
@@ -1517,8 +759,7 @@ worse than none. 64-bit counters may arrive from PowerShell JSON as strings and 
 `WinMemoryCollector` reports `mem_total` from `Win32_OperatingSystem.TotalVisibleMemorySize` (KiB converted to bytes),
 and `mem_available`, plus the Windows-only `commit_limit` and `commit_used`, from `Win32_PerfFormattedData_PerfOS_Memory`
 (`AvailableBytes`, `CommitLimit`, `CommittedBytes`). A figure the host does not report is left out. A seam failure
-makes the source unavailable with the reason. No wire schema field changed; the counter shapes are listed in
-`UNVERIFIED.md`.
+makes the source unavailable with the reason. The counter shapes are listed in `UNVERIFIED.md`.
 
 ### Windows disk, Storage Spaces and smartctl collectors
 
@@ -1553,8 +794,8 @@ bad answer is unavailable with the reason.
 The threshold engine gains one rule for both sources. `winstorage.health_raised` fires when the level of a disk, pool,
 virtual disk or SMART self-assessment rises (warning for 1, critical for 2, and again when 1 becomes 2), and
 `winstorage.health_cleared` fires on return to 0. The rule key uses the metric and the `id` label, so it survives the
-text labels changing, and the state is seeded from stored events like the other rules. A null level neither raises nor
-clears. No wire schema field changed; the class and property assumptions are listed in `UNVERIFIED.md`.
+text labels changing, and the state is saved with the other rules. A null level neither raises nor
+clears. The class and property assumptions are listed in `UNVERIFIED.md`.
 
 ### Windows Thermal Control Suite status
 
@@ -1576,15 +817,13 @@ It emits `zone_temp`, `zone_load` and `zone_duty` per zone, and for each fan `fa
 plus a document level `failsafe` count. The fan samples use the `thermalctl` label names: `chip=thermalsuite`,
 `sensor=<fan id>`, `state`, `mode` and `reasons`, with `dry_run`, `firmware_controlled`, `config_error` and `applied`
 added. The state is `failsafe` when a `fan:<id>` or `control:` reason is active or the fan is stalled, then
-`firmware_controlled`, `dry_run` and `active`, so the summary shows a failsafe fan as a warning in the Fans group exactly
-as for `thermalctl`. `fan_duty` carries the applied percentage and has no value when the duty was not applied (dry run) or
+`firmware_controlled`, `dry_run` and `active`, so a failsafe fan reads the same as for `thermalctl`. `fan_duty` carries the applied percentage and has no value when the duty was not applied (dry run) or
 the firmware sets the fan, because the service reports an actual of 0 there that is not a measurement; `fan_target` carries
 the computed duty. The contract has no watts, so no power reading is emitted.
 
 The source is unavailable when the read times out or fails, the payload is not the documented shape, the schema version
 is unknown, the service has not completed a control pass (`passAgeSeconds` is null), or the last pass is more than 60
-seconds old. It is not present only when the pipe does not exist. No wire schema field changed; the new metrics and
-labels are additive. Nothing here is verified against a running service; see `UNVERIFIED.md`.
+seconds old. It is not present only when the pipe does not exist. Nothing here is verified against a running service; see `UNVERIFIED.md`.
 
 ### Windows agent run mode and service (Phase 8)
 
@@ -1593,16 +832,16 @@ labels are additive. Nothing here is verified against a running service; see `UN
 drops the Linux-only event sources (`pstore`, `rasdaemon`, `journal` and `truenas_alerts`) and registers the
 `WinEventReader` as the `winevent` source. The Linux boot id and heartbeat check is skipped, because Windows boot and
 crash classification comes from the Event Log. The outbox is the same SQLite file in the data directory, by default
-`C:/ProgramData/hostwatch`, and delivery, backoff, dead-lettering and credentials are unchanged: the batch is the same
-wire schema and the bearer is `HOSTWATCH_INGEST_KEY` or `HOSTWATCH_INGEST_TOKEN`.
+`C:/ProgramData/hostwatch`, and delivery, backoff, dead-lettering and the credential are the same as on Linux: OTLP to Observe with
+the bearer `HOSTWATCH_INGEST_KEY`.
 
-`python -m hostwatch windows run` (in `cli.py`, which does not open the hub database for this command) loads the
-optional `agent.env` file from the data directory, forces the agent role, validates the configuration and runs the loop
+`python -m hostwatch windows run` (in `cli.py`) loads the
+optional `agent.env` file from the data directory, validates the configuration and runs the loop
 in the foreground. File values never override variables already set, only `HOSTWATCH_` names are accepted, and a bad
 line is reported by number without printing it.
 
 `AgentHost` runs the agent and, when the loop ends for any reason, makes one more delivery attempt. A failure there is
-logged and the batches stay in the outbox for the next start. The service class is built inside `service_class()` and
+logged and the requests stay in the outbox for the next start. The service class is built inside `service_class()` and
 `main()`, which import pywin32 (`win32serviceutil`, `win32service` and `servicemanager`) only when called, so the module
 imports on Linux and the tests never need pywin32. `SvcStop` only sets the stop flag, and `SvcDoRun` returns after the
 flush. An exception ends the process non-zero so the recovery actions restart it. Logs go to a rotating
@@ -1614,6 +853,5 @@ and the restart recovery actions, and starts it. It supports `-DryRun` and asks 
 the service and the venv and keeps the data directory unless `-RemoveData` is given. Tests check the scripts as text
 and with the PowerShell parser when one is present, and never run them.
 
-Destination: the agent only needs a URL that accepts the wire schema. The hostwatch hub and web view are expected to be
-retired in favour of Observe, which will ingest the same schema, so the agent is kept free of any hub dependency and
-the schema changes only additively. Pointing the agent at Observe will be a change to `HOSTWATCH_HUB_URL` and the key.
+Destination: `HOSTWATCH_OBSERVE_URL`, with `HOSTWATCH_HUB_URL` kept as an alias because Observe's install scripts set it,
+and `HOSTWATCH_INGEST_KEY`.

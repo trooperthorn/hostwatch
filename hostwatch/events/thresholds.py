@@ -6,10 +6,9 @@ A steady state emits nothing. A sample whose value is None is unknown: it
 never triggers a rule and never counts as a recovery, and the stored state is
 left as it was.
 
-State lives in memory. On start it is seeded from events already stored by the
-hub (the dicts returned by Store.events or GET /internal/v1/events), so a
-restart does not repeat an open condition. Every event carries the rule key
-and the new state in its detail, which is what seeding reads back.
+State lives in memory and is saved in the outbox together with the events it produced
+(dump and load), so a restart does not repeat an open condition. Every event also carries
+the rule key and the new state in its detail.
 
 Rules:
   md.degraded             mdraid degraded > 0 raises, back to 0 clears
@@ -30,11 +29,12 @@ Rules:
 
 from __future__ import annotations
 
+import json
 import time
 from collections.abc import Iterable
 from typing import Any
 
-from ..schema import Event, Sample, SourceStatus
+from ..model import Event, Sample, SourceStatus
 
 SOURCE = "thresholds"
 WIN_HEALTH_METRICS = frozenset({"disk_health", "pool_health", "virtual_disk_health"})
@@ -46,20 +46,21 @@ class ThresholdEngine:
         # (sync action) or an int (Scrutiny status).
         self.state: dict[str, Any] = {}
 
-    def seed(self, stored_events: Iterable[dict]) -> None:
-        """Rebuild state from stored events. Input order does not matter; the
-        newest event per rule key wins."""
-        newest: dict[str, tuple[float, Any]] = {}
-        for ev in stored_events:
-            detail = ev.get("detail") or {}
-            key = detail.get("rule_key")
-            if ev.get("source") != SOURCE or not isinstance(key, str) or "state" not in detail:
-                continue
-            ts = float(ev.get("ts", 0))
-            if key not in newest or ts >= newest[key][0]:
-                newest[key] = (ts, detail["state"])
-        for key, (_, value) in newest.items():
-            self.state[key] = value
+    def dump(self) -> str:
+        """The state as JSON, for the outbox marker that carries it across a restart."""
+        return json.dumps(self.state, sort_keys=True)
+
+    def load(self, raw: str | None) -> None:
+        """Restore state saved by dump(). Unreadable text is ignored, which only means an open
+        condition may be reported once more after a restart; Observe keeps one row per key."""
+        if not raw:
+            return
+        try:
+            data = json.loads(raw)
+        except ValueError:
+            return
+        if isinstance(data, dict):
+            self.state = {str(k): v for k, v in data.items() if isinstance(v, (bool, int, str))}
 
     def evaluate(self, samples: Iterable[Sample], statuses: Iterable[SourceStatus],
                  now: float | None = None) -> list[Event]:

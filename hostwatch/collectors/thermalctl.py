@@ -7,8 +7,8 @@ by default /run/thermalctl/status.json. This collector only reads that file. Rep
   fan_duty    percent per header, unit %, labels chip=thermalctl, sensor=<header>, state, mode, reasons
   fan         rpm per header, unit RPM, the same labels
 
-The fan rows use the chip and sensor labels so the hub summary lists each header in the Fans
-group next to the hwmon fans. The state label is the controller state for the header (a
+The fan rows use the chip and sensor labels so each header is sent as a fan
+next to the hwmon fans. The state label is the controller state for the header (a
 failsafe state is shown as a warning) and the reasons label joins the failsafe reasons with
 commas. A value the controller could not measure is a sample with no value, never zero.
 

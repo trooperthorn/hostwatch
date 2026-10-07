@@ -26,7 +26,7 @@ import re
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
-from .schema import Event, Sample, SourceStatus
+from .model import Event, Sample, SourceStatus
 
 log = logging.getLogger("hostwatch.otel_map")
 
@@ -497,6 +497,14 @@ def map_source_status(statuses: Iterable[SourceStatus], ts: float) -> list[Point
         out.append(Point(scope, "observe.source.present", "1", GAUGE, 1.0 if st.present else 0.0, ts,
                          dict(attrs)))
     return out
+
+
+def tier_interval_points(rates: dict[str, float], ts: float) -> list[Point]:
+    """The polling interval in force for each tier, so Observe knows the cadence to expect and can
+    tell a late report from a slow tier (design section 10.1). One series per tier, so it does not
+    change when a rate does."""
+    return [Point(EVENT_SCOPE, "observe.agent.poll.interval", "s", GAUGE, float(seconds), ts,
+                  {"observe.tier": tier}) for tier, seconds in rates.items()]
 
 
 def heartbeat_point(sent_at: float) -> Point:

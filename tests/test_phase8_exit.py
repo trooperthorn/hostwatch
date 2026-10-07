@@ -4,13 +4,11 @@ no duplicate after a restart, and unavailable when the log cannot be read."""
 
 from __future__ import annotations
 
-import time
-
 from fakes_windows import FakeCimQuery, FakeCommandRunner, FakeEventLogReader, FakePipeStatusReader
 from test_winevent import NOW, T0, bc1001, el6006, el6008, kp41, reader, whea
 
 from hostwatch.events.winevent import WinEventReader
-from hostwatch.schema import Batch
+from hostwatch import otel_map, otlp
 from hostwatch.windows import WindowsSeam
 
 
@@ -43,11 +41,12 @@ def test_no_duplicates_after_restart(tmp_path):
     assert reader(tmp_path, logs).read()[1] == []
 
 
-def test_events_are_accepted_by_the_wire_schema(tmp_path):
+def test_events_encode_as_otlp_logs(tmp_path):
     events = reader(tmp_path, [kp41(T0)]).read()[1]
-    batch = Batch(agent_version="t", host="win-host", platform="windows", sent_at=time.time(), sources=[],
-                  samples=[], events=events)
-    assert Batch.model_validate_json(batch.model_dump_json()).events[0].kind == "boot.unknown_unclean"
+    resource = otel_map.resource_attributes("win-host", "windows", "t")
+    built = otlp.build_logs_requests("e1", resource, [otel_map.map_event(e) for e in events])
+    assert built.skipped == 0 and len(built.requests) == 1
+    assert built.requests[0].path == "/v1/logs" and built.requests[0].count == 1
 
 
 def test_unavailable_when_the_log_cannot_be_read(tmp_path):

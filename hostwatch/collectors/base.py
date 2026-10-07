@@ -16,12 +16,18 @@ from __future__ import annotations
 import time
 from pathlib import Path
 
-from ..schema import Sample
+from .. import tiers
+from ..model import Sample
 from ..windows import WindowsSeam
 
 
 class Collector:
     id: str = "base"
+    # The polling tier that decides how often collect() runs (see tiers.py). Most sources are device metrics.
+    tier: str = tiers.DEVICE_METRICS
+    # True for a cheap local source whose state changes are events (RAID, ZFS, UPS). The agent reads it
+    # every few seconds for threshold events only, apart from its tier, so a failure is not held to the poll rate.
+    event_watch: bool = False
     # True for a configured network source that is polled every cycle even after a failure,
     # being unavailable for that cycle only. Local sysfs sources wait for re-detection.
     retry_each_cycle: bool = False

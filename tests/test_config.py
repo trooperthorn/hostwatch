@@ -1,8 +1,10 @@
-"""Config defaults and the read-only property of the compose mounts."""
+"""Config defaults, validation and the read-only property of the compose mounts."""
 
 from __future__ import annotations
 
 from pathlib import Path
+
+import pytest
 
 from hostwatch.config import Config
 
@@ -120,115 +122,64 @@ def test_compose_tests_do_not_depend_on_cwd(tmp_path, monkeypatch):
     assert COMPOSE.is_file() and ENV_EXAMPLE.is_file()
 
 
-# TLS serving and the bind guard. The bind check is exposure control, not authentication.
+# Settings for Observe.
 
-import datetime
-import logging
-import ssl
-
-import pytest
-from cryptography import x509
-from cryptography.hazmat.primitives import hashes, serialization
-from cryptography.hazmat.primitives.asymmetric import ec
-from cryptography.x509.oid import NameOID
-
-from hostwatch.__main__ import uvicorn_kwargs
-
-TOKEN = "t" * 32
+URL = "http://observe.test"
 
 
-def _make_cert(tmp_path: Path, stem: str) -> tuple[str, str]:
-    key = ec.generate_private_key(ec.SECP256R1())
-    name = x509.Name([x509.NameAttribute(NameOID.COMMON_NAME, stem)])
-    now = datetime.datetime.now(datetime.timezone.utc)
-    cert = (x509.CertificateBuilder().subject_name(name).issuer_name(name)
-            .public_key(key.public_key()).serial_number(x509.random_serial_number())
-            .not_valid_before(now - datetime.timedelta(days=1))
-            .not_valid_after(now + datetime.timedelta(days=1))
-            .sign(key, hashes.SHA256()))
-    cert_path, key_path = tmp_path / f"{stem}.pem", tmp_path / f"{stem}.key"
-    cert_path.write_bytes(cert.public_bytes(serialization.Encoding.PEM))
-    key_path.write_bytes(key.private_bytes(serialization.Encoding.PEM,
-                                           serialization.PrivateFormat.PKCS8,
-                                           serialization.NoEncryption()))
-    return str(cert_path), str(key_path)
+def _valid(**kw) -> Config:
+    base = dict(observe_url=URL, ingest_key="k" * 24)
+    base.update(kw)
+    return Config(**base)
 
 
-def _cfg(**kw) -> Config:
-    return Config(role="hub", ingest_token=TOKEN, **kw)
+def test_a_complete_configuration_validates():
+    _valid().validate()
 
 
-def test_loopback_without_tls_passes():
-    for host in ("127.0.0.1", "::1", "localhost"):
-        _cfg(hub_bind=host).validate()
+@pytest.mark.parametrize("url", ["", "ftp://observe.test", "observe.test", "http://"])
+def test_a_missing_or_malformed_url_is_refused(url):
+    with pytest.raises(ValueError, match="HOSTWATCH_OBSERVE_URL"):
+        _valid(observe_url=url).validate()
 
 
-def test_non_loopback_without_tls_is_refused():
-    with pytest.raises(ValueError, match="not a loopback"):
-        _cfg(hub_bind="0.0.0.0").validate()
+def test_a_missing_ingest_key_is_refused_and_named():
+    with pytest.raises(ValueError, match="HOSTWATCH_INGEST_KEY"):
+        _valid(ingest_key="").validate()
 
 
-def test_non_loopback_with_tls_passes(tmp_path):
-    cert, key = _make_cert(tmp_path, "hub")
-    _cfg(hub_bind="0.0.0.0", tls_cert=cert, tls_key=key).validate()
+def test_an_unknown_format_is_refused():
+    with pytest.raises(ValueError, match="HOSTWATCH_OTLP_FORMAT"):
+        _valid(otlp_format="xml").validate()
+    _valid(otlp_format="json").validate()
 
 
-def test_insecure_override_passes_and_warns(caplog):
-    with caplog.at_level(logging.WARNING, logger="hostwatch.config"):
-        _cfg(hub_bind="0.0.0.0", allow_insecure_bind=True).validate()
-    assert any("clear text" in r.getMessage() for r in caplog.records)
+def test_the_url_comes_from_the_preferred_name_then_the_alias_and_loses_a_trailing_slash(monkeypatch):
+    monkeypatch.delenv("HOSTWATCH_OBSERVE_URL", raising=False)
+    monkeypatch.delenv("HOSTWATCH_HUB_URL", raising=False)
+    assert Config().observe_url == ""
+    monkeypatch.setenv("HOSTWATCH_HUB_URL", "http://alias.test/")
+    assert Config().observe_url == "http://alias.test"
+    monkeypatch.setenv("HOSTWATCH_OBSERVE_URL", "https://preferred.test")
+    assert Config().observe_url == "https://preferred.test"
 
 
-def test_override_read_from_environment(monkeypatch):
-    monkeypatch.setenv("HOSTWATCH_ALLOW_INSECURE_BIND", "1")
-    assert Config().allow_insecure_bind is True
-    monkeypatch.setenv("HOSTWATCH_ALLOW_INSECURE_BIND", "0")
-    assert Config().allow_insecure_bind is False
+def test_format_and_compression_defaults(monkeypatch):
+    monkeypatch.delenv("HOSTWATCH_OTLP_FORMAT", raising=False)
+    monkeypatch.delenv("HOSTWATCH_OTLP_GZIP", raising=False)
+    cfg = Config()
+    assert cfg.otlp_format == "protobuf" and cfg.otlp_gzip is True
+    monkeypatch.setenv("HOSTWATCH_OTLP_FORMAT", " JSON ")
+    monkeypatch.setenv("HOSTWATCH_OTLP_GZIP", "off")
+    cfg = Config()
+    assert cfg.otlp_format == "json" and cfg.otlp_gzip is False
 
 
-def test_cert_without_key_and_missing_files_are_refused(tmp_path):
-    cert, key = _make_cert(tmp_path, "hub")
-    with pytest.raises(ValueError, match="together"):
-        _cfg(tls_cert=cert).validate()
-    with pytest.raises(ValueError, match="requires"):
-        _cfg(tls_client_ca=cert).validate()
-    with pytest.raises(ValueError, match="readable file"):
-        _cfg(tls_cert=str(tmp_path / "nope.pem"), tls_key=key).validate()
+def test_the_key_never_appears_in_the_repr():
+    assert "kkkkkkkkkkkkkkkkkkkkkkkk" not in repr(_valid())
 
 
-def test_uvicorn_kwargs_plain():
-    kw = uvicorn_kwargs(_cfg(hub_port=9000))
-    assert kw["host"] == "127.0.0.1" and kw["port"] == 9000
-    assert not any(k.startswith("ssl_") for k in kw)
-
-
-def test_uvicorn_kwargs_tls_and_client_ca(tmp_path):
-    cert, key = _make_cert(tmp_path, "hub")
-    ca, _ = _make_cert(tmp_path, "ca")
-    kw = uvicorn_kwargs(_cfg(tls_cert=cert, tls_key=key))
-    assert kw["ssl_certfile"] == cert and kw["ssl_keyfile"] == key
-    assert "ssl_ca_certs" not in kw
-    kw = uvicorn_kwargs(_cfg(tls_cert=cert, tls_key=key, tls_client_ca=ca))
-    assert kw["ssl_ca_certs"] == ca and kw["ssl_cert_reqs"] == ssl.CERT_OPTIONAL
-    # The generated files really load as a server certificate.
-    ssl.create_default_context(ssl.Purpose.CLIENT_AUTH).load_cert_chain(cert, key)
-
-
-def test_legacy_token_with_api_key_prefix_fails_validation():
-    with pytest.raises(ValueError, match="hw_"):
-        Config(ingest_token="hw_" + "a" * 40).validate()
-
-
-def test_mtls_uvicorn_mode_raises_at_validation():
-    with pytest.raises(ValueError, match="does not expose the verified peer certificate.*proxy"):
-        Config(mtls_mode="uvicorn").validate()
-
-
-BOOL_VARS = (
-    ("HOSTWATCH_ALLOW_INSECURE_BIND", "allow_insecure_bind"),
-    ("HOSTWATCH_LEGACY_TOKEN_DISABLED", "legacy_token_disabled"),
-    ("HOSTWATCH_TLS", "tls_enabled"),
-)
+BOOL_VARS = (("HOSTWATCH_OTLP_GZIP", "otlp_gzip"), ("HOSTWATCH_TRUENAS_INSECURE", "truenas_insecure"))
 
 
 @pytest.mark.parametrize("var,attr", BOOL_VARS)
@@ -246,12 +197,6 @@ def test_bool_false_spellings(monkeypatch, var, attr, raw):
 
 
 @pytest.mark.parametrize("var,attr", BOOL_VARS)
-def test_bool_unset_is_false(monkeypatch, var, attr):
-    monkeypatch.delenv(var, raising=False)
-    assert getattr(Config(), attr) is False
-
-
-@pytest.mark.parametrize("var,attr", BOOL_VARS)
 def test_bool_invalid_value_names_variable(monkeypatch, var, attr):
     monkeypatch.setenv(var, "maybe")
     with pytest.raises(ValueError, match=var):
@@ -259,143 +204,6 @@ def test_bool_invalid_value_names_variable(monkeypatch, var, attr):
 
 
 def test_env_example_documents_spellings():
-    text = ENV_EXAMPLE.read_text()
+    text = ENV_EXAMPLE.read_text(encoding="utf-8")
     for word in ("true", "yes", "on", "false", "no", "off"):
         assert word in text
-
-
-# ---- Specific-IP bind with a source address allowlist (exposure control, not authentication) ----
-
-def test_specific_ip_with_allowlist_passes_and_warns(caplog):
-    with caplog.at_level(logging.WARNING, logger="hostwatch.config"):
-        _cfg(hub_bind="10.0.0.2", allowed_clients="10.0.0.5,fd00::5").validate()
-    assert any("unencrypted" in r.getMessage() for r in caplog.records)
-
-
-@pytest.mark.parametrize("bind", ["0.0.0.0", "::", "::ffff:0.0.0.0"])
-def test_wildcard_bind_with_allowlist_is_refused(bind):
-    with pytest.raises(ValueError, match="not a loopback"):
-        _cfg(hub_bind=bind, allowed_clients="10.0.0.5").validate()
-
-
-def test_specific_ip_without_allowlist_is_refused():
-    with pytest.raises(ValueError, match="not a loopback"):
-        _cfg(hub_bind="10.0.0.2").validate()
-
-
-@pytest.mark.parametrize("raw,named", [("10.0.0.0/24", "10.0.0.0/24"), ("lab.example", "lab.example"),
-                                       ("10.0.0.5,,10.0.0.6", "empty"), ("10.0.0.5,", "empty")])
-def test_bad_allowlist_entries_are_refused(raw, named):
-    with pytest.raises(ValueError, match=named):
-        _cfg(hub_bind="10.0.0.2", allowed_clients=raw).validate()
-
-
-def test_tls_with_or_without_allowlist_passes(tmp_path):
-    cert, key = _make_cert(tmp_path, "hub")
-    _cfg(hub_bind="0.0.0.0", tls_cert=cert, tls_key=key).validate()
-    _cfg(hub_bind="0.0.0.0", tls_cert=cert, tls_key=key, allowed_clients="10.0.0.5").validate()
-
-
-def test_allowlist_read_from_environment(monkeypatch):
-    monkeypatch.setenv("HOSTWATCH_ALLOWED_CLIENTS", "10.0.0.5")
-    assert Config().allowed_clients == "10.0.0.5"
-
-
-# Listener layout for the all role with a specific-IP bind: the local agent posts over loopback.
-
-import socket
-
-from fastapi.testclient import TestClient
-
-from hostwatch.__main__ import bind_sockets, listen_addresses, local_agent_hub_url
-from hostwatch.hub import create_app
-from hostwatch.store import Store
-
-
-def _listen_cfg(role, bind, **kw):
-    return Config(role=role, hub_bind=bind, hub_port=8090, ingest_token=TOKEN, allowed_clients="10.0.0.9", **kw)
-
-
-def test_all_role_specific_bind_listens_on_both():
-    assert listen_addresses(_listen_cfg("all", "10.0.0.5")) == [("10.0.0.5", 8090), ("127.0.0.1", 8090)]
-
-
-def test_hub_role_specific_bind_listens_only_on_it():
-    assert listen_addresses(_listen_cfg("hub", "10.0.0.5")) == [("10.0.0.5", 8090)]
-
-
-def test_loopback_and_wildcard_binds_listen_once():
-    assert listen_addresses(_listen_cfg("all", "127.0.0.1")) == [("127.0.0.1", 8090)]
-    assert listen_addresses(_listen_cfg("all", "0.0.0.0")) == [("0.0.0.0", 8090)]
-
-
-def test_second_bind_failure_raises_and_closes_first():
-    opened = []
-
-    def fake(host, port):
-        if host == "127.0.0.1":
-            raise OSError("address in use")
-        s = socket.socket()
-        opened.append(s)
-        return s
-
-    with pytest.raises(RuntimeError, match=r"127\.0\.0\.1:8090.*address in use"):
-        bind_sockets(_listen_cfg("all", "10.0.0.5"), bind_one=fake)
-    assert len(opened) == 1 and opened[0].fileno() == -1
-
-
-def test_loopback_listener_really_binds():
-    socks = bind_sockets(Config(role="hub", hub_bind="127.0.0.1", hub_port=0, ingest_token=TOKEN))
-    try:
-        assert len(socks) == 1 and socks[0].getsockname()[0] == "127.0.0.1"
-    finally:
-        for s in socks:
-            s.close()
-
-
-def test_local_agent_url_is_loopback_and_admitted(tmp_path):
-    cfg = _listen_cfg("all", "10.0.0.5", data_dir=tmp_path, argon2_time_cost=1, argon2_memory_kib=8,
-                      argon2_parallelism=1)
-    url = local_agent_hub_url(cfg)
-    assert url == "http://127.0.0.1:8090"
-    # The agent's request arrives from a loopback peer, which the source filter always admits.
-    client = TestClient(create_app(cfg, Store(tmp_path / "db.sqlite")), client=("127.0.0.1", 40000))
-    assert client.get("/internal/v1/health").status_code == 200
-    assert [r for r in Store(tmp_path / "db.sqlite").audit_rows() if r["kind"] == "source_denied"] == []
-
-
-@pytest.mark.parametrize("raw", ["fe80::1%eth0", "10.0.0.5,fe80::1%eth0"])
-def test_scoped_ipv6_allowlist_entry_is_refused(raw):
-    with pytest.raises(ValueError, match="scope zone"):
-        _cfg(hub_bind="10.0.0.2", allowed_clients=raw).validate()
-
-
-def test_scoped_ipv6_bind_is_refused():
-    with pytest.raises(ValueError, match="scope zone"):
-        _cfg(hub_bind="fe80::1%eth0", allowed_clients="10.0.0.5").validate()
-
-
-@pytest.mark.parametrize("raw", ["127.0.0.1", "224.0.0.1", "0.0.0.0", "127.0.0.1,224.0.0.1,255.255.255.255"])
-def test_allowlist_without_a_usable_remote_entry_is_refused(raw):
-    with pytest.raises(ValueError, match="can ever match"):
-        _cfg(hub_bind="10.0.0.2", allowed_clients=raw).validate()
-
-
-def test_allowlist_with_one_usable_entry_among_useless_ones_passes():
-    _cfg(hub_bind="10.0.0.2", allowed_clients="127.0.0.1,10.0.0.5").validate()
-
-
-@pytest.mark.parametrize("bind", ["255.255.255.255", "224.0.0.1", "ff02::1"])
-def test_broadcast_or_multicast_bind_is_refused(bind):
-    with pytest.raises(ValueError, match="multicast or broadcast"):
-        _cfg(hub_bind=bind, allowed_clients="10.0.0.5").validate()
-
-
-@pytest.mark.parametrize("value", [0, -1, 4.9])
-def test_interval_below_the_minimum_is_refused(value):
-    with pytest.raises(ValueError, match="HOSTWATCH_INTERVAL must be at least 5"):
-        _cfg(interval_s=value).validate()
-
-
-def test_the_minimum_interval_is_accepted():
-    _cfg(interval_s=5.0).validate()

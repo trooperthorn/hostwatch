@@ -1,5 +1,11 @@
 # hostwatch: phased plan
 
+> **Agent conversion (current).** The hostwatch hub and web UI described in the phases below are retired. The
+> agent now sends OpenTelemetry to Observe only, scheduled by polling tier with rates read from Observe, and the
+> old batch wire format is gone. Phases 3 and 4 (login, API keys, the web UI, Home Assistant, Orion and
+> Prometheus outputs) and the hub-side parts of Phase 6 (the power witnesses) no longer exist in the code. Read
+> them as history. `docs/ARCHITECTURE.md` and `README.md` describe what is built now.
+
 hostwatch collects power, crash, RAID, and disk health from a host and serves
 it behind a login, with API access for Home Assistant and SolarWinds Orion.
 

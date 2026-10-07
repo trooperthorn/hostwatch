@@ -1,10 +1,10 @@
 # hostwatch remote agent for the Raspberry Pi (ai-pi) and any other Debian host.
 #
-# The agent role collects on this host and pushes to the hub. The hub URL and the
-# per-agent ingest key come from deploy/agent/.env (copy .env.example, mode 0600);
+# The agent collects on this host and sends OTLP to Observe. The Observe URL and the
+# per-host ingest key come from deploy/agent/.env (copy .env.example, mode 0600);
 # no secret value is stored in this file. See docs/deploy-agents.md.
 #
-# Host networking lets the agent reach a local Scrutiny and the hub without
+# Host networking lets the agent reach a local Scrutiny and Observe without
 # published ports. The host /proc is deliberately not mounted. Every host mount
 # is read-only; the only writable path is the named data volume.
 services:
@@ -17,8 +17,6 @@ services:
     network_mode: host
     user: "10001:10001"
     env_file: .env
-    environment:
-      HOSTWATCH_ROLE: agent
     read_only: true
     privileged: false
     tmpfs:

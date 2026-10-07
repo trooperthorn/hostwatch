@@ -24,7 +24,7 @@ def test_agent_compose_has_the_container_limits():
     uid, _, gid = str(service["user"]).partition(":")
     assert uid.isdigit() and int(uid) > 0 and gid.isdigit() and int(gid) > 0
     assert service["network_mode"] == "host"
-    assert service["environment"]["HOSTWATCH_ROLE"] == "agent"
+    assert "HOSTWATCH_ROLE" not in service.get("environment", {})  # the agent is the only role
     assert service["env_file"] == ".env"
 
 
@@ -40,9 +40,9 @@ def test_agent_compose_mounts_are_read_only_except_the_data_volume():
 
 def test_agent_compose_and_example_hold_no_secret_values():
     text = COMPOSE.read_text(encoding="utf-8") + EXAMPLE.read_text(encoding="utf-8")
-    assert not re.search(r"hw_[0-9A-Za-z]{8,}", text)
+    assert not re.search(r"(hw|wpi)_[0-9A-Za-z]{8,}", text)
     assert re.search(r"^HOSTWATCH_INGEST_KEY=$", text, re.M)
-    assert not re.search(r"^\s*HOSTWATCH_INGEST_(KEY|TOKEN)\s*:", text, re.M)
+    assert not re.search(r"^\s*HOSTWATCH_INGEST_KEY\s*:", text, re.M)
     assert "deploy/agent/.env" in (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
 
 
@@ -55,11 +55,13 @@ def test_guide_names_only_real_settings_commands_and_files():
     found = re.findall(r"python -m hostwatch ([a-z][a-z-]*)(?: ([a-z][a-z-]*))?", text)
     assert found
     for command, action in found:
+        if command in ("healthcheck", "collect-once"):
+            continue
         assert command in top, command
         subs = next((a.choices for a in top[command]._actions if a.__class__.__name__ == "_SubParsersAction"), {})
         if subs and action:
             assert action in subs, f"{command} {action}"
     for rel in set(re.findall(r"`((?:deploy/[\w./\-]+|docs/[\w./\-]+)\.(?:md|sh|yaml|yml))`", text)):
         assert (ROOT / rel).is_file(), rel
-    for needle in ("HOSTWATCH_ALLOWED_CLIENTS", "HOSTWATCH_HUB_BIND", "--scopes ingest --host ai-pi", "ai-pi"):
+    for needle in ("HOSTWATCH_OBSERVE_URL", "HOSTWATCH_INGEST_KEY", "HOSTWATCH_HUB_URL", "ai-pi"):
         assert needle in text, needle

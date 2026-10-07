@@ -11,12 +11,15 @@ Reported per array:
 
 from __future__ import annotations
 
+from .. import tiers
 from .base import Collector, read_int, read_text
 
 
 class MdRaidCollector(Collector):
     linux_only = True
     id = "mdraid"
+    event_watch = True
+    tier = tiers.STORAGE_HEALTH
 
     def _arrays(self):
         base = self.sysfs / "block"

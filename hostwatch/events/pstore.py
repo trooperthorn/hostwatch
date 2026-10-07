@@ -5,7 +5,7 @@ for the next boot. Each record file becomes one event. The files are only read,
 never deleted or modified, so the host keeps its own copy of the evidence.
 
 The dedup key is the file name plus a hash of the whole content, so reading the same
-record again gives the same key and the hub keeps one row. A record that is
+record again gives the same key and Observe keeps one row. A record that is
 rewritten with different content gets a new key. The exact file names and the
 record layout are not confirmed on hardware; see UNVERIFIED.md.
 """
@@ -17,7 +17,7 @@ import re
 import stat
 from pathlib import Path
 
-from ..schema import Event, SourceStatus
+from ..model import Event, SourceStatus
 
 SOURCE = "pstore"
 MAX_READ_BYTES = 1024 * 1024

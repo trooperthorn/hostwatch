@@ -2,8 +2,8 @@
 
 The agent is the same `Agent` loop that Linux hosts run, built with the Windows seam and the Windows
 Event Log reader. It keeps its durable outbox in the data directory (C:/ProgramData/hostwatch by
-default) and pushes the unchanged wire schema with the same INGEST_KEY or INGEST_TOKEN bearer. The
-destination is a URL setting, so it can later point at another receiver that ingests the same schema.
+default) and sends OTLP to Observe with the HOSTWATCH_INGEST_KEY bearer. The destination is the
+HOSTWATCH_OBSERVE_URL setting.
 
 Two ways to run it:
 
@@ -36,14 +36,14 @@ from typing import Any
 
 import httpx
 
-from ..agent import Agent, hub_tls_verify
+from ..agent import Agent, observe_tls_verify
 from ..config import Config
 from ..events.winevent import WinEventReader
 from . import WindowsSeam, real_seam
 
 SERVICE_NAME = "hostwatch-agent"
 SERVICE_DISPLAY_NAME = "hostwatch agent"
-SERVICE_DESCRIPTION = "Collects host health and sends it to the configured hostwatch receiver."
+SERVICE_DESCRIPTION = "Collects host health and sends it to Observe."
 DEFAULT_DATA_DIR = Path("C:/ProgramData/hostwatch")
 SERVICE_MODULE = "hostwatch.windows.service"
 SERVICE_CLASS_NAME = "HostwatchAgentService"
@@ -133,12 +133,12 @@ def service_data_dir(reader: Callable[[str, str], str | None] | None = None) -> 
 
 def build_config(data_dir: str | Path | None = None, env_file: str | Path | None = None) -> Config:
     """The agent Config, read from os.environ after the settings file is loaded. The data directory is
-    the argument, else HOSTWATCH_DATA_DIR, else the default. The role is always agent."""
+    the argument, else HOSTWATCH_DATA_DIR, else the default."""
     folder = Path(data_dir or os.environ.get("HOSTWATCH_DATA_DIR") or DEFAULT_DATA_DIR)
     path = Path(env_file) if env_file else folder / ENV_FILE_NAME
     if path.is_file():
         load_env_file(path)
-    cfg = dataclasses.replace(Config(), role="agent", data_dir=folder)
+    cfg = dataclasses.replace(Config(), data_dir=folder)
     cfg.validate()
     return cfg
 
@@ -151,21 +151,21 @@ class AgentHost:
                  agent_factory: Callable[[Config, WindowsSeam | None], Agent] = build_agent) -> None:
         self.cfg = cfg
         self.agent = agent_factory(cfg, seam)
-        self._client_factory = client_factory or (lambda: httpx.Client(verify=hub_tls_verify(cfg)))
+        self._client_factory = client_factory or (lambda: httpx.Client(verify=observe_tls_verify(cfg)))
 
     def stop(self) -> None:
         """Ask the loop to end. It only sets a flag, so a service control handler may call it."""
         self.agent.stop()
 
     def flush_outbox(self, bound_s: float = FINAL_FLUSH_BOUND_S) -> bool:
-        """One last delivery attempt, bounded to bound_s seconds in total. Batches the receiver does not
+        """One last delivery attempt, bounded to bound_s seconds in total. Requests Observe does not
         accept in time stay queued on disk for the next start, so a failure here loses nothing. Returns
         True when the outbox is empty."""
         try:
             with self._client_factory() as client:
                 self.agent.flush(client, deadline=time.monotonic() + bound_s, honour_stop=False)
         except Exception as exc:
-            log.warning("final delivery failed (%s); %d batch(es) stay queued for the next start",
+            log.warning("final delivery failed (%s); %d request(s) stay queued for the next start",
                         type(exc).__name__, self.agent.outbox.depth())
             return False
         return self.agent.outbox.depth() == 0
