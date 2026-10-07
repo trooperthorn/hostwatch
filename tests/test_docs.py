@@ -103,3 +103,38 @@ def test_the_healthcheck_reads_the_agent_liveness_marker(tmp_path):
     assert healthcheck(cfg) == 1
     dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
     assert 'CMD ["python", "-m", "hostwatch", "healthcheck"]' in dockerfile
+
+
+def _dockerfile() -> str:
+    return (ROOT / "Dockerfile").read_text(encoding="utf-8")
+
+
+def test_main_dispatches_healthcheck(monkeypatch):
+    from hostwatch.__main__ import main
+
+    monkeypatch.setattr("hostwatch.__main__.healthcheck", lambda cfg: 7)
+    assert main(["healthcheck"]) == 7
+
+
+def test_dockerfile_healthcheck_needs_no_curl():
+    text = _dockerfile()
+    assert re.search(r"^HEALTHCHECK .*--interval=\S+ .*--timeout=\S+ .*--retries=\d+", text, re.M)
+    code = [ln for ln in text.splitlines() if not ln.lstrip().startswith("#")]
+    assert not any("curl" in ln for ln in code)
+
+
+def test_dockerfile_has_oci_labels_from_build_args():
+    text = _dockerfile()
+    for arg in ("VERSION", "REVISION", "LICENSES"):
+        assert re.search(rf"^ARG {arg}=", text, re.M)
+    for label, arg in (("source", None), ("version", "VERSION"), ("revision", "REVISION"),
+                       ("licenses", "LICENSES")):
+        assert f"org.opencontainers.image.{label}=" in text
+        if arg:
+            assert f'org.opencontainers.image.{label}="${{{arg}}}"' in text
+
+
+def test_dockerfile_base_is_digest_pinned_with_update_note():
+    text = _dockerfile()
+    assert re.search(r"^FROM python:3\.12-slim@sha256:[0-9a-f]{64}$", text, re.M)
+    assert "To update" in text
