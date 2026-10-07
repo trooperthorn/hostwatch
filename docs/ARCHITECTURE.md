@@ -512,7 +512,9 @@ files are described in the section after the executors. Modules:
 - `config.py` loads `control.toml` into frozen dataclasses. On POSIX it refuses a file that is not root-owned, a file
   writable by group or others, and a file in a directory writable by group or others (enforced). On Windows it checks
   that the owner is SYSTEM or Administrators only when pywin32 is installed; otherwise the install step must lock the
-  file (advisory until a Windows install exists). Service names are limited to plain characters because they reach a command line
+  file (advisory until a Windows install exists). A missing file stops the daemon with
+  "control.toml was not found at <path>", and a pywin32 failure reading the owner is turned into the same kind of
+  error instead of a pywintypes traceback. Service names are limited to plain characters because they reach a command line
   later.
 - `identity.py` compares the `host` in `control.toml` with the machine's own name (`socket.gethostname()` and the
   FQDN, each with its short form, lower case, plus COMPUTERNAME on Windows). A different name stops the daemon at
@@ -520,7 +522,8 @@ files are described in the section after the executors. Modules:
   `machine_id` in `control.toml`, which must equal `/etc/machine-id` or the Windows MachineGuid, and then only the id
   decides. The daemon repeats the check before every command, so a renamed or cloned disk answers `refused` with
   reason `wrong_machine` and runs nothing. The agent only warns once when `HOSTWATCH_HOST_NAME` differs from the
-  machine name, because containers often differ.
+  machine name, because containers often differ. The name lookup (the FQDN costs a DNS query, 838 ms in the audit)
+  is cached and read again only at daemon start and when the operating system host name changes.
 - `signing.py` builds canonical JSON (sorted keys, no spaces, UTF-8 without ASCII escaping) and verifies the Ed25519
   signature, sent as base64 beside the command, against the pinned key written as `ed25519:` plus base64. The
   `cryptography` import happens only inside the check, and win32 modules are never imported.
@@ -620,9 +623,13 @@ refuses any other field: `{"id","state","output","started_at","finished_at"}` wi
 at send time; output is clipped to 4096 characters, the amount Observe keeps.
 
 A `host.reboot` that sets its timer is reported `scheduled`, and the outbox records the promise in its `scheduled`
-table with the due time. Later the same id is reported `done` when the daemon started after the due time (the host went
-down and the service came back), `failed` (`reboot_not_seen`) when the due time plus 30 s passed and the same daemon
-process is still running, or `cancelled` when a pull lists the id in `cancel`: the daemon runs the platform executor's
+table with the due time and the host boot id read when it was scheduled (`control/bootid.py`: the kernel boot_id on
+Linux, the boot time from the tick counter on Windows, same boot within 120 s). Later the same id is reported `done`
+only when the boot id at the due time differs from the recorded one. A daemon that restarted on the same boot leaves the
+reboot pending, and it is `failed` (`reboot_not_seen`) when the due time plus 600 s passed on the same boot, or when the
+due time plus 30 s passed and the same daemon process is still running. An unreadable boot id never gives `done`; it ends
+as `failed` (`reboot_unconfirmed`). A Windows host that reboots through Fast Startup may keep its tick counter, so there a
+real reboot can be reported `reboot_not_seen`. A reboot is also `cancelled` when a pull lists the id in `cancel`: the daemon runs the platform executor's
 `cancel_reboot`, and a cancel that fails is logged and tried again on the next pull. A local `control cancel` is not
 seen by the daemon and later shows as `failed`. A command that is pulled again after it was accepted (Observe has not
 recorded its outcome) is never refused as `replayed_id`: the daemon re-sends its stored result from the outbox's

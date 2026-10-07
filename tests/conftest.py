@@ -37,11 +37,21 @@ def pytest_configure(config):
 
 
 @pytest.fixture(autouse=True)
-def _control_file_owner_is_the_test_user(monkeypatch):
-    """control.toml must be root-owned in production. Tests write it as the current user, so that
-    user is trusted here. The owner tests set the trusted list back to root alone."""
+def _control_file_owner_is_the_test_user(monkeypatch, tmp_path_factory):
+    """control.toml must be root-owned (SYSTEM or Administrators on Windows) in production. Tests write
+    it as the current user, so that user is trusted here by adding to the trusted list. The owner check
+    itself is untouched, and the owner tests set the trusted list back to the production value."""
     import os
-    if os.name != "posix":
-        return
     import hostwatch.control.config as control_config
-    monkeypatch.setattr(control_config, "TRUSTED_UIDS", (0, os.getuid()))
+    if os.name == "posix":
+        monkeypatch.setattr(control_config, "TRUSTED_UIDS", (0, os.getuid()))
+        return
+    # Windows with pywin32 installed reads the real owner of the file. Without pywin32 the check is
+    # advisory and there is nothing to widen.
+    probe = tmp_path_factory.getbasetemp()
+    try:
+        sid = control_config._windows_owner_sid(probe)
+    except OSError:
+        return
+    if sid is not None:
+        monkeypatch.setattr(control_config, "WINDOWS_TRUSTED_SIDS", (*control_config.WINDOWS_TRUSTED_SIDS, sid))

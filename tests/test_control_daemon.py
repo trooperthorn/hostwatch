@@ -567,7 +567,7 @@ def test_build_daemon_refuses_a_writable_allowlist(env):
 
 def test_build_daemon_refuses_a_missing_allowlist(env, tmp_path):
     settings = d.Settings(URL, KEY, tmp_path / "missing.toml", env.data)
-    with pytest.raises(d.SettingsError, match="cannot read"):
+    with pytest.raises(d.SettingsError, match="was not found"):
         d.build_daemon(settings, client=env.wp.client())
 
 
@@ -871,8 +871,8 @@ class Clock:
         return self.now
 
 
-def _build_with_clock(env, actions, clock):
-    return d.build_daemon(env.settings, client=env.wp.client(), actions=actions, clock=clock)
+def _build_with_clock(env, actions, clock, boot_id=lambda: "boot-a"):
+    return d.build_daemon(env.settings, client=env.wp.client(), actions=actions, clock=clock, boot_id=boot_id)
 
 
 def test_the_result_body_is_exactly_what_the_plugin_results_route_validates(env):
@@ -924,17 +924,75 @@ def test_a_cancel_id_for_a_command_this_host_never_scheduled_is_ignored(env):
     assert exe.cancels == 0 and env.wp.results == []
 
 
-def test_a_scheduled_reboot_is_reported_done_after_the_daemon_restarts_past_its_due_time(env):
+def test_a_scheduled_reboot_is_reported_done_after_the_host_boot_id_changes(env):
     clock = Clock()
     env.wp.add(env.signer, id="r1", action="host.reboot", params={})
-    first = _build_with_clock(env, SchedulingExecutor(), clock)
+    first = _build_with_clock(env, SchedulingExecutor(), clock, lambda: "boot-a")
     first.cycle()
     assert [r["state"] for r in env.wp.results] == ["scheduled"]
     first.close()
     clock.now = NOW + 61 + d.RESOLVE_GRACE_S
-    second = _build_with_clock(env, SchedulingExecutor(), clock)  # the service came back after the reboot
+    second = _build_with_clock(env, SchedulingExecutor(), clock, lambda: "boot-b")  # the host came back
     second.cycle()
     assert [r["state"] for r in env.wp.results] == ["scheduled", "done"]
+
+
+def test_a_daemon_restart_after_the_due_time_on_the_same_boot_reports_pending_not_done(env):
+    clock = Clock()
+    env.wp.add(env.signer, id="r1", action="host.reboot", params={})
+    first = _build_with_clock(env, SchedulingExecutor(), clock, lambda: "boot-a")
+    first.cycle()
+    first.close()
+    clock.now = NOW + 61 + d.RESOLVE_GRACE_S
+    second = _build_with_clock(env, SchedulingExecutor(), clock, lambda: "boot-a")  # only the service restarted
+    second.cycle()
+    assert [r["state"] for r in env.wp.results] == ["scheduled"]
+    assert "r1" in second.outbox.scheduled()
+    clock.now = NOW + 60 + d.BOOT_WAIT_S + 1  # the host never went down
+    second.cycle()
+    assert [r["state"] for r in env.wp.results] == ["scheduled", "failed"]
+    assert env.wp.results[1]["output"].startswith("reboot_not_seen")
+
+
+def test_a_reboot_scheduled_with_an_unreadable_boot_id_is_never_reported_done(env):
+    clock = Clock()
+    env.wp.add(env.signer, id="r1", action="host.reboot", params={})
+    first = _build_with_clock(env, SchedulingExecutor(), clock, lambda: None)
+    first.cycle()
+    first.close()
+    clock.now = NOW + 61 + d.RESOLVE_GRACE_S
+    second = _build_with_clock(env, SchedulingExecutor(), clock, lambda: "boot-b")
+    second.cycle()
+    assert [r["state"] for r in env.wp.results] == ["scheduled"]
+    clock.now = NOW + 60 + d.BOOT_WAIT_S + 1
+    second.cycle()
+    assert [r["state"] for r in env.wp.results] == ["scheduled", "failed"]
+    assert env.wp.results[1]["output"].startswith("reboot_unconfirmed")
+
+
+def test_the_boot_id_comparison():
+    from hostwatch.control import bootid
+    assert bootid.changed("a", "a") is False and bootid.changed("a", "b") is True
+    assert bootid.changed(None, "a") is None and bootid.changed("a", None) is None
+    assert bootid.changed("win:1000", "win:1060") is False  # clock adjustment inside the tolerance
+    assert bootid.changed("win:1000", "win:5000") is True
+    assert bootid.changed("win:x", "win:1") is None
+
+
+def test_an_outbox_from_before_boot_ids_is_migrated(tmp_path):
+    import sqlite3
+    from hostwatch.control.outbox import ResultOutbox
+    path = tmp_path / "o.db"
+    db = sqlite3.connect(path)
+    db.execute("CREATE TABLE scheduled (command_id TEXT PRIMARY KEY, due_at REAL NOT NULL)")
+    db.execute("INSERT INTO scheduled VALUES ('old', 5.0)")
+    db.commit()
+    db.close()
+    box = ResultOutbox(path)
+    assert box.scheduled() == {"old": 5.0} and box.scheduled_boot_id("old") is None
+    box.schedule("new", 9.0, "boot-a")
+    assert box.scheduled_boot_id("new") == "boot-a"
+    box.close()
 
 
 def test_a_scheduled_reboot_that_never_happened_is_reported_failed(env):
@@ -1112,3 +1170,29 @@ def test_the_agent_stays_quiet_when_the_names_match(tmp_path, monkeypatch, caplo
     with caplog.at_level(logging.WARNING, logger="hostwatch.agent"):
         Agent(Config(host_name="real-machine"), platform="x86").finish()
     assert not [r for r in caplog.records if "HOSTWATCH_HOST_NAME" in r.getMessage()]
+
+
+def test_machine_names_are_looked_up_once_until_the_host_name_changes_or_a_refresh(monkeypatch):
+    calls = {"fqdn": 0}
+    host = {"name": "Box"}
+
+    def getfqdn():
+        calls["fqdn"] += 1
+        return "box.lan"
+
+    monkeypatch.setattr(ident.socket, "gethostname", lambda: host["name"])
+    monkeypatch.setattr(ident.socket, "getfqdn", getfqdn)
+    monkeypatch.setattr(ident, "_names_cache", None)
+    monkeypatch.setattr(ident, "machine_names", REAL_MACHINE_NAMES)  # undo the autouse stand-in
+    first = ident.machine_names()
+    assert {"box", "box.lan"} <= first
+    for _ in range(50):
+        ident.machine_names()
+    assert calls["fqdn"] == 1
+    first.add("mutation")
+    assert "mutation" not in ident.machine_names()  # callers get a copy
+    host["name"] = "Other"
+    assert "other" in ident.machine_names() and calls["fqdn"] == 2
+    ident.refresh_machine_names()
+    ident.machine_names()
+    assert calls["fqdn"] == 3

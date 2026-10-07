@@ -175,8 +175,13 @@ def _windows_owner_sid(path: Path) -> str | None:
         import win32security  # type: ignore[import-not-found]
     except ImportError:
         return None
-    desc = win32security.GetFileSecurity(str(path), win32security.OWNER_SECURITY_INFORMATION)
-    return win32security.ConvertSidToStringSid(desc.GetSecurityDescriptorOwner())
+    try:
+        desc = win32security.GetFileSecurity(str(path), win32security.OWNER_SECURITY_INFORMATION)
+        return win32security.ConvertSidToStringSid(desc.GetSecurityDescriptorOwner())
+    except Exception as exc:  # pywintypes.error is not an OSError, so it is turned into one here
+        # Drop pywintypes.error's (function, message) tuple shape: its text is the useful part.
+        detail = exc.args[2] if len(exc.args) >= 3 and exc.args[2] else str(exc)
+        raise OSError(f"cannot read the owner of {path}: {detail}") from exc
 
 
 def check_permissions(path: Path) -> None:
@@ -204,6 +209,9 @@ def check_permissions(path: Path) -> None:
 
 def load(path: str | Path) -> ControlConfig:
     p = Path(path)
+    if not p.exists():
+        raise ConfigError(f"control.toml was not found at {p}; install the control service from the host's "
+                          "page in Observe, which writes this file, or point HOSTWATCH_CONTROL_CONFIG at it")
     try:
         check_permissions(p)
         raw = p.read_bytes()

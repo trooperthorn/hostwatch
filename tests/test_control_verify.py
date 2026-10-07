@@ -456,7 +456,7 @@ def test_windows_owner_must_be_system_or_administrators(monkeypatch):
 
 
 def test_loader_reports_missing_and_invalid_files(tmp_path, signer):
-    with pytest.raises(cfgmod.ConfigError, match="cannot read"):
+    with pytest.raises(cfgmod.ConfigError, match="control.toml was not found at .*absent.toml"):
         cfgmod.load(tmp_path / "absent.toml")
     with pytest.raises(cfgmod.ConfigError, match="not valid TOML"):
         cfgmod.load(write_cfg(tmp_path, signer, text="host = ["))
@@ -530,3 +530,52 @@ def test_an_allowlist_holding_two_different_key_names_with_different_keys_is_ref
     }
     with pytest.raises(cfgmod.ConfigError):
         cfgmod.parse(raw)
+
+
+class _FakeWin32Security:
+    """Stands in for pywin32 so the Windows owner path runs without it being installed."""
+    OWNER_SECURITY_INFORMATION = 1
+
+    class error(Exception):  # pywintypes.error is not an OSError
+        pass
+
+    def __init__(self, owner="S-1-5-32-544"):
+        self.owner = owner
+
+    def GetFileSecurity(self, path, info):
+        if not Path(path).exists():
+            raise self.error(2, "GetFileSecurity", "The system cannot find the file specified.")
+        return type("Desc", (), {"GetSecurityDescriptorOwner": lambda desc: self.owner})()
+
+    def ConvertSidToStringSid(self, sid):
+        return sid
+
+
+def test_a_missing_control_toml_on_windows_gives_a_clear_error_not_a_pywintypes_one(monkeypatch, tmp_path):
+    monkeypatch.setattr(cfgmod.os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "win32security", _FakeWin32Security())
+    with pytest.raises(cfgmod.ConfigError, match="control.toml was not found at"):
+        cfgmod.load(tmp_path / "control.toml")
+
+
+def test_a_pywin32_failure_reading_the_owner_is_a_config_error(monkeypatch, tmp_path):
+    p = tmp_path / "control.toml"
+    p.write_text("x", encoding="utf-8")
+    fake = _FakeWin32Security()
+    monkeypatch.setattr(cfgmod.os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "win32security", fake)
+    monkeypatch.setattr(fake, "GetFileSecurity", lambda path, info: (_ for _ in ()).throw(
+        fake.error(5, "GetFileSecurity", "Access is denied.")))
+    with pytest.raises(cfgmod.ConfigError, match="cannot read .*Access is denied"):
+        cfgmod.load(p)
+
+
+def test_the_real_owner_check_still_refuses_a_stranger_with_pywin32_importable(monkeypatch, tmp_path, signer):
+    p = write_cfg(tmp_path, signer)
+    monkeypatch.setattr(cfgmod.os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "win32security", _FakeWin32Security("S-1-5-21-1-2-3-1001"))
+    monkeypatch.setattr(cfgmod, "WINDOWS_TRUSTED_SIDS", ("S-1-5-18", "S-1-5-32-544"))
+    with pytest.raises(cfgmod.ConfigError, match="SYSTEM or Administrators"):
+        cfgmod.load(p)
+    monkeypatch.setitem(sys.modules, "win32security", _FakeWin32Security("S-1-5-32-544"))
+    cfgmod.load(p)

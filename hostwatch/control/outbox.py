@@ -47,7 +47,7 @@ CREATE TABLE IF NOT EXISTS results (
   payload TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS executed (
   seq INTEGER PRIMARY KEY AUTOINCREMENT, command_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS scheduled (command_id TEXT PRIMARY KEY, due_at REAL NOT NULL);
+CREATE TABLE IF NOT EXISTS scheduled (command_id TEXT PRIMARY KEY, due_at REAL NOT NULL, boot_id TEXT);
 CREATE TABLE IF NOT EXISTS parked (
   seq INTEGER PRIMARY KEY, command_id TEXT NOT NULL UNIQUE, payload TEXT NOT NULL, reason TEXT NOT NULL,
   parked_at INTEGER NOT NULL);
@@ -105,6 +105,9 @@ class ResultOutbox:
     @staticmethod
     def _migrate(db: sqlite3.Connection) -> None:
         """An outbox from before results had a status column held one row per command id."""
+        scheduled = [r[1] for r in db.execute("PRAGMA table_info(scheduled)").fetchall()]
+        if scheduled and "boot_id" not in scheduled:
+            db.execute("ALTER TABLE scheduled ADD COLUMN boot_id TEXT")  # unknown for reboots already pending
         columns = [r[1] for r in db.execute("PRAGMA table_info(results)").fetchall()]
         if not columns or "status" in columns:
             return
@@ -174,10 +177,16 @@ class ResultOutbox:
             return None
         return data if isinstance(data, dict) else None
 
-    def schedule(self, command_id: str, due_at: float) -> None:
+    def schedule(self, command_id: str, due_at: float, boot_id: str | None = None) -> None:
+        """Record a pending reboot with the boot id of the host when it was scheduled."""
         with self._lock, self._db:
-            self._db.execute("INSERT OR REPLACE INTO scheduled (command_id, due_at) VALUES (?, ?)",
-                             (command_id, due_at))
+            self._db.execute("INSERT OR REPLACE INTO scheduled (command_id, due_at, boot_id) VALUES (?, ?, ?)",
+                             (command_id, due_at, boot_id))
+
+    def scheduled_boot_id(self, command_id: str) -> str | None:
+        with self._lock:
+            row = self._db.execute("SELECT boot_id FROM scheduled WHERE command_id=?", (command_id,)).fetchone()
+        return row[0] if row else None
 
     def unschedule(self, command_id: str) -> None:
         with self._lock, self._db:

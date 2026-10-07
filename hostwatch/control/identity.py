@@ -8,6 +8,8 @@ name used in Observe sets `machine_id` in control.toml instead. It must equal /e
 or the MachineGuid registry value on Windows. When machine_id is set, it alone decides.
 
 The check runs when the daemon starts and again before every command, so a renamed or cloned disk stops too.
+The name lookup is cached, because the fully qualified name needs a DNS query. It is read again at start
+and whenever the host name reported by the operating system changes.
 """
 
 from __future__ import annotations
@@ -23,9 +25,13 @@ WRONG_MACHINE = "wrong_machine"
 LINUX_MACHINE_ID = Path("/etc/machine-id")
 
 
-def machine_names() -> set[str]:
-    """Every name this machine answers to, lower case, each with its short form."""
-    raw = {socket.gethostname(), socket.getfqdn()}
+_names_cache: tuple[tuple[str, str], frozenset[str]] | None = None
+
+
+def _compute_names(hostname: str) -> frozenset[str]:
+    # socket.getfqdn() does a reverse DNS lookup and took 838 ms in the October audit, so the result is
+    # kept and this is not called before every command.
+    raw = {hostname, socket.getfqdn()}
     if sys.platform == "win32":
         raw.add(os.environ.get("COMPUTERNAME", ""))
     names: set[str] = set()
@@ -34,7 +40,24 @@ def machine_names() -> set[str]:
         if name:
             names.add(name)
             names.add(name.split(".")[0])
-    return names
+    return frozenset(names)
+
+
+def refresh_machine_names() -> None:
+    """Forget the cached names so the next lookup reads them again. The daemon calls this at start."""
+    global _names_cache
+    _names_cache = None
+
+
+def machine_names() -> set[str]:
+    """Every name this machine answers to, lower case, each with its short form. The lookup is done
+    once, again after `refresh_machine_names` (the daemon start) and when the host name has changed."""
+    global _names_cache
+    key = (socket.gethostname(), os.environ.get("COMPUTERNAME", "") if sys.platform == "win32" else "")
+    cached = _names_cache
+    if cached is None or cached[0] != key:
+        cached = _names_cache = (key, _compute_names(key[0]))
+    return set(cached[1])
 
 
 def local_machine_id() -> str:

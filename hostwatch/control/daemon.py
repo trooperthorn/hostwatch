@@ -49,6 +49,7 @@ from typing import Any, Protocol
 
 import httpx
 
+from . import bootid
 from . import config as cfgmod
 from . import identity
 from .actions_linux import ActionResult
@@ -74,6 +75,8 @@ MAX_OUTPUT_CHARS = 4096  # Observe keeps this much of the output and cuts the re
 MAX_CANCEL_IDS = 100
 NO_SUCH_COMMAND = "no such command for this host"
 RESOLVE_GRACE_S = 30.0
+# A restarted daemon on the same boot waits this long past the due time for the host to go down, then reports failed.
+BOOT_WAIT_S = 600.0
 RESULT_LOST = "result_lost"
 # A 4xx answer that will not change on a retry: the body is refused as it stands. The result is parked
 # with the reason (never deleted, because it may report a real reboot) so the results behind it go on.
@@ -174,7 +177,9 @@ def _seq_of(item: object) -> int:
 class ControlDaemon:
     def __init__(self, settings: Settings, config: cfgmod.ControlConfig, verifier: CommandVerifier,
                  actions: Executor, outbox: ResultOutbox, client: httpx.Client,
-                 clock: Callable[[], float] = time.time) -> None:
+                 clock: Callable[[], float] = time.time,
+                 boot_id: Callable[[], str | None] = bootid.read) -> None:
+        self.boot_id = boot_id
         self.settings, self.config = settings, config
         self.verifier, self.actions, self.outbox, self.client, self.clock = verifier, actions, outbox, client, clock
         self.stop_event = threading.Event()
@@ -296,7 +301,7 @@ class ControlDaemon:
                                 f"{type(exc).__name__}: {exc}")
         reason = "" if done.ok else ("action_refused" if done.status == "refused" else "action_failed")
         if done.ok and done.status == "scheduled" and command["action"] == "host.reboot":
-            self.outbox.schedule(command["id"], self.clock() + self.config.reboot.delay_s)
+            self.outbox.schedule(command["id"], self.clock() + self.config.reboot.delay_s, self.boot_id())
         return self._result(command, received, started, done.ok, done.status, reason, done.output)
 
     def _replayed(self, command: dict, received: float) -> dict | None:
@@ -327,16 +332,24 @@ class ControlDaemon:
         self._followed.add(cid)
 
     def resolve_reboots(self) -> None:
-        """Report done or failed for a reboot whose time has passed. The daemon starts again after a real
-        reboot, so a daemon that started after the due time means the host went down and came back."""
+        """Report done or failed for a reboot whose time has passed. It is done only when the host boot id
+        differs from the one recorded when it was scheduled. A daemon that merely restarted on the same boot
+        leaves it pending, and a pending reboot that the host never carries out is failed after BOOT_WAIT_S."""
         for cid, due in self.outbox.scheduled().items():
             if self.clock() < due + RESOLVE_GRACE_S:
                 continue
-            if self.started_at > due:
+            moved = bootid.changed(self.outbox.scheduled_boot_id(cid), self.boot_id())
+            if moved:
                 self._followup(cid, "done", "", "the host restarted after the scheduled reboot")
+            elif self.started_at > due and self.clock() < due + BOOT_WAIT_S:
+                continue  # the daemon restarted but the host did not: still pending
+            elif moved is None:
+                self._followup(cid, "failed", "reboot_unconfirmed",
+                               "the scheduled reboot time passed and the boot id could not be compared, so "
+                               "the reboot is not reported as done")
             else:
                 self._followup(cid, "failed", "reboot_not_seen",
-                               "the scheduled reboot time passed and this daemon was not restarted")
+                               "the scheduled reboot time passed and the host is still on the same boot")
 
     def cancel_scheduled(self, ids: list[str]) -> None:
         """Cancel the pending reboot of every listed command this host scheduled, and report it cancelled."""
@@ -430,7 +443,8 @@ class ControlDaemon:
 
 
 def build_daemon(settings: Settings, *, client: httpx.Client | None = None, actions: Any = None,
-                 clock: Callable[[], float] = time.time) -> ControlDaemon:
+                 clock: Callable[[], float] = time.time,
+                 boot_id: Callable[[], str | None] = bootid.read) -> ControlDaemon:
     """Load control.toml and open the state and outbox. Anything unsafe or missing stops the daemon here."""
     try:
         import cryptography  # noqa: F401
@@ -440,6 +454,7 @@ def build_daemon(settings: Settings, *, client: httpx.Client | None = None, acti
         config = cfgmod.load(settings.config_path)
     except cfgmod.ConfigError as exc:
         raise SettingsError(str(exc)) from exc
+    identity.refresh_machine_names()
     wrong = identity.check(config)
     if wrong:
         raise SettingsError(wrong)
@@ -449,7 +464,7 @@ def build_daemon(settings: Settings, *, client: httpx.Client | None = None, acti
         log.error("the replay state is unusable (%s); every command will be refused until it is fixed",
                   verifier.state_error)
     return ControlDaemon(settings, config, verifier, actions if actions is not None else build_actions(config),
-                         ResultOutbox(settings.data_dir / OUTBOX_FILE), client or httpx.Client(), clock)
+                         ResultOutbox(settings.data_dir / OUTBOX_FILE), client or httpx.Client(), clock, boot_id)
 
 
 def configure_logging(data_dir: Path | None = None) -> None:
