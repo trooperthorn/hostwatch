@@ -73,7 +73,9 @@ def read_pstore(root: Path) -> tuple[SourceStatus, list[Event]]:
     try:
         entries = sorted(root.iterdir())
     except FileNotFoundError:
-        return SourceStatus(source=SOURCE, available=False, reason=f"{root} does not exist"), []
+        # No pstore directory means this host has no pstore, which is not a failure.
+        return SourceStatus(source=SOURCE, available=False, present=False,
+                            reason=f"{root} does not exist"), []
     except OSError as exc:
         return SourceStatus(source=SOURCE, available=False, reason=f"cannot read {root}: {exc}"), []
     events: list[Event] = []

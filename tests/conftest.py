@@ -29,7 +29,7 @@ def _agent_platform_is_not_the_test_host(request, monkeypatch):
     if request.node.get_closest_marker("real_platform"):
         return
     import hostwatch.agent as agent_module
-    monkeypatch.setattr(agent_module, "detect_platform", lambda sysfs=None: "x86")
+    monkeypatch.setattr(agent_module, "detect_platform", lambda *args, **kwargs: "x86")
 
 
 def pytest_configure(config):

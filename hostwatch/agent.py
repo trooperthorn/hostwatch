@@ -31,6 +31,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from urllib.parse import urlsplit
 
 import httpx
 
@@ -94,7 +95,20 @@ class DeliveryError(Exception):
         self.retry_after = retry_after
 
 
-def detect_platform(sysfs: Path | None = None) -> str:
+def _is_truenas(procfs: Path | None, truenas_url: str) -> bool:
+    """TrueNAS shows in the host kernel version string, which the container reads through the
+    procfs mount. A TrueNAS API on this machine (a loopback URL) counts as well."""
+    if procfs is not None:
+        try:
+            if "truenas" in (procfs / "version").read_text(errors="replace").lower():
+                return True
+        except OSError:
+            pass
+    host = (urlsplit(truenas_url).hostname or "") if truenas_url else ""
+    return host in ("localhost", "127.0.0.1", "::1")
+
+
+def detect_platform(sysfs: Path | None = None, procfs: Path | None = None, truenas_url: str = "") -> str:
     # Checked first so a Windows host never touches sysfs or procfs paths.
     if sys.platform == "win32":
         return "windows"
@@ -104,6 +118,8 @@ def detect_platform(sysfs: Path | None = None) -> str:
             return "rpi"
     except OSError:
         pass
+    if _is_truenas(procfs, truenas_url):
+        return "truenas"
     return "x86" if _platform.machine() == "x86_64" else _platform.machine()
 
 
@@ -121,7 +137,7 @@ class Agent:
         self._wall = wall
         self._warn_if_name_differs()
         # The platform is a parameter so the Windows agent can be built and tested on Linux.
-        self.platform = platform or detect_platform(cfg.sysfs)
+        self.platform = platform or detect_platform(cfg.sysfs, cfg.procfs, cfg.truenas_url)
         self.collectors = build_collectors(cfg, seam, platform=self.platform)
         self.status: dict[str, SourceStatus] = {}
         self.outbox = Outbox(cfg.data_dir / OUTBOX_FILE)
@@ -494,6 +510,8 @@ class Agent:
         out: list[LogRecord] = []
         for st in self.status.values():
             # A source that is positively not on this host is not a failure, so it counts as fine.
+            if st.pending:
+                continue  # a first read that is still running says nothing yet
             fine = st.available or not st.present
             before = self._reported.get(st.source)
             if before is None and fine:

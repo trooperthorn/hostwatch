@@ -22,6 +22,7 @@ duplicates there.
 from __future__ import annotations
 
 import json
+import os
 import sqlite3
 import time
 from datetime import datetime, timezone
@@ -118,9 +119,18 @@ class RasdaemonReader:
             return 0
 
     def read(self) -> tuple[SourceStatus, list[Event]]:
+        try:
+            os.stat(self.db_path)
+        except FileNotFoundError:
+            # No database means rasdaemon is not installed or records nowhere here: not present.
+            return SourceStatus(source=SOURCE, available=False, present=False,
+                                reason=f"{self.db_path} does not exist"), []
+        except OSError as exc:
+            return SourceStatus(source=SOURCE, available=False,
+                                reason=f"cannot read {self.db_path}: {exc}"), []
         if not self.db_path.is_file():
             return SourceStatus(source=SOURCE, available=False,
-                                reason=f"{self.db_path} does not exist"), []
+                                reason=f"{self.db_path} is not a file"), []
         try:
             conn = open_readonly(self.db_path)
         except sqlite3.Error as exc:

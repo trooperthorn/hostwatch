@@ -481,7 +481,8 @@ class BackgroundJournal:
         self._result: dict = {}
         self._cursor: str | None = None
         self._started = 0.0
-        self._last = SourceStatus(source=SOURCE, available=False, reason="first journal read in progress")
+        self._last = SourceStatus(source=SOURCE, available=False, reason="first journal read in progress",
+                                  pending=True)
 
     def _work(self, cursor: str | None, result: dict) -> None:
         try:

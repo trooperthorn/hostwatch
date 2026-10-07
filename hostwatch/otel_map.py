@@ -187,7 +187,11 @@ def _mem_total(s, ctx):
 def _hwmon(name: str, unit: str, parented: bool):
     def handler(s, ctx):
         chip, sensor = s.labels.get("chip", ""), s.labels.get("sensor", "")
-        attrs: dict[str, Attr] = {"hw.id": f"{chip}:{sensor}", "hw.name": sensor}
+        # The id names the chip instance, the input file and the label, so two chips of one kind
+        # and two inputs with one label are separate series. A sample without them keeps chip:label.
+        instance, inp = s.labels.get("device", ""), s.labels.get("input", "")
+        hw_id = ":".join(p for p in (chip, instance, inp, sensor) if p) if instance or inp else f"{chip}:{sensor}"
+        attrs: dict[str, Attr] = {"hw.id": hw_id, "hw.name": sensor}
         if parented:
             attrs["hw.parent"] = chip
         return [_pt(s, name, unit, s.value, attrs)]
@@ -495,11 +499,10 @@ def map_source_status(statuses: Iterable[SourceStatus], ts: float) -> list[Point
     for st in statuses:
         scope = scope_name(st.source)
         attrs: dict[str, Attr] = {"observe.source": st.source}
-        avail_attrs = dict(attrs)
-        if not st.available and st.reason:
-            avail_attrs["observe.source.reason"] = st.reason[:MAX_REASON]
+        # The reason is free text that changes, so it stays off the metric: it would start a new
+        # series each time its text changed. It travels on the observe.source.change log only.
         out.append(Point(scope, "observe.source.available", "1", GAUGE, 1.0 if st.available else 0.0, ts,
-                         avail_attrs))
+                         dict(attrs)))
         out.append(Point(scope, "observe.source.present", "1", GAUGE, 1.0 if st.present else 0.0, ts,
                          dict(attrs)))
     return out

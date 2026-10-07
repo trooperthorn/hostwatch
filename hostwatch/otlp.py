@@ -10,7 +10,7 @@ sent, at most 4 MiB once inflated, an inflate ratio below 100, at most 5000 poin
 records per request, 64 resource attributes, 32 attributes per point or record, keys of at most
 128 characters and string values of at most 1024. A set of items that does not fit is split into several
 requests, each carrying the full resource. A point that Observe would refuse outright (a value
-that is not finite, a name that is too long) is skipped and counted instead of failing its
+that is not finite, a name outside ^[a-z][a-z0-9_.]{0,127}$, a timestamp of zero) is skipped and counted instead of failing its
 whole request, because unavailable beats wrong.
 
 The Idempotency-Key of each request is derived from the outbox entry id, the signal and the
@@ -54,6 +54,8 @@ MAX_ATTR_KEY = 128
 MAX_ATTR_VALUE = 1024
 MAX_NAME = 128
 MAX_UNIT = 32
+# Observe refuses any other metric name (observe/otlp/normalize.py), so such a point is skipped here.
+METRIC_NAME = re.compile(r"[a-z][a-z0-9_.]{0,127}")
 MAX_IDEMPOTENCY_KEY = 128
 
 CUMULATIVE = 2
@@ -145,8 +147,9 @@ def _resource(resource: dict[str, Attr]) -> dict[str, Any]:
 
 def _point_ok(p: Point) -> bool:
     return (isinstance(p.value, (int, float)) and not isinstance(p.value, bool)
-            and math.isfinite(p.value) and 0 < len(p.name) <= MAX_NAME and len(p.unit) <= MAX_UNIT
-            and 0 < len(p.scope) <= MAX_NAME and math.isfinite(p.ts) and p.ts >= 0)
+            and math.isfinite(p.value) and METRIC_NAME.fullmatch(p.name) is not None
+            and len(p.unit) <= MAX_UNIT and 0 < len(p.scope) <= MAX_NAME
+            and math.isfinite(p.ts) and p.ts > 0)
 
 
 def metrics_json(resource: dict[str, Attr], points: Sequence[Point],
@@ -181,7 +184,7 @@ def metrics_json(resource: dict[str, Attr], points: Sequence[Point],
 
 def _record_ok(r: LogRecord) -> bool:
     return (0 < len(r.event_name) <= MAX_ATTR_VALUE and 0 < len(r.scope) <= MAX_NAME
-            and math.isfinite(r.ts) and r.ts >= 0)
+            and math.isfinite(r.ts) and r.ts > 0)
 
 
 def logs_json(resource: dict[str, Attr], records: Sequence[LogRecord]) -> dict[str, Any]:

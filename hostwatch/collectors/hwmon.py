@@ -43,10 +43,24 @@ class HwmonCollector(Collector):
             return False, "no hwmon devices"
         return True, ", ".join(read_text(d / "name") or d.name for d in devs)
 
+    @staticmethod
+    def _instance(dev) -> str:
+        """A name for this chip instance that survives a reboot when it can: the bus device the chip
+        sits on (a PCI address, an i2c address, coretemp.0). hwmonN is the fallback, because the
+        kernel numbers it in probe order."""
+        link = dev / "device"
+        try:
+            if link.exists():
+                return link.resolve().name or dev.name
+        except OSError:
+            pass
+        return dev.name
+
     def collect(self):
         out = []
         for dev in self._devices():
             chip = read_text(dev / "name") or dev.name
+            instance = self._instance(dev)
             for f in sorted(dev.iterdir()):
                 m = INPUT_RE.match(f.name)
                 if not m:
@@ -58,5 +72,6 @@ class HwmonCollector(Collector):
                 if self.ignore and sensor_matches(self.ignore, chip, label):
                     continue
                 value = None if raw is None else round(raw / div, 3)
-                out.append(self.sample(metric, value, unit, chip=chip, sensor=label))
+                out.append(self.sample(metric, value, unit, chip=chip, sensor=label,
+                                      device=instance, input=f"{prefix}{idx}"))
         return out

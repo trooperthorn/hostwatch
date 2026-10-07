@@ -32,6 +32,10 @@ class SourceStatus(BaseModel):
         description="False only when the collector positively established that this host has no such source "
                     "(for example no md arrays). An unreadable source stays present and unavailable. "
                     "Agents that never send the field are read as present.")
+    pending: bool = Field(
+        default=False,
+        description="True while a first read is still running. The status is a placeholder, so the agent "
+                    "logs no source change for it.")
 
 
 class Event(BaseModel):

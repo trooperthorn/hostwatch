@@ -167,6 +167,19 @@ def test_point_observe_would_refuse_is_skipped():
     assert built.skipped == 5 and built.requests[0].count == 1
 
 
+@pytest.mark.parametrize("name", ["Hw.Temperature", "hw-temp", "1hw", "hw temp", "", "h" * 129])
+def test_metric_name_outside_observes_rule_is_skipped_and_counted(name):
+    built = otlp.build_metrics_requests("e", RES, [pt(name=name), pt()])
+    assert built.skipped == 1 and built.requests[0].count == 1
+
+
+def test_timestamp_zero_is_skipped_and_counted_for_points_and_records():
+    built = otlp.build_metrics_requests("e", RES, [pt(ts=0.0), pt()])
+    assert built.skipped == 1 and built.requests[0].count == 1
+    built = otlp.build_logs_requests("e", RES, [rec(ts=0.0), rec()])
+    assert built.skipped == 1 and built.requests[0].count == 1
+
+
 def test_a_record_observe_would_refuse_is_skipped():
     built = otlp.build_logs_requests("e", RES, [rec(event=""), rec(scope=""), rec(ts=math.inf), rec()])
     assert built.skipped == 3 and built.requests[0].count == 1
@@ -226,8 +239,8 @@ def test_attribute_count_and_key_limits():
 
 
 def test_timestamps_round_to_the_nanosecond_and_clamp():
-    t = tree(otlp.build_metrics_requests("e", RES, [pt(ts=0.0), pt(ts=1.234567891)]).requests[0])
-    assert [g[3]["timeUnixNano"] for g in all_points(t)] == ["0", "1234567891"]
+    t = tree(otlp.build_metrics_requests("e", RES, [pt(ts=1.234567891)]).requests[0])
+    assert [g[3]["timeUnixNano"] for g in all_points(t)] == ["1234567891"]
     assert otlp._ns(1e30) == str(2**63 - 1)
 
 
@@ -391,9 +404,9 @@ def test_strings_are_cut_after_cleaning_so_the_sent_length_is_the_limit():
 
 
 def test_metric_names_and_scopes_are_cleaned():
-    built = otlp.build_metrics_requests("e", RES, [pt(name="a" + LONE, scope="s" + LONE), pt(value=2.0)])
+    built = otlp.build_metrics_requests("e", RES, [pt(scope="s" + LONE), pt(value=2.0)])
     names = [(scope, me["name"]) for scope, me, _, _ in all_points(tree(built.requests[0]))]
-    assert ("s�", "a�") in names and len(names) == 2
+    assert ("s�", "hw.cpu.utilization") in names and len(names) == 2
 
 
 class _Unprintable:

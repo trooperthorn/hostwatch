@@ -111,12 +111,17 @@ attribute: `device_metrics` (the default: CPU, memory, hwmon, RAPL, UPS, thermal
 collectors: each run sends the heartbeat (`observe.agent.heartbeat`), the source status of every
 source (`observe.source.available` and `observe.source.present`) and the rate in force for each tier
 (`observe.agent.poll.interval`, one series per tier, so Observe knows the cadence to expect). An
-unavailable source carries its reason, cut to 512 characters, as the attribute `observe.source.reason`
-on its `observe.source.available` point. Every tier, not only the availability tier, also sends an
-`observe.source.change` log when a source's availability differs from the last one reported, with the
-same reason attribute, so a failure on a slow tier is logged when it happens and not up to an hour
+unavailable source's reason is not an attribute of its metric, because free text that changes would start a new
+series each time. The reason, cut to 512 characters, travels on the `observe.source.change` log only. Every
+tier, not only the availability tier, sends that log when a source's availability differs from the last one
+reported, with the reason as the attribute `observe.source.reason`, so a failure on a slow tier is logged when it happens and not up to an hour
 later. A source first seen available, or positively absent from the host, is recorded without a log;
-the record is held in memory, so a restart reports a source that is still unavailable once more. The
+the record is held in memory, so a restart reports a source that is still unavailable once more. A status
+marked `pending` (the journal placeholder while its first read runs in the background) is skipped, so a clean
+start logs no change for the journal. A source the host does not have is sent `observe.source.present` 0:
+`rapl` when `<sysfs>/class` is readable and has no `powercap` directory or no `intel-rapl` zone, `pstore` when
+its directory does not exist, and `rasdaemon` when its database file does not exist. An unreadable location
+stays present and unavailable. The
 design asks for the tier and its rate to travel with each batch; a separate gauge was chosen over a
 resource attribute because a resource attribute that changes with the rate would make a new
 resource every time an admin edits a rate. Whether Observe reads that gauge is recorded in
@@ -689,7 +694,15 @@ level, epoch time and message), `CimQuery` (one dict per CIM instance), `PipeSta
 from a named pipe) and `CommandRunner` (a program, an argument list and a timeout, never a shell). A
 `WindowsSeam` bundles one of each. `Collector.__init__` takes an optional `seam` and its `sysfs` and
 `procfs` arguments are now optional, `build_collectors(cfg, seam)` and `Agent(cfg, seam)` pass it along, and
-`detect_platform` returns `windows` when `sys.platform` is `win32` before it looks at any path.
+`detect_platform` returns `windows` when `sys.platform` is `win32` before it looks at any path. On Linux it
+returns `rpi` for a Pi model file and `truenas` when `<procfs>/version` (the host kernel string) names TrueNAS or
+`HOSTWATCH_TRUENAS_URL` points at a loopback address, so `observe.platform` is `truenas` on a TrueNAS host.
+
+The hwmon collector labels each sample with the chip name, the chip instance (`device`, the bus device the
+chip sits on, falling back to `hwmonN`), the input file (`input`, such as `temp1`) and the sensor label. The
+mapping builds `hw.id` from all four, so two chips of one kind, and two inputs that share a label, are separate
+series. `HOSTWATCH_HWMON_IGNORE` still matches `chip:sensor`. The encoder skips and counts a point whose metric
+name is outside `^[a-z][a-z0-9_.]{0,127}$` (Observe's rule) and a point or log with a timestamp of zero.
 
 The real readers use only the standard library. `PowerShellEventLogReader` and `PowerShellCimQuery` build a
 `powershell.exe -NoProfile -NonInteractive` script around `Get-WinEvent` or `Get-CimInstance` that ends in

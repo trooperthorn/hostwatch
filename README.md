@@ -51,6 +51,12 @@ model is in `docs/THREAT-MODEL.md`.
 | `scripts/` | `host-prep.sh` (Phase 0 check), `rapl-access.sh` and `pstore-access.sh` (group read grants) |
 | `docs/` | `ARCHITECTURE.md`, `THREAT-MODEL.md`, `deploy-agents.md`, `deploy-truenas.md`, `hosts/truenas-svr.md` |
 
+The `hwmon` source sends one series per sensor: the id names the chip, the chip instance, the input and the
+label, so two NVMe drives that both report `Composite` are two series. The platform is `truenas` on a TrueNAS
+host (the host kernel version names it, or the TrueNAS API is on this machine). A source the host does not have,
+such as `rapl` without powercap, `pstore` without its directory or `rasdaemon` without its database, is sent as
+not present rather than present but unavailable.
+
 The `rpi` source reads the Raspberry Pi firmware throttled bitmask (default the sysfs `get_throttled`
 file under `soc:firmware`, or the path in `HOSTWATCH_RPI_THROTTLED_PATH`) and the `cpu-thermal` zone.
 It reports the raw bitmask, one flag per condition (under-voltage, frequency capped, throttled and soft
