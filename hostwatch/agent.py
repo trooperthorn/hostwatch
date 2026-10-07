@@ -146,6 +146,9 @@ class Agent:
         self._next_events = 0.0
         self._next_watch = 0.0
         self._failsafe_open: set[tuple[str, str]] = set()
+        # Availability last reported in a source change log, per source. Memory only, so a restart
+        # reports a source that is still unavailable once more.
+        self._reported: dict[str, bool] = {}
         self._flush_failures = 0
         self._next_flush = 0.0
         # Monotonic time of the first failed delivery of the current stall.
@@ -406,6 +409,9 @@ class Agent:
         rejected = self.outbox.rejected_points_total() + self.outbox.rejected_records_total()
         if rejected:
             notes.append(f"Observe accepted but rejected {rejected} item(s) in total")
+        quarantined = self.outbox.quarantined_total()
+        if quarantined:
+            notes.append(f"{quarantined} item(s) could not be encoded and were quarantined in total")
         if self._stall_since is not None:
             notes.append(f"delivery to Observe has stalled for {self._clock() - self._stall_since:.0f}s; "
                          f"{self.outbox.depth()} request(s) are queued and kept")
@@ -413,6 +419,23 @@ class Agent:
             notes.append(f"the outbox file was corrupt and was moved to {self.outbox.recovered_from.name}; "
                          "requests and progress markers in it were lost")
         self.status["outbox"] = SourceStatus(source="outbox", available=not dropped, reason="; ".join(notes))
+
+    def _source_change_logs(self, now: float) -> list[LogRecord]:
+        """One observe.source.change log for each source whose availability differs from the last
+        one reported. A source first seen available is not news, so it is recorded silently. This
+        runs on every tier, so a failure on a slow tier is logged when it happens and not at the
+        next availability report."""
+        out: list[LogRecord] = []
+        for st in self.status.values():
+            # A source that is positively not on this host is not a failure, so it counts as fine.
+            fine = st.available or not st.present
+            before = self._reported.get(st.source)
+            if before is None and fine:
+                self._reported[st.source] = True
+            elif before != fine:
+                self._reported[st.source] = fine
+                out.append(otel_map.map_source_change(st.source, fine, st.reason, now))
+        return out
 
     def _new_failsafe_logs(self, samples: list[Sample]) -> list[LogRecord]:
         """A failsafe is logged when a reason first appears, not on every poll while it lasts."""
@@ -429,6 +452,7 @@ class Agent:
         now = self._wall()
         points: list[Point] = otel_map.map_samples(samples, self.map_context)
         logs = self._new_failsafe_logs(samples)
+        logs += self._source_change_logs(now)
         events = self._threshold_events(samples)
         if tier == tiers.AVAILABILITY:
             self._outbox_status()
@@ -454,6 +478,11 @@ class Agent:
         for b in built:
             if b.skipped:
                 log.warning("%d item(s) were left out of a request because Observe would refuse them", b.skipped)
+        self.outbox.note_quarantined("metrics", built[0].quarantined)
+        self.outbox.note_quarantined("logs", built[1].quarantined)
+        for b in built:
+            if b.quarantined:
+                log.warning("%d item(s) could not be encoded and were quarantined, not queued", b.quarantined)
         self.outbox.enqueue([r for b in built for r in b.requests], entry_id)
 
     def event_cycle(self, watch: bool) -> None:
@@ -504,6 +533,8 @@ class Agent:
             self._next_events = now + tiers.EVENT_POLL_S
             if watch:
                 self._next_watch = now + WATCH_S
+            # Send the events before a slow tier can hold them back.
+            self._try_flush(client)
         for tier in self.schedule.due(self._clock()):
             self._guard(f"{tier} poll", lambda tier=tier: self.run_tier(tier))
             self.schedule.done(tier, self._clock())

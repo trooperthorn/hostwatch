@@ -112,7 +112,8 @@ def log_records(tree: dict) -> list[dict]:
                     attrs[kv["key"]] = v
                 out.append({"event": attrs["event.name"], "ts": int(rec["timeUnixNano"]) / 1e9,
                             "source": attrs.get("observe.source"), "dedup_key": attrs.get("observe.dedup_key"),
-                            "attrs": attrs, "scope": sl["scope"]["name"]})
+                            "attrs": attrs, "scope": sl["scope"]["name"],
+                            "body": rec.get("body", {}).get("stringValue", "")})
     return out
 
 

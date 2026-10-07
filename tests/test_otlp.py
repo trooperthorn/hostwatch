@@ -358,3 +358,55 @@ def test_gzip_output_does_not_depend_on_the_clock():
     a = otlp.build_metrics_requests("e", RES, [pt()]).requests[0].body
     b = otlp.build_metrics_requests("e", RES, [pt()]).requests[0].body
     assert a == b and a[4:8] == b"\x00\x00\x00\x00"
+
+
+# -- safe encoding --------------------------------------------------------------------------
+
+LONE = chr(0xD800)
+
+
+@pytest.mark.parametrize("fmt", ["protobuf", "json"])
+def test_unpaired_surrogate_is_replaced_and_does_not_block_later_records(fmt):
+    bad = rec(body="bad " + LONE + " end", attrs={"observe.source": "x" + LONE, "k" + LONE: "v"})
+    good = rec(event="hostwatch.after", body="fine")
+    built = otlp.build_logs_requests("e", RES, [bad, good], fmt=fmt)
+    assert built.quarantined == 0 and built.skipped == 0
+    t = tree(built.requests[0])
+    records = t["resourceLogs"][0]["scopeLogs"][0]["logRecords"]
+    assert len(records) == 2
+    assert records[0]["body"]["stringValue"] == "bad � end"
+    assert attr_map(records[0]["attributes"])["observe.source"] == "x�"
+    assert records[1]["body"]["stringValue"] == "fine"
+
+
+def test_control_characters_are_replaced_but_tab_and_newline_are_kept():
+    r = rec(body="a\x00b\x1bc\x7fd\te\nf")
+    lr = first_record(otlp.build_logs_requests("e", RES, [r]).requests[0])
+    assert lr["body"]["stringValue"] == "a�b�c�d\te\nf"
+
+
+def test_strings_are_cut_after_cleaning_so_the_sent_length_is_the_limit():
+    t = tree(otlp.build_metrics_requests("e", RES, [pt(attrs={"s": LONE * 5000})]).requests[0])
+    assert attr_map(next(all_points(t))[3]["attributes"])["s"] == "�" * 1024
+
+
+def test_metric_names_and_scopes_are_cleaned():
+    built = otlp.build_metrics_requests("e", RES, [pt(name="a" + LONE, scope="s" + LONE), pt(value=2.0)])
+    names = [(scope, me["name"]) for scope, me, _, _ in all_points(tree(built.requests[0]))]
+    assert ("s�", "a�") in names and len(names) == 2
+
+
+class _Unprintable:
+    def __str__(self):
+        raise RuntimeError("cannot be rendered")
+
+
+@pytest.mark.parametrize("fmt", ["protobuf", "json"])
+def test_an_item_that_still_cannot_be_encoded_is_quarantined_and_counted(fmt, caplog):
+    records = [rec(event="hostwatch.one"), rec(attrs={"k": _Unprintable()}), rec(event="hostwatch.three")]
+    built = otlp.build_logs_requests("e", RES, records, fmt=fmt)
+    assert built.quarantined == 1
+    got = [attr_map(r["attributes"])["event.name"] for req in built.requests
+           for r in tree(req)["resourceLogs"][0]["scopeLogs"][0]["logRecords"]]
+    assert got == ["hostwatch.one", "hostwatch.three"]
+    assert "quarantined" in caplog.text

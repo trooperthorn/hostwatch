@@ -110,7 +110,13 @@ attribute: `device_metrics` (the default: CPU, memory, hwmon, RAPL, UPS, thermal
 `inventory` (reserved; no collector reads inventory facts yet). The `availability` tier has no
 collectors: each run sends the heartbeat (`observe.agent.heartbeat`), the source status of every
 source (`observe.source.available` and `observe.source.present`) and the rate in force for each tier
-(`observe.agent.poll.interval`, one series per tier, so Observe knows the cadence to expect). The
+(`observe.agent.poll.interval`, one series per tier, so Observe knows the cadence to expect). An
+unavailable source carries its reason, cut to 512 characters, as the attribute `observe.source.reason`
+on its `observe.source.available` point. Every tier, not only the availability tier, also sends an
+`observe.source.change` log when a source's availability differs from the last one reported, with the
+same reason attribute, so a failure on a slow tier is logged when it happens and not up to an hour
+later. A source first seen available, or positively absent from the host, is recorded without a log;
+the record is held in memory, so a restart reports a source that is still unavailable once more. The
 design asks for the tier and its rate to travel with each batch; a separate gauge was chosen over a
 resource attribute because a resource attribute that changes with the rate would make a new
 resource every time an admin edits a rate. Whether Observe reads that gauge is recorded in
@@ -140,8 +146,10 @@ about twenty seconds even when the storage tier runs every fifteen minutes. A co
 holds the loop for as long as it blocks (the TrueNAS client has its own timeout), because the loop is
 a single thread.
 
-Delivery runs after every pass. `flush` sends the outbox oldest first and removes a request only
-after a 2xx answer:
+Delivery runs after every pass, and also straight after the event read, so events leave before a slow
+tier run can hold them back. `flush` sends the outbox log requests first and metrics requests second,
+each oldest first, so after an outage the events go before the backlog of readings. It removes a request
+only after a 2xx answer:
 
 * A 200 with a partial success (protobuf or JSON, as sent) is acknowledged, because the rejected
   items would be rejected again. The rejected count and Observe's message are logged, counted in the
@@ -321,7 +329,11 @@ when no marker exists.
 ## Durable outbox
 
 `hostwatch/outbox.py` keeps `outbox.db` (SQLite, synchronous FULL) in the data directory. It holds
-encoded OTLP requests (path, headers including the `Idempotency-Key`, body, signal and the number of
+encoded OTLP requests, after every string has been cleaned (an unpaired surrogate or a control
+character other than tab, newline and carriage return becomes U+FFFD, then the Observe length caps
+apply). An item that still cannot be encoded is isolated, left out of its request, logged and counted
+in the outbox's `quarantined` counters and in the `outbox` source reason, and the other items of the
+entry are queued as usual. The outbox holds the requests (path, headers including the `Idempotency-Key`, body, signal and the number of
 points or log records) in the `requests` table, so a replay after a restart sends the same bytes
 under the same key. The old `batches` table of earlier versions is dropped when the file is opened.
 

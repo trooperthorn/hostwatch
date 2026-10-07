@@ -91,7 +91,8 @@ def test_replay_after_restart_sends_each_request_once_with_the_same_key_and_body
     with observe.client() as client:
         second.flush(client)
         second.flush(client)  # nothing is left, so nothing more is sent
-    assert [(r.url.path, r.headers["idempotency-key"], r.content) for r in observe.posts] == before
+    assert [(r.url.path, r.headers["idempotency-key"], r.content) for r in observe.posts] == (
+        [q for q in before if q[0] == "/v1/logs"] + [q for q in before if q[0] != "/v1/logs"])
     assert len({k for _, k, _ in before}) == len(before)
     assert second.outbox.depth() == 0
     assert all(r.headers["authorization"] == "Bearer " + "k" * 24 for r in observe.posts)
@@ -286,13 +287,13 @@ def test_threshold_state_survives_a_restart_so_an_open_condition_is_not_repeated
     first.detect()
     first.collect_samples = lambda tier=None, watched=False: samples
     first.run_tier(tiers.STORAGE_HEALTH)
-    assert [r["event"] for r in drain_logs(first)] == ["hostwatch.md.degraded"]
+    assert [r["event"] for r in drain_logs(first) if r["event"].startswith("hostwatch.")] == ["hostwatch.md.degraded"]
     first.outbox.close()
     second = Agent(cfg)
     second.detect()
     second.collect_samples = lambda tier=None, watched=False: samples
     second.run_tier(tiers.STORAGE_HEALTH)
-    assert drain_logs(second) == []
+    assert [r for r in drain_logs(second) if r["event"].startswith("hostwatch.")] == []
 
 
 ENTRIES_FOR_REREAD = ENTRIES
@@ -726,3 +727,65 @@ def test_an_idle_event_read_writes_nothing_to_the_outbox(tmp_path):
     for _ in range(3):
         assert event_cycle(agent, watch=True) is True
     assert agent.outbox._db.total_changes == before and agent.outbox.depth() == 0
+
+
+# -- source reasons, quarantine and delivery order ---------------------------------------------
+
+def _source_changes(agent):
+    return [r for r in drain_logs(agent) if r["event"] == "observe.source.change"]
+
+
+def test_a_slow_tier_failure_is_logged_with_its_reason_when_it_happens_and_once(tmp_path):
+    from hostwatch.model import SourceStatus
+    agent = Agent(make_cfg(tmp_path))
+    agent.detect()
+    agent.collect_samples = lambda tier=None, watched=False: []
+    agent.status["zfs"] = SourceStatus(source="zfs", available=True)
+    agent.run_tier(tiers.STORAGE_HEALTH)
+    drain_logs(agent)
+    agent.status["zfs"] = SourceStatus(source="zfs", available=False, reason="collect error: boom")
+    agent.run_tier(tiers.STORAGE_HEALTH)
+    [change] = [r for r in _source_changes(agent) if r["attrs"]["observe.source"] == "zfs"]
+    assert change["attrs"]["observe.source.reason"] == "collect error: boom"
+    agent.run_tier(tiers.STORAGE_HEALTH)
+    assert [r for r in _source_changes(agent) if r["attrs"]["observe.source"] == "zfs"] == []
+    agent.status["zfs"] = SourceStatus(source="zfs", available=True)
+    agent.run_tier(tiers.STORAGE_HEALTH)
+    [back] = [r for r in _source_changes(agent) if r["attrs"]["observe.source"] == "zfs"]
+    assert "observe.source.reason" not in back["attrs"] and back["body"] == "zfs available"
+
+
+def test_a_source_absent_from_the_host_is_not_reported_as_a_failure(tmp_path):
+    from hostwatch.model import SourceStatus
+    agent = Agent(make_cfg(tmp_path))
+    agent.status = {"mdraid": SourceStatus(source="mdraid", available=False, reason="no arrays", present=False)}
+    assert agent._source_change_logs(1.0) == []
+
+
+def test_an_unencodable_event_is_quarantined_counted_and_does_not_block_the_queue(tmp_path):
+    from hostwatch import otel_map
+    from hostwatch.model import Event
+    agent = Agent(make_cfg(tmp_path))
+    good = Event(kind="md.degraded", severity="warning", source="mdraid", ts=1.0, title="ok", dedup_key="a")
+    odd = Event(kind="md.degraded", severity="warning", source="mdraid", ts=2.0,
+                title="bad " + chr(0xD800), dedup_key="b")
+    bad = otel_map.map_event(good)
+    bad.attributes["boom"] = type("U", (), {"__str__": lambda self: 1 / 0})()
+    agent._enqueue([], [otel_map.map_event(odd), bad, otel_map.map_event(good)])
+    assert agent.outbox.quarantined_total() == 1
+    sent = [r["body"] for r in drain_logs(agent)]
+    assert sent == ["bad �", "ok"]
+    agent._outbox_status()
+    assert "quarantined" in agent.status["outbox"].reason
+
+
+def test_log_requests_leave_before_the_metrics_backlog(tmp_path):
+    out = Outbox(tmp_path / "o.db")
+    out.enqueue(requests_for("m1", n_points=1), "m1")
+    out.enqueue(requests_for("l1", n_records=1), "l1")
+    out.enqueue(requests_for("m2", n_points=1), "m2")
+    order = []
+    while (req := out.peek()) is not None:
+        order.append(req.entry_id)
+        out.ack(req.seq)
+    assert order == ["l1", "m1", "m2"]

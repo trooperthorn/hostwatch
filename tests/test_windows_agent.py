@@ -65,7 +65,8 @@ def test_one_cycle_reaches_observe_as_otlp_with_the_windows_resource(tmp_path):
                 for dp in (m.get("gauge") or m["sum"])["dataPoints"]
                 for a in dp.get("attributes", []) if a["key"] == "observe.source"}
     assert reported >= {"winevent", "outbox"} and not {"pstore", "rasdaemon", "journal"} & reported
-    [boot] = [r for r in log_records(trees["/v1/logs"]) if r["event"] == "observe.host.boot"]
+    [boot] = [r for p in observe.posts if p.url.path == "/v1/logs" for r in log_records(body_json(p))
+              if r["event"] == "observe.host.boot"]
     assert boot["attrs"]["observe.event.kind"] == "boot.kernel_panic"
     assert agent.outbox.depth() == 0
 
@@ -384,6 +385,7 @@ class SlowClient:
 
 def _queue_batches(host, count):
     host.agent.detect()
+    host.agent._source_change_logs(0.0)  # settle the source change reports so each batch is one request
     for _ in range(count):
         host.agent.run_tier(tiers.AVAILABILITY)
     assert host.agent.outbox.depth() == count

@@ -18,6 +18,12 @@ request. Log requests carry events, and an event is the thing the owner most wan
 they are kept for MAX_LOGS_AGE_S and are dropped only when no metrics request is left to drop.
 Every drop is counted and reported through the agent's outbox source status.
 
+Delivery sends log requests before metrics requests, each oldest first, so that after an outage the
+events leave before the backlog of readings.
+
+An item that cannot be encoded is left out of its request by the encoder and counted here, so one
+bad value never blocks the queue.
+
 A request that Observe refuses with a status that can never succeed (see agent.DEAD_LETTER_STATUSES)
 moves to the dead_letters table with the status and no longer blocks the queue head. No other
 answer moves a request: a 5xx, a 429, a 401 or a 403 describes the receiver, the key or the
@@ -285,13 +291,15 @@ class Outbox:
             return self._db.execute("SELECT COALESCE(SUM(LENGTH(body)), 0) FROM requests").fetchone()[0]
 
     def peek(self) -> QueuedRequest | None:
-        """The oldest request. A row whose headers cannot be decoded is moved to dead_letters on the
-        way, so one bad row never blocks the ones behind it."""
+        """The next request to send: log requests before metrics requests, each oldest first, so
+        events that were queued during an outage leave before the backlog of readings. A row whose
+        headers cannot be decoded is moved to dead_letters on the way, so one bad row never blocks
+        the ones behind it."""
         with self._lock:
             while True:
                 row = self._db.execute(
                     "SELECT seq, entry_id, signal, path, headers, body, count, created FROM requests "
-                    "ORDER BY seq LIMIT 1").fetchone()
+                    "ORDER BY (signal = 'logs') DESC, seq LIMIT 1").fetchone()
                 if row is None:
                     return None
                 try:
@@ -330,6 +338,16 @@ class Outbox:
         if count > 0:
             with self._lock, self._db:
                 self._bump("rejected_points" if signal == "metrics" else "rejected_records", count)
+
+    def note_quarantined(self, signal: str, count: int) -> None:
+        """Count items that could not be encoded and were left out of every request."""
+        if count > 0:
+            with self._lock, self._db:
+                self._bump("quarantined_points" if signal == "metrics" else "quarantined_records", count)
+
+    def quarantined_total(self) -> int:
+        with self._lock:
+            return self._counter("quarantined_points") + self._counter("quarantined_records")
 
     def dead_letter_count(self) -> int:
         with self._lock:

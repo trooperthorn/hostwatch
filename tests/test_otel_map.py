@@ -156,3 +156,29 @@ def test_failsafe_reasons_become_logs():
         ("observe.thermal.failsafe", 13, "fan:CPU:stalled"), ("observe.thermal.failsafe", 13, "control:lost")]
     assert m.failsafe_logs([Sample(source="win_thermalsuite", metric="failsafe", value=0.0, ts=1.0,
                                    labels={"reasons": ""})]) == []
+
+
+def test_unavailable_reason_is_sent_on_the_available_point_and_survives_encoding():
+    from hostwatch import otlp
+    from otlp_decoder import decode
+    long_reason = "r" * 2000
+    pts = m.map_source_status([SourceStatus(source="zfs", available=False, reason="permission denied"),
+                               SourceStatus(source="nut", available=False, reason=long_reason),
+                               SourceStatus(source="cpu", available=True, reason="stale"),
+                               SourceStatus(source="mdraid", available=False)], 5.0)
+    by = {(p.name, p.attributes["observe.source"]): p.attributes for p in pts}
+    assert by[("observe.source.available", "zfs")]["observe.source.reason"] == "permission denied"
+    assert len(by[("observe.source.available", "nut")]["observe.source.reason"]) == m.MAX_REASON
+    assert "observe.source.reason" not in by[("observe.source.available", "cpu")]
+    assert "observe.source.reason" not in by[("observe.source.available", "mdraid")]
+    assert "observe.source.reason" not in by[("observe.source.present", "zfs")]
+    req = otlp.build_metrics_requests("e", {"host.name": "h"}, pts, compress=False).requests[0]
+    tree = decode(req.body, "metrics")
+    seen = {}
+    for sm in tree["resourceMetrics"][0]["scopeMetrics"]:
+        for me in sm["metrics"]:
+            for dp in me["gauge"]["dataPoints"]:
+                attrs = {kv["key"]: kv["value"]["stringValue"] for kv in dp["attributes"]}
+                seen[(me["name"], attrs["observe.source"])] = attrs.get("observe.source.reason")
+    assert seen[("observe.source.available", "zfs")] == "permission denied"
+    assert seen[("observe.source.available", "cpu")] is None

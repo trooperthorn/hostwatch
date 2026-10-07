@@ -487,13 +487,19 @@ def map_samples(samples: Iterable[Sample], ctx: MapContext | None = None) -> lis
 
 # -- source status and heartbeat -----------------------------------------------------------
 
+MAX_REASON = 512
+
+
 def map_source_status(statuses: Iterable[SourceStatus], ts: float) -> list[Point]:
     out = []
     for st in statuses:
         scope = scope_name(st.source)
         attrs: dict[str, Attr] = {"observe.source": st.source}
+        avail_attrs = dict(attrs)
+        if not st.available and st.reason:
+            avail_attrs["observe.source.reason"] = st.reason[:MAX_REASON]
         out.append(Point(scope, "observe.source.available", "1", GAUGE, 1.0 if st.available else 0.0, ts,
-                         dict(attrs)))
+                         avail_attrs))
         out.append(Point(scope, "observe.source.present", "1", GAUGE, 1.0 if st.present else 0.0, ts,
                          dict(attrs)))
     return out
@@ -556,7 +562,7 @@ def map_source_change(source: str, available: bool, reason: str, ts: float) -> L
     body = f"{source} available" if available else f"{source} unavailable" + (f": {reason}" if reason else "")
     attrs: dict[str, Attr] = {"observe.source": source}
     if reason:
-        attrs["observe.source.reason"] = reason
+        attrs["observe.source.reason"] = reason[:MAX_REASON]
     return LogRecord(EVENT_SCOPE, ts, "observe.source.change", 13, "WARN", body, attrs)
 
 

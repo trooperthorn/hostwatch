@@ -25,12 +25,16 @@ from __future__ import annotations
 import gzip
 import hashlib
 import json
+import logging
 import math
+import re
 import struct
 from dataclasses import dataclass
 from typing import Any, Callable, Iterable, Sequence
 
 from .otel_map import LogRecord, Point
+
+log = logging.getLogger("hostwatch.otlp")
 
 PROTOBUF = "application/x-protobuf"
 JSON = "application/json"
@@ -57,6 +61,20 @@ INT64_MIN, INT64_MAX = -(1 << 63), (1 << 63) - 1
 
 Attr = str | int | float | bool
 
+# Characters that cannot travel in an OTLP string: C0 and C1 controls other than tab, newline and
+# carriage return, and any surrogate code point, which has no UTF-8 form when it stands alone.
+# The pattern is written with escapes so the source file itself holds no such characters.
+_BAD_CHARS = re.compile("[\x00-\x08\x0b\x0c\x0e-\x1f\x7f-\x9f" + chr(0xD800) + "-" + chr(0xDFFF) + "]")
+REPLACEMENT = chr(0xFFFD)
+
+
+def clean_text(value: Any, limit: int | None = None) -> str:
+    """A string that always encodes as UTF-8: unpaired surrogates and control characters are
+    replaced by U+FFFD and the result is cut to `limit` characters. The cap is applied after the
+    replacement, so the length that is checked is the length that is sent."""
+    text = _BAD_CHARS.sub(REPLACEMENT, value if isinstance(value, str) else str(value))
+    return text if limit is None else text[:limit]
+
 
 class OtlpError(ValueError):
     """A request cannot be built within the limits."""
@@ -76,6 +94,7 @@ class OtlpRequest:
 class BuiltRequests:
     requests: list[OtlpRequest]
     skipped: int  # points or records left out because Observe would refuse them
+    quarantined: int = 0  # items that could not be encoded at all, even after cleaning their strings
 
 
 # -- the JSON shape -------------------------------------------------------------------------
@@ -91,12 +110,12 @@ def _any_value(value: Attr) -> dict[str, Any]:
     if isinstance(value, int):
         if INT64_MIN <= value <= INT64_MAX:
             return {"intValue": str(value)}
-        return {"stringValue": str(value)[:MAX_ATTR_VALUE]}
+        return {"stringValue": clean_text(value, MAX_ATTR_VALUE)}
     if isinstance(value, float):
         if math.isfinite(value):
             return {"doubleValue": value}
         return {"stringValue": repr(value)}
-    return {"stringValue": str(value)[:MAX_ATTR_VALUE]}
+    return {"stringValue": clean_text(value, MAX_ATTR_VALUE)}
 
 
 def _attributes(attrs: dict[str, Attr], limit: int) -> list[dict[str, Any]]:
@@ -104,6 +123,7 @@ def _attributes(attrs: dict[str, Attr], limit: int) -> list[dict[str, Any]]:
     the limit are cut, so one odd attribute never costs the whole point."""
     out: list[dict[str, Any]] = []
     for key, value in attrs.items():
+        key = clean_text(key)
         if not key or len(key) > MAX_ATTR_KEY:
             continue
         if len(out) >= limit:
@@ -120,7 +140,7 @@ def _resource(resource: dict[str, Attr]) -> dict[str, Any]:
     for key in resource:
         if not key or len(key) > MAX_ATTR_KEY:
             raise OtlpError(f"resource attribute key {key!r} is empty or longer than {MAX_ATTR_KEY}")
-    return {"attributes": [{"key": k, "value": _any_value(v)} for k, v in resource.items()]}
+    return {"attributes": [{"key": clean_text(k), "value": _any_value(v)} for k, v in resource.items()]}
 
 
 def _point_ok(p: Point) -> bool:
@@ -139,7 +159,7 @@ def metrics_json(resource: dict[str, Attr], points: Sequence[Point],
         key = (p.name, p.unit, p.kind, p.monotonic)
         metric = scope.get(key)
         if metric is None:
-            metric = {"name": p.name, "unit": p.unit}
+            metric = {"name": clean_text(p.name), "unit": clean_text(p.unit)}
             body: dict[str, Any] = {"dataPoints": []}
             if p.kind == "sum":
                 body["aggregationTemporality"] = CUMULATIVE
@@ -155,7 +175,7 @@ def metrics_json(resource: dict[str, Attr], points: Sequence[Point],
             dp["startTimeUnixNano"] = _ns(min(start_ts, p.ts))
         (metric.get("sum") or metric["gauge"])["dataPoints"].append(dp)
     return {"resourceMetrics": [{"resource": _resource(resource), "scopeMetrics": [
-        {"scope": {"name": name}, "metrics": list(metrics.values())}
+        {"scope": {"name": clean_text(name)}, "metrics": list(metrics.values())}
         for name, metrics in scopes.items()]}]}
 
 
@@ -169,14 +189,14 @@ def logs_json(resource: dict[str, Attr], records: Sequence[LogRecord]) -> dict[s
     event.name attribute, which is where Observe reads it."""
     scopes: dict[str, list[dict[str, Any]]] = {}
     for r in records:
-        attrs: dict[str, Attr] = {"event.name": r.event_name}
+        attrs: dict[str, Attr] = {"event.name": clean_text(r.event_name)}
         attrs.update({k: v for k, v in r.attributes.items() if k != "event.name"})
         scopes.setdefault(r.scope, []).append({
             "timeUnixNano": _ns(r.ts), "severityNumber": int(r.severity_number),
-            "severityText": r.severity_text, "body": {"stringValue": r.body},
+            "severityText": clean_text(r.severity_text), "body": {"stringValue": clean_text(r.body)},
             "attributes": _attributes(attrs, MAX_POINT_ATTRS)})
     return {"resourceLogs": [{"resource": _resource(resource), "scopeLogs": [
-        {"scope": {"name": name}, "logRecords": recs} for name, recs in scopes.items()]}]}
+        {"scope": {"name": clean_text(name)}, "logRecords": recs} for name, recs in scopes.items()]}]}
 
 
 # -- protobuf -------------------------------------------------------------------------------
@@ -288,13 +308,27 @@ def _within_limits(raw: bytes, wire: bytes, compress: bool) -> bool:
 
 
 def _build(signal: str, items: list, make_tree: Callable[[list], dict[str, Any]], entry_id: str,
-           fmt: str, compress: bool, cap: int) -> list[OtlpRequest]:
+           fmt: str, compress: bool, cap: int) -> tuple[list[OtlpRequest], int]:
+    """The requests for `items` and the number of items quarantined. An item that raises while it
+    is encoded is isolated by halving its chunk until it stands alone, and is then left out and
+    counted, so one bad item never stops the others from being queued."""
     out: list[OtlpRequest] = []
+    quarantined = 0
     queue: list[list] = [items[i:i + cap] for i in range(0, len(items), cap)][::-1]
     while queue:  # a chunk too big for the wire is halved and its halves are sent in order
         chunk = queue.pop()
-        tree = make_tree(chunk)
-        raw = to_protobuf(tree, signal) if fmt == "protobuf" else to_json(tree)
+        try:
+            tree = make_tree(chunk)
+            raw = to_protobuf(tree, signal) if fmt == "protobuf" else to_json(tree)
+        except Exception as exc:  # an encoding failure of the data, not of the limits
+            if len(chunk) == 1:
+                quarantined += 1
+                log.warning("a %s item could not be encoded and was quarantined: %s: %s", signal,
+                            type(exc).__name__, exc)
+                continue
+            mid = len(chunk) // 2
+            queue.extend([chunk[mid:], chunk[:mid]])
+            continue
         wire = _gzip(raw) if compress else raw
         if not _within_limits(raw, wire, compress):
             if len(chunk) == 1:
@@ -308,7 +342,7 @@ def _build(signal: str, items: list, make_tree: Callable[[list], dict[str, Any]]
             headers["Content-Encoding"] = "gzip"
         out.append(OtlpRequest(signal, METRICS_PATH if signal == "metrics" else LOGS_PATH, headers,
                                wire, len(chunk), len(raw)))
-    return out
+    return out, quarantined
 
 
 def _check_format(fmt: str) -> None:
@@ -324,8 +358,9 @@ def build_metrics_requests(entry_id: str, resource: dict[str, Attr], points: Ite
     _resource(resource)
     every = list(points)
     good = [p for p in every if _point_ok(p)]
-    return BuiltRequests(_build("metrics", good, lambda c: metrics_json(resource, c, start_ts),
-                                entry_id, fmt, compress, MAX_POINTS), len(every) - len(good))
+    requests, quarantined = _build("metrics", good, lambda c: metrics_json(resource, c, start_ts),
+                                   entry_id, fmt, compress, MAX_POINTS)
+    return BuiltRequests(requests, len(every) - len(good), quarantined)
 
 
 def build_logs_requests(entry_id: str, resource: dict[str, Attr], records: Iterable[LogRecord], *,
@@ -335,8 +370,9 @@ def build_logs_requests(entry_id: str, resource: dict[str, Attr], records: Itera
     _resource(resource)
     every = list(records)
     good = [r for r in every if _record_ok(r)]
-    return BuiltRequests(_build("logs", good, lambda c: logs_json(resource, c), entry_id, fmt,
-                                compress, MAX_RECORDS), len(every) - len(good))
+    requests, quarantined = _build("logs", good, lambda c: logs_json(resource, c), entry_id, fmt,
+                                   compress, MAX_RECORDS)
+    return BuiltRequests(requests, len(every) - len(good), quarantined)
 
 
 # -- responses ------------------------------------------------------------------------------
