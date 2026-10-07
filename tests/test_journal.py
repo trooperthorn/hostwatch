@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import subprocess
 import threading
@@ -119,17 +120,42 @@ def test_default_reader_without_binary(monkeypatch, tmp_path):
         journal.default_reader(tmp_path, None)
 
 
+class FakePopen:
+    """A journalctl that has already written `out` and exits with `code` after writing `err`."""
+
+    def __init__(self, cmd, out="", err="", code=0, **kw):
+        self.cmd = cmd
+        self.stdout = io.BytesIO(out.encode())
+        if err:
+            kw["stderr"].write(err.encode())
+        self.returncode = code
+
+    def poll(self):
+        return self.returncode
+
+    def kill(self):
+        self.returncode = -9
+
+    def wait(self):
+        return self.returncode
+
+
+def fake_popen(monkeypatch, **fixed):
+    seen = []
+
+    def make(cmd, **kw):
+        seen.append(cmd)
+        return FakePopen(cmd, **fixed, **kw)
+
+    monkeypatch.setattr(journal.subprocess, "Popen", make)
+    return seen
+
+
 def test_default_reader_command_is_read_only(monkeypatch, tmp_path):
-    seen = {}
     monkeypatch.setattr(journal.shutil, "which", lambda name: "/usr/bin/journalctl")
-
-    def fake_run(cmd, **kw):
-        seen["cmd"] = cmd
-        return subprocess.CompletedProcess(cmd, 0, stdout='{"a": 1}\n', stderr="")
-
-    monkeypatch.setattr(journal.subprocess, "run", fake_run)
+    cmds = fake_popen(monkeypatch, out='{"a": 1}\n')
     assert journal.default_reader(tmp_path, "c9") == ['{"a": 1}']
-    assert seen["cmd"][1:] == [f"--directory={tmp_path}", "-o", "json", "--no-pager", "--after-cursor", "c9"]
+    assert cmds[0][1:] == [f"--directory={tmp_path}", "-o", "json", "--no-pager", "--after-cursor", "c9"]
 
 
 def test_default_reader_nonzero_exit(monkeypatch, tmp_path):
@@ -285,10 +311,11 @@ def test_rejected_cursor_resets_emits_event_and_recovers(monkeypatch, dirs):
     monkeypatch.setattr(journal.shutil, "which", lambda name: "/usr/bin/journalctl")
     calls = []
 
+    monkeypatch.setattr(journal.subprocess, "Popen", lambda cmd, **kw: calls.append(cmd[1:]) or FakePopen(
+        cmd, err="Failed to seek to cursor: No data available", code=1, **kw))
+
     def fake_run(cmd, **kw):
         calls.append(cmd[1:])
-        if "--after-cursor" in cmd:
-            return completed(cmd, err="Failed to seek to cursor: No data available", code=1)
         if "--boot=-1" in cmd:
             return completed(cmd, code=1, err="No journal boot entry found")
         return completed(cmd, out=json.dumps(entry(1, "ata3: hard resetting link")) + "\n")
@@ -303,7 +330,7 @@ def test_rejected_cursor_resets_emits_event_and_recovers(monkeypatch, dirs):
     assert watcher.load_cursor() == "c1"
     # The next read uses the new cursor, so no reset is repeated.
     calls.clear()
-    monkeypatch.setattr(journal.subprocess, "run", lambda cmd, **kw: completed(cmd))
+    fake_popen(monkeypatch)
     status, events = watcher.read()
     assert status.available and events == []
 

@@ -412,6 +412,7 @@ HANDLERS: dict[tuple[str, str], Any] = {
     ("win_thermalsuite", "zone_duty"): _zone_ratio("observe.thermal.zone.duty"),
     ("win_thermalsuite", "fan_target"): _fan_target,
     ("win_thermalsuite", "failsafe"): _failsafe,
+    ("thermalctl", "failsafe"): _failsafe,
 }
 # The design table names the SMART metrics under win_storage; the collector that reads them is
 # registered as win_smartctl. Both source ids map the same way.
@@ -569,12 +570,15 @@ def map_source_change(source: str, available: bool, reason: str, ts: float) -> L
     return LogRecord(EVENT_SCOPE, ts, "observe.source.change", 13, "WARN", body, attrs)
 
 
+FAILSAFE_SOURCES = ("win_thermalsuite", "thermalctl")
+
+
 def failsafe_logs(samples: Iterable[Sample]) -> list[LogRecord]:
     """3.3: one WARN log per failsafe reason on a failsafe sample. The sender decides when to send
     it, so a steady failsafe is not logged every cycle."""
     out = []
     for s in samples:
-        if s.metric != "failsafe" or s.source != "win_thermalsuite":
+        if s.metric != "failsafe" or s.source not in FAILSAFE_SOURCES:
             continue
         for reason in [r for r in s.labels.get("reasons", "").split(",") if r]:
             out.append(LogRecord(scope_name(s.source), s.ts, "observe.thermal.failsafe", 13, "WARN",

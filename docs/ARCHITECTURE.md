@@ -88,6 +88,24 @@ redacted, so a printed or logged `Config` never shows it. The NUT password is he
 file path. The redaction covers repr only; code that formats a secret with `str()` still gets
 the value.
 
+## Detection and recovery
+
+Detection and collection never run on the main loop. `detect()` of each collector runs on its own
+worker thread (`Agent._start_detect`), under the collector's time limit, so an unreachable TrueNAS,
+NUT or Scrutiny holds up no other source and no event. The loop starts a round when none is running
+and the last one is older than `HOSTWATCH_REDETECT`, waits a quarter of a second once so a quick source
+is known in the same pass, and afterwards only looks at the round. Until a collector has answered its
+status is a pending placeholder (`detection in progress`) and it is not read. A detect that does not
+answer within the collector's time limit marks a source that never answered unavailable with that
+reason; a source that already had an answer keeps it and is asked again at the next round. The
+synchronous `Agent.detect()` remains for the command line and tests.
+
+A collector that fails after it was detected (an `OSError`, a bad answer or a timeout) is not left
+blind until the next detection. It is read again on the next tier run or watched read once a back-off
+has passed: 5 seconds after the first failure, doubling with each failure in a row, never longer than
+`HOSTWATCH_REDETECT`. A successful read clears the back-off and the source is available again. A
+configured network source (`retry_each_cycle`) is still read on every cycle.
+
 ## Data flow
 
 ```
@@ -135,6 +153,9 @@ host spin nor silence a tier. A tier that is missing, not a number, not finite o
 current rate. When Observe cannot be reached or refuses the key, the rates in force stay (the
 defaults before the first answer) and the agent asks again after one minute, logging only when the
 outcome changes. A lowered rate applies at once: no tier waits longer than its new interval.
+The request runs on a worker thread and the loop waits for it a quarter of a second at most, so an
+Observe that does not answer never holds up event collection; a request that has not answered after
+30 seconds counts as a failure, and no second request starts while one is still running.
 
 A tier that is due runs once and is rescheduled one interval after its due time, so a slow collector
 does not stretch the cadence, and an agent that fell behind does not burst. One tier run is one
@@ -320,7 +341,13 @@ persistent directory has no readable journal files, the watcher reads
 `HOSTWATCH_JOURNAL_VOLATILE` (default `/host/journal-volatile`) instead. The
 first read with no saved cursor is bounded: `--boot=0` and `--boot=-1`, each
 with `-n 5000`; a missing previous boot is tolerated. Later reads use
-`--after-cursor`. If `journalctl` rejects the saved cursor (for example because
+`--after-cursor` and stream the output: the reader stops journalctl after one batch of 20000 lines or
+8 MiB, or at the 30 second limit, and keeps whatever it read. The cursor moves to the last entry of
+the batch, so a backlog of any size (a host that was off the agent for days, or a journal with a burst of
+messages) is worked off batch after batch instead of timing out and starting again from the same
+cursor, and memory holds one batch. While a batch ends at its limit the event read repeats every
+half a second instead of every five seconds. For a 100 MB backlog one read used to hold the whole
+output (about 220 MB of Python allocations in the audit measurement); a batch holds about 7 MB. If `journalctl` rejects the saved cursor (for example because
 the entry was rotated out), the watcher drops the cursor, repeats the bounded
 first read, emits a `journal.cursor_reset` warning event (dedup key from the
 rejected cursor) and stays available. A first read that reaches the cap adds a
@@ -775,7 +802,12 @@ The flags, the raw bitmask and the SoC temperature are sent as metrics; deciding
 
 ### Fan controller (thermalctl)
 
-The `thermalctl` collector reads one JSON file, `/run/thermalctl/status.json` by default or the path in `HOSTWATCH_THERMALCTL_STATUS`, which the thermalctl service in the thermal-control-linux repo writes atomically each cycle. It emits `zone_temp` (C) and `zone_load` (%) per zone with a `zone` label, and for each header a `fan_duty` (%) and a `fan` (RPM) sample. The header samples carry the labels `chip=thermalctl`, `sensor=<header id>`, `state`, `mode` and `reasons` (the failsafe reasons joined with commas), so they are sent as fan metrics beside the hwmon fans. A value the controller could not measure is a sample with no value, never zero.
+The `thermalctl` collector reads one JSON file, `/run/thermalctl/status.json` by default or the path in `HOSTWATCH_THERMALCTL_STATUS`, which the thermalctl service in the thermal-control-linux repo writes atomically each cycle. It emits `zone_temp` (C) and `zone_load` (%) per zone with a `zone` label, and for each header a `fan_duty` (%) and a `fan` (RPM) sample. The header samples carry the labels `chip=thermalctl`, `sensor=<header id>`, `state`, `mode` and `reasons` (the failsafe reasons joined with commas), so they are sent as fan metrics beside the hwmon fans. A value the controller could not measure is a sample with no value, never zero. A `failsafe` sample (unit
+`count`, label `reasons`) carries the number of active failsafe reasons over all headers, each reason written
+`<header>:<reason>` (a header in the `failsafe` state with no reason counts once as `<header>:failsafe`), and is 0
+with no reasons when the controller is healthy. It is sent as the `observe.thermal.failsafe` gauge and, when a
+reason first appears, as one `observe.thermal.failsafe` WARN log per reason, exactly as for the Windows
+thermal suite.
 
 The source is unavailable, with a reason, when the file cannot be read, is not a JSON object, has no numeric timestamp, or its timestamp is more than 60 seconds old, since a stopped controller leaves its last file behind. It is reported not present only on positive evidence: the directory that would hold the file is readable and the file is missing, or the directory is missing from a readable parent, which is the normal case on a host that never ran thermalctl. A header whose state label is `failsafe` carries the controller's reasons; the controller drives the fan at full speed in that state, so it is a warning and not a fan fault.
 

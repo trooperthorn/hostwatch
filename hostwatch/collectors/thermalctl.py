@@ -6,6 +6,8 @@ by default /run/thermalctl/status.json. This collector only reads that file. Rep
   zone_load   percent per zone, label zone=<id>
   fan_duty    percent per header, unit %, labels chip=thermalctl, sensor=<header>, state, mode, reasons
   fan         rpm per header, unit RPM, the same labels
+  failsafe    count of active failsafe reasons over all headers, unit count, label reasons
+              (comma joined <header>:<reason>); 0 with empty reasons when no header is in failsafe
 
 The fan rows use the chip and sensor labels so each header is sent as a fan
 next to the hwmon fans. The state label is the controller state for the header (a
@@ -107,6 +109,7 @@ class ThermalctlCollector(Collector):
         if doc is None:
             raise ThermalctlError(reason)
         out = []
+        failsafe: list[str] = []
         mode = str(doc.get("mode", ""))
         zones = doc.get("zones")
         for zid, z in sorted((zones if isinstance(zones, dict) else {}).items()):
@@ -119,8 +122,13 @@ class ThermalctlCollector(Collector):
             if not isinstance(h, dict):
                 continue
             reasons = h.get("reasons")
+            if isinstance(reasons, list):
+                failsafe.extend(f"{hid}:{r}" for r in reasons)
+            if h.get("state") == "failsafe" and not (isinstance(reasons, list) and reasons):
+                failsafe.append(f"{hid}:failsafe")  # a failsafe header that names no reason is still one
             labels = {"chip": CHIP, "sensor": hid, "state": str(h.get("state", "")), "mode": mode,
                       "reasons": ",".join(str(r) for r in reasons) if isinstance(reasons, list) else ""}
             out.append(self.sample("fan_duty", _num(h.get("duty")), "%", **labels))
             out.append(self.sample("fan", _num(h.get("rpm")), "RPM", **labels))
+        out.append(self.sample("failsafe", float(len(failsafe)), "count", reasons=",".join(failsafe)))
         return out

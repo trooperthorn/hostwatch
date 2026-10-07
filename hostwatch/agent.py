@@ -10,7 +10,9 @@ Events are not held to a tier. Every EVENT_POLL_S seconds the agent reads its ev
 seconds, the cheap local sources whose state changes are events (RAID, ZFS, UPS) and the health probe of
 the slow storage sources (Scrutiny, Windows storage, SMART, TrueNAS), and sends what it finds as OTLP logs
 at once. A storage poll that runs every fifteen minutes therefore never delays a failure. Collectors run on
-worker threads with a time limit (runner.py), so a slow one never holds up the event read.
+worker threads with a time limit (runner.py), so a slow one never holds up the event read. Source
+detection and the agent-config request run on worker threads as well, and a collector that fails after
+it was detected is read again after a short back-off instead of at the next full detection.
 
 Requests go to POST /v1/metrics and POST /v1/logs only. They are written to a durable outbox
 first and leave it only after Observe answers 2xx, so an Observe outage or an agent restart does
@@ -31,6 +33,7 @@ import time
 import uuid
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
@@ -72,6 +75,17 @@ WATCH_S = 15.0
 # the loop looks at it again on its next pass, so a slow or hung collector never holds up events.
 EVENT_GRACE_S = 0.25
 TIER_GRACE_S = 0.25
+# How long a freshly started detection round or agent-config request is waited for. Whatever has not
+# answered by then keeps running on its worker and is picked up by a later pass.
+DETECT_GRACE_S = 0.25
+CONFIG_GRACE_S = 0.25
+# An agent-config request that has not answered after this long is given up on and counted as a failure.
+CONFIG_HANG_S = 3 * tiers.CONFIG_TIMEOUT_S
+# A collector that failed after it was detected is tried again after this long, doubling with every
+# further failure up to redetect_s, instead of waiting for the next full detection.
+COLLECT_RETRY_BASE_S = 5.0
+# While the journal has more batches waiting, the event read repeats this often instead of every EVENT_POLL_S.
+DRAIN_POLL_S = 0.5
 
 # A send that is slow must not hold a stop request for long.
 SEND_TIMEOUT_S = 5.0
@@ -152,6 +166,10 @@ class Agent:
         # clock, which counts from host boot on Linux, so a host up for less than redetect_s would
         # never detect its sources.
         self._last_detect: float | None = None
+        # Collectors whose detection is in flight: (collector, job, runner key).
+        self._detect_round: list[tuple] = []
+        # Collectors that failed after they were detected: id -> (failures in a row, retry not before).
+        self._retry: dict[str, tuple[int, float]] = {}
         self._stop = threading.Event()
         self.heartbeat: boot.Heartbeat | None = None
         self._next_beat = 0.0
@@ -225,25 +243,60 @@ class Agent:
 
     # -- rates from Observe ------------------------------------------------------------------
 
-    def fetch_config(self, client: httpx.Client) -> bool:
-        """Ask Observe for this host's tier rates and apply them. Returns True when the rates
-        changed. A failure of any kind keeps the rates in force and is logged once per change of
-        outcome, so an Observe that is down does not fill the log."""
+    def _request_config(self, client: httpx.Client) -> tuple[str, Any]:
+        """The network half of a config fetch, run on a worker thread. Returns ("ok", body) or
+        ("fail", reason). It touches no agent state."""
         url = self.cfg.observe_url + tiers.AGENT_CONFIG_PATH
         try:
             r = client.get(url, headers={"Authorization": f"Bearer {self.cfg.ingest_key}"},
                            timeout=tiers.CONFIG_TIMEOUT_S)
             if r.status_code in (401, 403):
-                self._config_failed(f"Observe refused the ingest key ({r.status_code}); check "
-                                    "HOSTWATCH_INGEST_KEY")
-                return False
+                return "fail", f"Observe refused the ingest key ({r.status_code}); check HOSTWATCH_INGEST_KEY"
             r.raise_for_status()
-            body = r.json()
+            return "ok", r.json()
         except httpx.HTTPStatusError as exc:
-            self._config_failed(f"Observe answered {exc.response.status_code} for agent-config")
-            return False
+            return "fail", f"Observe answered {exc.response.status_code} for agent-config"
         except Exception as exc:  # unreachable, a bad answer or invalid JSON: all keep the current rates
-            self._config_failed(f"Observe could not be reached for agent-config: {type(exc).__name__}: {exc}")
+            return "fail", f"Observe could not be reached for agent-config: {type(exc).__name__}: {exc}"
+
+    def fetch_config(self, client: httpx.Client) -> bool:
+        """Ask Observe for this host's tier rates and apply them, waiting for the answer. Returns True
+        when the rates changed. A failure of any kind keeps the rates in force and is logged once per
+        change of outcome, so an Observe that is down does not fill the log. The loop does not call
+        this: it uses `_poll_config`, which never waits for an unreachable Observe."""
+        return self._apply_config(self._request_config(client))
+
+    def _poll_config(self, client: httpx.Client, now: float) -> None:
+        """Start a config fetch when one is due and apply the answer of a finished one. The request
+        runs on a worker thread and is waited for only CONFIG_GRACE_S, so an unreachable Observe never
+        holds up event collection."""
+        job = self.runner.current("config")
+        if job is not None and job.done and job.abandoned:
+            self.runner.finish("config")  # its answer came after it was given up on
+            job = None
+        started = False
+        if job is None:
+            if now < self._config_next:
+                return
+            job = self.runner.start("config", lambda: self._request_config(client))
+            started = True
+        if started:
+            job.wait(CONFIG_GRACE_S)
+        if job.done:
+            self.runner.finish("config")
+            try:
+                outcome = job.value()
+            except Exception as exc:
+                outcome = ("fail", f"agent-config could not be read: {type(exc).__name__}: {exc}")
+            self._apply_config(outcome)
+        elif job.age() > CONFIG_HANG_S and not job.abandoned:
+            job.abandoned = True
+            self._config_failed(f"Observe gave no answer for agent-config within {CONFIG_HANG_S:g}s")
+
+    def _apply_config(self, outcome: tuple[str, Any]) -> bool:
+        kind, body = outcome
+        if kind != "ok":
+            self._config_failed(body)
             return False
         rates = tiers.parse_agent_config(body)
         if rates is None:
@@ -373,31 +426,103 @@ class Agent:
             out.append(boot.boot_event(boot.missed_boot_classification(rec, hints, why, prev_id)))
         return out
 
-    def detect(self) -> None:
+    def _probe_source(self, c) -> tuple[bool, str, bool]:
+        """Detection of one collector, run on its worker thread: whether the source is there, why not,
+        and whether the host positively has no such source."""
+        try:
+            ok, reason = c.detect()
+        except Exception as exc:
+            ok, reason = False, f"detect error: {type(exc).__name__}: {exc}"
+        absent = False
+        if not ok:
+            try:
+                absent = c.is_absent()
+            except Exception as exc:
+                log.warning("source %s: could not establish absence: %s", c.id, exc)
+        return ok, reason, absent
+
+    def _apply_detect(self, c, ok: bool, reason: str, absent: bool) -> None:
+        prev = self.status.get(c.id)
+        if prev is None or prev.pending or prev.available != ok:
+            log.info("source %s: %s %s", c.id, "available" if ok else "unavailable", reason)
+        self._retry.pop(c.id, None)  # detection is the authority on whether the source is there
+        self.status[c.id] = SourceStatus(source=c.id, available=ok, reason=reason, present=not absent)
+
+    def _start_detect(self) -> None:
+        """Begin a detection round: one worker per collector, so a source that cannot answer (an
+        unreachable TrueNAS, NUT or Scrutiny) holds up nobody else. Until a collector has answered
+        once its status is a pending placeholder, and the collector is not read."""
+        self._last_detect = self._clock()
         for c in self.collectors:
-            absent = False
             if self.platform == "windows" and c.linux_only:
                 # Nothing was probed: these sources read sysfs, procfs or /run, which a Windows host
                 # does not have, so they are not present rather than present but unavailable.
-                ok, reason, absent = False, f"{c.id} reads Linux-only locations and is not present on Windows", True
+                self._apply_detect(c, False, f"{c.id} reads Linux-only locations and is not present on Windows",
+                                   True)
+                continue
+            if c.id not in self.status:
+                self.status[c.id] = SourceStatus(source=c.id, available=False, reason="detection in progress",
+                                                 pending=True)
+            key = f"{c.id}:detect"
+            self._detect_round.append((c, self.runner.start(key, lambda c=c: self._probe_source(c), c.id), key))
+
+    def _settle_detect(self, wait_s: float | None) -> None:
+        """Take the answers of the detection round. A worker past its collector's time limit is given
+        up on: a source that never answered is reported unavailable with that reason, and a source that
+        already had an answer keeps it. With `wait_s` None this waits for every worker up to its limit;
+        otherwise for at most `wait_s` in total."""
+        deadline = None if wait_s is None else time.monotonic() + wait_s
+        remaining: list[tuple] = []
+        for c, job, key in self._detect_round:
+            limit = c.time_limit_s
+            room = limit - job.age() if deadline is None else min(limit - job.age(), deadline - time.monotonic())
+            job.wait(max(0.0, room))
+            if job.done:
+                self.runner.finish(key)
+                try:
+                    ok, reason, absent = job.value()
+                except Exception as exc:
+                    ok, reason, absent = False, f"detect error: {type(exc).__name__}: {exc}", False
+                self._apply_detect(c, ok, reason, absent)
+            elif job.age() >= limit:
+                if not job.abandoned:
+                    job.abandoned = True
+                    why = f"detect error: CollectorTimeout: no answer within {limit:g}s"
+                    log.warning("source %s: %s", c.id, why)
+                    prev = self.status.get(c.id)
+                    if prev is None or prev.pending:
+                        self._apply_detect(c, False, why, False)
             else:
-                try:
-                    ok, reason = c.detect()
-                except Exception as exc:
-                    ok, reason = False, f"detect error: {type(exc).__name__}: {exc}"
-            prev = self.status.get(c.id)
-            if prev is None or prev.available != ok:
-                log.info("source %s: %s %s", c.id, "available" if ok else "unavailable", reason)
-            if not ok and not absent:
-                try:
-                    absent = c.is_absent()
-                except Exception as exc:
-                    log.warning("source %s: could not establish absence: %s", c.id, exc)
-            self.status[c.id] = SourceStatus(source=c.id, available=ok, reason=reason, present=not absent)
-        self._last_detect = self._clock()
+                remaining.append((c, job, key))
+        self._detect_round = remaining
+
+    def _service_detect(self, grace_s: float | None, block: bool = False) -> None:
+        """Keep detection moving without waiting for it. A round is started when none is running and
+        the last one is older than redetect_s, then given `grace_s` once so a quick source is known
+        in the same pass. After that a round is only looked at, never waited for. `block` waits for
+        the whole round, for a caller that has to read the sources straight away."""
+        started = False
+        if not self._detect_round and (self._last_detect is None
+                                       or self._clock() - self._last_detect > self.cfg.redetect_s):
+            self._start_detect()
+            started = True
+        if self._detect_round:
+            self._settle_detect(None if block else (grace_s if started else 0.0))
+
+    def detect(self) -> None:
+        """Detect every source and wait for the answers, each within its time limit. The loop does
+        not call this: it uses `_service_detect`, which never waits for a slow source."""
+        if not self._detect_round:
+            self._start_detect()
+        self._settle_detect(None)
 
     def _retry_now(self, c) -> bool:
-        """A configured polled source is tried again every cycle after a failure."""
+        """Whether an unavailable source is read again now. A source that failed after it was
+        detected is tried again once its back-off has passed. A configured polled source is tried
+        again every cycle."""
+        failed = self._retry.get(c.id)
+        if failed is not None:
+            return self._clock() >= failed[1]
         if not c.retry_each_cycle:
             return False
         try:
@@ -408,8 +533,7 @@ class Agent:
     # -- collection --------------------------------------------------------------------------
 
     def _ensure_detected(self) -> None:
-        if self._last_detect is None or self._clock() - self._last_detect > self.cfg.redetect_s:
-            self.detect()
+        self._service_detect(DETECT_GRACE_S, block=True)
 
     def _launch(self, tier: str | None, watched: bool) -> list[tuple]:
         """Start a worker for each collector of the tier (or each watched or probed collector when
@@ -459,6 +583,7 @@ class Agent:
         return samples, pending
 
     def _record(self, c, samples: list[Sample]) -> list[Sample]:
+        self._retry.pop(c.id, None)
         if not self.status[c.id].available:
             log.info("source %s: available again", c.id)
             self.status[c.id] = SourceStatus(source=c.id, available=True, reason="")
@@ -466,6 +591,12 @@ class Agent:
 
     def _record_failure(self, c, exc: BaseException) -> None:
         log.warning("collector %s failed: %s", c.id, exc)
+        if not c.retry_each_cycle:
+            # One transient error must not blind the source until the next full detection: read it
+            # again after a short back-off that doubles with each failure in a row.
+            failures = self._retry.get(c.id, (0, 0.0))[0] + 1
+            wait = min(COLLECT_RETRY_BASE_S * 2 ** (failures - 1), max(COLLECT_RETRY_BASE_S, self.cfg.redetect_s))
+            self._retry[c.id] = (failures, self._clock() + wait)
         self.status[c.id] = SourceStatus(source=c.id, available=False,
                                          reason=f"collect error: {type(exc).__name__}: {exc}")
 
@@ -475,7 +606,10 @@ class Agent:
         limit. The watched read waits only EVENT_GRACE_S and leaves a slow collector to finish for a
         later read, so it is safe on the event path; a tier read waits for each collector up to its
         limit."""
-        self._ensure_detected()
+        if watched:
+            self._service_detect(DETECT_GRACE_S)  # the event path never waits for a slow source
+        else:
+            self._ensure_detected()
         samples, _ = self._settle(self._launch(tier, watched), EVENT_GRACE_S if watched else None)
         return samples
 
@@ -534,7 +668,7 @@ class Agent:
         self._complete_tier(tier, self.collect_samples(tier))
 
     def _begin_tier(self, tier: str) -> None:
-        self._ensure_detected()
+        self._service_detect(DETECT_GRACE_S)
         self._tier_runs[tier] = _TierRun(self._launch(tier, False))
 
     def _harvest_tier(self, tier: str) -> None:
@@ -625,14 +759,14 @@ class Agent:
         """One pass of the loop: refresh the rates when due, run every tier that is due, read the
         events when due, then try to deliver. Nothing here may raise."""
         now = self._clock()
-        if now >= self._config_next:
-            self.fetch_config(client)
+        self._poll_config(client, now)
         self._beat_if_due(now)
         # Events come first, so the first availability report already names the event sources.
         if now >= self._next_events:
             watch = now >= self._next_watch
             self._guard("event read", lambda: self.event_cycle(watch))
-            self._next_events = now + tiers.EVENT_POLL_S
+            # A journal backlog that is being worked off in batches is read again at once.
+            self._next_events = now + (DRAIN_POLL_S if self.journal.draining else tiers.EVENT_POLL_S)
             if watch:
                 self._next_watch = now + WATCH_S
             # Send the events before a slow tier can hold them back.
@@ -734,7 +868,7 @@ class Agent:
         """The loop. It writes the clean-shutdown flag itself when it exits, so a
         signal handler only has to call stop()."""
         try:
-            self.detect()
+            self._service_detect(DETECT_GRACE_S)
             self._guarded_boot_check()
             with httpx.Client(verify=observe_tls_verify(self.cfg)) as client:
                 while not self._stop.is_set():

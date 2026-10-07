@@ -2,7 +2,9 @@
 
 The journal is read through journalctl with --directory pointing at the
 journal mounted read-only into the container, so the container never writes to
-it. When the persistent directory holds no journal files, the volatile
+it. A read after a saved cursor streams journalctl's output and stops after one bounded batch
+(BATCH_MAX_LINES lines or BATCH_MAX_BYTES bytes, or the time limit), so a large backlog is worked
+off batch by batch, each batch moving the cursor, and memory stays bounded. When the persistent directory holds no journal files, the volatile
 directory (HOSTWATCH_JOURNAL_VOLATILE) is read instead. Output is requested as JSON, one object per line. The last cursor seen is
 saved in the data directory, and the next read passes it as --after-cursor, so
 a restart does not repeat entries.
@@ -20,6 +22,7 @@ import json
 import re
 import shutil
 import subprocess
+import tempfile
 import threading
 import time
 from collections.abc import Callable, Iterable
@@ -33,6 +36,11 @@ CURSOR_FILE = "journal.cursor"
 CURSOR_MARKER = "journal.cursor"
 JOURNALCTL_TIMEOUT_S = 30
 FIRST_READ_MAX_LINES = 5000
+# One read after a cursor stops at the first of these limits. The next read continues from the last
+# entry of the batch, so a backlog of any size is worked off in steps and never held in memory whole.
+BATCH_MAX_LINES = 20000
+BATCH_MAX_BYTES = 8 * 1024 * 1024
+STDERR_KEEP_BYTES = 4096
 WORKER_TIMEOUT_S = 60
 # Messages journalctl prints on stderr that do not mean a failure.
 BENIGN_STDERR = ("-- no entries --", "-- journal begins")
@@ -54,6 +62,8 @@ class LineList(list):
     entries were left out."""
 
     truncated = False
+    # True when the read stopped at its batch limit, so more entries follow the last one.
+    more = False
 
 
 # (compiled pattern, event kind, severity, short title). The first match wins,
@@ -103,17 +113,73 @@ def _run_journalctl(exe: str, directory: Path, extra: list[str]) -> list[str]:
     return lines
 
 
+def _read_batch(exe: str, directory: Path, cursor: str) -> LineList:
+    """Stream journalctl after `cursor` and stop after one batch. The process is stopped as soon as
+    the batch is full or the time limit passes, whatever the backlog holds. A read that hits the time
+    limit but already has lines returns them, so the cursor still moves; one that has none is an error."""
+    cmd = [exe, f"--directory={directory}", "-o", "json", "--no-pager", "--after-cursor", cursor]
+    with tempfile.TemporaryFile() as err_file:
+        try:
+            proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=err_file)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise ReaderError(f"journalctl could not run: {exc}") from exc
+        timed_out = threading.Event()
+
+        def stop() -> None:
+            timed_out.set()
+            try:
+                proc.kill()
+            except OSError:
+                pass
+
+        timer = threading.Timer(JOURNALCTL_TIMEOUT_S, stop)
+        timer.daemon = True
+        timer.start()
+        lines = LineList()
+        size = 0
+        try:
+            for raw in proc.stdout:
+                lines.append(raw.decode("utf-8", errors="replace").rstrip("\r\n"))
+                size += len(raw)
+                if len(lines) >= BATCH_MAX_LINES or size >= BATCH_MAX_BYTES:
+                    lines.more = True
+                    break
+        except (OSError, ValueError):
+            pass  # the pipe closed under a kill from the timer
+        finally:
+            timer.cancel()
+            if proc.poll() is None:
+                proc.kill()
+            proc.stdout.close()
+            proc.wait()
+        if timed_out.is_set() and lines:
+            lines.more = True
+        err_file.seek(0)
+        stderr = err_file.read(STDERR_KEEP_BYTES).decode("utf-8", errors="replace").strip()
+    if lines:
+        return lines
+    if timed_out.is_set():
+        raise ReaderError(f"journalctl could not run: timed out after {JOURNALCTL_TIMEOUT_S}s with no output")
+    if "cursor" in stderr.lower():
+        raise CursorRejected(f"journalctl rejected the saved cursor: {stderr[:200]}")
+    if proc.returncode != 0:
+        raise ReaderError(f"journalctl exited {proc.returncode}: {stderr[:200]}")
+    if stderr and not stderr.lower().startswith(BENIGN_STDERR):
+        raise ReaderError(f"journalctl produced no output: {stderr[:200]}")
+    return lines
+
+
 def default_reader(directory: Path, cursor: str | None) -> Iterable[str]:
     """Run journalctl read-only against the journal directory.
 
-    With a cursor, only entries after it are read. Without one, the read is
+    With a cursor, only entries after it are read, one bounded batch at a time. Without one, the read is
     bounded to the current and the previous boot with a line cap each, so the
     first read cannot walk a multi-gigabyte journal."""
     exe = shutil.which("journalctl")
     if exe is None:
         raise ReaderError("journalctl is not installed")
     if cursor:
-        return _run_journalctl(exe, directory, ["--after-cursor", cursor])
+        return _read_batch(exe, directory, cursor)
     cap = ["-n", str(FIRST_READ_MAX_LINES)]
     current = _run_journalctl(exe, directory, ["--boot=0", *cap])
     try:
@@ -303,6 +369,7 @@ class JournalWatcher:
         self._reset_ports: set[str] = set()
         self._rejected_cursor: str | None = None
         self._truncated = False
+        self._more = False
         self._unreadable: list[str] = []
         self.previous_boot_reader = previous_boot_reader or default_previous_boot_reader
         self.list_boots_reader = list_boots_reader or default_list_boots_reader
@@ -372,6 +439,7 @@ class JournalWatcher:
             self._rejected_cursor = cursor
             result = self.reader(directory, None)
         self._truncated = bool(getattr(result, "truncated", False))
+        self._more = bool(getattr(result, "more", False))
         return list(result)
 
     def read(self) -> tuple[SourceStatus, list[Event]]:
@@ -480,6 +548,8 @@ class BackgroundJournal:
         self._thread: threading.Thread | None = None
         self._result: dict = {}
         self._cursor: str | None = None
+        # True when the last batch ended at its limit, so the next read should follow at once.
+        self.draining = False
         self._started = 0.0
         self._last = SourceStatus(source=SOURCE, available=False, reason="first journal read in progress",
                                   pending=True)
@@ -500,6 +570,7 @@ class BackgroundJournal:
         abandoned thread finishes into its own result and is ignored."""
         self._thread = None
         self._result = {}
+        self.draining = False
 
     def read(self) -> tuple[SourceStatus, list[Event]]:
         events: list[Event] = []
@@ -514,7 +585,9 @@ class BackgroundJournal:
             result = self._result
             if "lines" in result:
                 self._last, events = self.watcher.process(self._cursor, result["lines"])
+                self.draining = self.watcher._more
             else:
+                self.draining = False
                 self._last = SourceStatus(source=SOURCE, available=False,
                                           reason=result.get("error", "journal read failed"))
         self._cursor = self.watcher.load_cursor()

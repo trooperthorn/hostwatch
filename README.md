@@ -18,7 +18,8 @@ model is in `docs/THREAT-MODEL.md`.
   availability (heartbeat and source status, 30 s by default), device metrics (60 s), storage
   health (15 min), SMART (1 h) and inventory (1 h). The agent reads the rates from
   `GET /internal/v1/agent-config` at start and every five minutes, clamps each to the limits Observe
-  enforces, and keeps the defaults when Observe cannot be reached.
+  enforces, and keeps the defaults when Observe cannot be reached. Source detection and the rate request run
+  on worker threads, so an unreachable source or Observe never delays events.
 * **Sends events at once.** Boot classifications, kernel journal matches, RAID, ZFS, SMART, UPS and
   WHEA events, TrueNAS alerts and threshold events are read every five seconds and sent as OTLP logs
   without waiting for their tier.
@@ -68,7 +69,8 @@ not present only on positive evidence. The bit meanings and file location are un
 The `thermalctl` source reads the status file written by the thermalctl fan controller (default
 `/run/thermalctl/status.json`, or the path in `HOSTWATCH_THERMALCTL_STATUS`). It reports zone
 temperature and load, and the duty and rpm of each header with the header state, mode and failsafe
-reasons. The source is unavailable when the file is unreadable, is not valid JSON or is older than
+reasons, and a failsafe count with its reasons that reaches Observe as a gauge and a warning log. The
+source is unavailable when the file is unreadable, is not valid JSON or is older than
 60 seconds or stamped more than 5 seconds in the future. It is reported not present on Windows unless a
 status path is configured, and elsewhere only when the directory that would hold the file is readable
 and the file is missing.
@@ -207,7 +209,7 @@ with an error naming the variable (enforced).
 | `HOSTWATCH_OTLP_FORMAT` | `protobuf` (default) or `json` |
 | `HOSTWATCH_OTLP_GZIP` | gzip the bodies (default on) |
 | `HOSTWATCH_DATA_DIR` | Where `outbox.db`, the heartbeat and the liveness marker live (default `/data`) |
-| `HOSTWATCH_REDETECT` | Seconds between source re-detection (default 600) |
+| `HOSTWATCH_REDETECT` | Seconds between source re-detection (default 600). A source that fails after it was detected is read again within seconds, not after this interval |
 | `HOSTWATCH_SCRUTINY_URL`, `HOSTWATCH_NUT_*`, `HOSTWATCH_TRUENAS_*`, `HOSTWATCH_RPI_THROTTLED_PATH`, `HOSTWATCH_THERMALCTL_STATUS` | Optional sources, off unless configured |
 | `HOSTWATCH_HWMON_IGNORE`, `HOSTWATCH_HWMON_CPU_SENSORS`, `HOSTWATCH_HWMON_REQUIRED_FANS` | hwmon tuning, as `chip:sensor` globs |
 | `HOSTWATCH_SYSFS`, `HOSTWATCH_PROCFS`, `HOSTWATCH_JOURNAL`, `HOSTWATCH_JOURNAL_VOLATILE`, `HOSTWATCH_PSTORE`, `HOSTWATCH_RASDAEMON_DB` | Paths of the read-only host mounts, as the container sees them |
