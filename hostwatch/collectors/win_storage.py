@@ -111,6 +111,8 @@ def _text(value: Any) -> str:
 class WinStorageCollector(Collector):
     id = "win_storage"
     tier = tiers.STORAGE_HEALTH
+    # The CIM health queries are the probe.
+    event_probe = True
 
     def detect(self) -> tuple[bool, str]:
         if self.seam is None:
@@ -216,6 +218,9 @@ class WinSmartctlCollector(Collector):
 
     id = "win_smartctl"
     tier = tiers.SMART
+    event_probe = True
+    # A full read runs smartctl once per device, up to MAX_DEVICES, each with its own time limit.
+    time_limit_s = SMARTCTL_TIMEOUT_S * 16
 
     def __init__(self, *args, **kwargs) -> None:
         super().__init__(*args, **kwargs)
@@ -265,6 +270,23 @@ class WinSmartctlCollector(Collector):
             if data is None:
                 continue
             out.extend(self._device_samples(name, data))
+        return out
+
+    def probe(self):
+        """The self-assessment of each disk from `smartctl -H`, which reads the drive's own verdict and
+        none of the attribute table. Only smart_passed is returned, so the threshold events see a
+        failure within a watch interval and the slow tier keeps the rest."""
+        out = []
+        for name, kind in self._scan():
+            args = ["-H", "-j"] + (["-d", kind] if kind else []) + [name]
+            data = _json(self._run(args).stdout)
+            if data is None:
+                continue
+            labels = {"id": name, "device": name, "model": _text(data.get("model_name")),
+                      "serial": _text(data.get("serial_number"))}
+            passed = _dig(data, "smart_status", "passed")
+            out.append(self.sample("smart_passed", int(passed) if isinstance(passed, bool) else None, "",
+                                   **labels))
         return out
 
     def _device_samples(self, name: str, data: dict[str, Any]):

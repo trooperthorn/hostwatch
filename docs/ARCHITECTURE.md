@@ -139,12 +139,24 @@ the entry id.
 Events are not a tier. The loop wakes at least every five seconds and, on each wake, reads the
 event sources (the pending boot events, pstore, rasdaemon, the journal, TrueNAS alerts, the Windows
 event log) and turns what it finds into OTLP logs sent on that pass. Every fifteen seconds it also
-reads the cheap local sources whose state changes are events (`event_watch`: md, ZFS and NUT) for
-threshold events only; their readings go out on their own tier, not every fifteen seconds. A RAID
-failure, a degraded pool, a UPS on battery or a kernel message therefore leaves the host within
-about twenty seconds even when the storage tier runs every fifteen minutes. A collector that blocks
-holds the loop for as long as it blocks (the TrueNAS client has its own timeout), because the loop is
-a single thread.
+reads the cheap local sources whose state changes are events (`event_watch`: md, ZFS and NUT) and the
+health probe of each slow storage source (`event_probe`) for threshold events only; their readings go
+out on their own tier, not every fifteen seconds. The probe is `probe()` on the collector: the whole
+`collect()` where that is one request (Scrutiny, Windows storage health, TrueNAS pools and alerts) and
+`smartctl -H` for Windows SMART, which reads only the drive's own verdict. A RAID failure, a degraded
+pool, a SMART, Scrutiny, Windows storage or TrueNAS failure, a UPS on battery or a kernel message
+therefore leaves the host within about twenty seconds even when the storage tier runs every fifteen
+minutes or every hour.
+
+No collector runs on the loop thread. `hostwatch/runner.py` starts each `collect()` and `probe()` on a
+worker thread, one at a time per collector, and the loop waits for a started worker only a quarter of a
+second (`EVENT_GRACE_S`, `TIER_GRACE_S`). A tier is started on one pass and queued on the pass where all
+its collectors have answered, so a slow collector delays only its own tier. A collector that does not
+answer within its `time_limit_s` (60 seconds, and 320 seconds for Windows smartctl) is given up on: its
+source is reported unavailable with a `CollectorTimeout` reason, its late answer is discarded, and it
+is not started a second time while the first call is still running, so a hang costs one thread. The one
+wait the loop still makes is the quarter second per pass, and `detect()` still runs on the loop thread
+(the Scrutiny and TrueNAS detect calls have their own 10 second timeouts).
 
 Delivery runs after every pass, and also straight after the event read, so events leave before a slow
 tier run can hold them back. `flush` sends the outbox log requests first and metrics requests second,

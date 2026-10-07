@@ -89,6 +89,8 @@ def _leaves(vdev: dict, group: str) -> list[tuple[str, dict]]:
 class TruenasCollector(Collector):
     id = "truenas"
     tier = tiers.STORAGE_HEALTH
+    # The pool and alert reads are the probe. It refreshes the alerts that read_events turns into events.
+    event_probe = True
     # A configured network source is polled every cycle even after a failure.
     retry_each_cycle = True
 

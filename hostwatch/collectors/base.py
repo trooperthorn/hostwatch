@@ -28,6 +28,13 @@ class Collector:
     # True for a cheap local source whose state changes are events (RAID, ZFS, UPS). The agent reads it
     # every few seconds for threshold events only, apart from its tier, so a failure is not held to the poll rate.
     event_watch: bool = False
+    # True for a slow source that has a lightweight health probe. The agent runs probe() every few seconds on
+    # a worker thread, off the event path, and raises threshold events from what it returns, so a failure
+    # is not held to the slow tier. collect() still runs on the tier for the metrics.
+    event_probe: bool = False
+    # Seconds one collect() or probe() call may take before the agent gives up on it and reports the source
+    # unavailable. The call is left to finish on its worker thread and its late answer is discarded.
+    time_limit_s: float = 60.0
     # True for a configured network source that is polled every cycle even after a failure,
     # being unavailable for that cycle only. Local sysfs sources wait for re-detection.
     retry_each_cycle: bool = False
@@ -47,6 +54,11 @@ class Collector:
 
     def collect(self) -> list[Sample]:
         raise NotImplementedError
+
+    def probe(self) -> list[Sample]:
+        """A cheap reading of just the health the threshold events need. The default is a full
+        collect(), which suits a source that is one request. Only used when event_probe is set."""
+        return self.collect()
 
     def is_absent(self) -> bool:
         """True only when the place this source would live was readable and shows it is not there.

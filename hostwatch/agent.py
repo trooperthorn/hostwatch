@@ -7,9 +7,10 @@ outbox entry: the metrics of that tier and any logs they produced, encoded as OT
 
 Events are not held to a tier. Every EVENT_POLL_S seconds the agent reads its event sources
 (boot classification, kernel journal, pstore, rasdaemon, TrueNAS alerts) and, every WATCH_S
-seconds, the cheap local sources whose state changes are events (RAID, ZFS, UPS), and sends what it
-finds as OTLP logs at once. A storage poll that runs every fifteen minutes therefore never delays
-a RAID failure.
+seconds, the cheap local sources whose state changes are events (RAID, ZFS, UPS) and the health probe of
+the slow storage sources (Scrutiny, Windows storage, SMART, TrueNAS), and sends what it finds as OTLP logs
+at once. A storage poll that runs every fifteen minutes therefore never delays a failure. Collectors run on
+worker threads with a time limit (runner.py), so a slow one never holds up the event read.
 
 Requests go to POST /v1/metrics and POST /v1/logs only. They are written to a durable outbox
 first and leave it only after Observe answers 2xx, so an Observe outage or an agent restart does
@@ -43,6 +44,7 @@ from .events.thresholds import ThresholdEngine
 from .model import Event, Sample, SourceStatus
 from .otel_map import LogRecord, MapContext, Point
 from .outbox import OUTBOX_FILE, Outbox
+from .runner import CollectorRunner, CollectorTimeout
 from .windows import WindowsSeam
 
 log = logging.getLogger("hostwatch.agent")
@@ -64,9 +66,23 @@ HEARTBEAT_S = 15.0
 # Watched sources (RAID, ZFS, UPS) are read this often for state changes that are events.
 WATCH_S = 15.0
 
+# How long the loop waits for collector workers it has just started, so a fast collector's reading is
+# handled in the same pass. A collector that takes longer is not waited for: its worker keeps running and
+# the loop looks at it again on its next pass, so a slow or hung collector never holds up events.
+EVENT_GRACE_S = 0.25
+TIER_GRACE_S = 0.25
+
 # A send that is slow must not hold a stop request for long.
 SEND_TIMEOUT_S = 5.0
 EventSource = Callable[[], tuple[SourceStatus, list[Event]]]
+
+
+class _TierRun:
+    """A tier whose collectors have been started and have not all answered."""
+
+    def __init__(self, launched: list[tuple]) -> None:
+        self.pending = launched
+        self.samples: list[Sample] = []
 
 
 class DeliveryError(Exception):
@@ -154,6 +170,10 @@ class Agent:
         # Monotonic time of the first failed delivery of the current stall.
         self._stall_since: float | None = None
         self._stopped = threading.Event()
+        # Collectors run on worker threads, one at a time each, bounded by their time limit.
+        self.runner = CollectorRunner()
+        # Tier runs that have started and not yet been queued: tier -> run in flight.
+        self._tier_runs: dict[str, _TierRun] = {}
 
     @property
     def pending_events(self) -> list[Event]:
@@ -375,26 +395,69 @@ class Agent:
         if self._last_detect is None or self._clock() - self._last_detect > self.cfg.redetect_s:
             self.detect()
 
-    def collect_samples(self, tier: str | None = None, watched: bool = False) -> list[Sample]:
-        """Samples from the collectors of one tier (or all when `tier` is None), or from the
-        watched collectors. A source that is unavailable is skipped until the next detection,
-        except a configured network source, which is tried every time."""
-        self._ensure_detected()
-        samples: list[Sample] = []
+    def _launch(self, tier: str | None, watched: bool) -> list[tuple]:
+        """Start a worker for each collector of the tier (or each watched or probed collector when
+        `watched`), skipping a source that is unavailable until the next detection, except a
+        configured network source, which is tried every time. A collector whose earlier call is
+        still running gets no second one: the same worker is handed back."""
+        launched = []
         for c in self.collectors:
-            if (watched and not c.event_watch) or (tier is not None and c.tier != tier):
+            if watched:
+                if not (c.event_watch or c.event_probe):
+                    continue
+            elif tier is not None and c.tier != tier:
                 continue
             if not self.status[c.id].available and not self._retry_now(c):
                 continue
-            try:
-                samples.extend(c.collect())
-                if not self.status[c.id].available:
-                    log.info("source %s: available again", c.id)
-                    self.status[c.id] = SourceStatus(source=c.id, available=True, reason="")
-            except Exception as exc:
-                log.warning("collector %s failed: %s", c.id, exc)
-                self.status[c.id] = SourceStatus(source=c.id, available=False,
-                                                 reason=f"collect error: {type(exc).__name__}: {exc}")
+            probe = watched and c.event_probe
+            key = f"{c.id}:{'watch' if watched else 'tier'}"
+            launched.append((c, self.runner.start(key, c.probe if probe else c.collect, c.id), key))
+        return launched
+
+    def _settle(self, launched: list[tuple], wait_s: float | None) -> tuple[list[Sample], list[tuple]]:
+        """Take the answers of started workers. Returns the samples of those that finished and the
+        workers still inside their time limit. A worker past its limit is given up on: the source is
+        reported unavailable with the reason and the worker's late answer is discarded. With `wait_s`
+        None this waits for every worker up to its limit; otherwise for at most `wait_s` in total."""
+        deadline = None if wait_s is None else time.monotonic() + wait_s
+        samples: list[Sample] = []
+        pending: list[tuple] = []
+        for c, job, key in launched:
+            limit = c.time_limit_s
+            room = limit - job.age() if deadline is None else min(limit - job.age(), deadline - time.monotonic())
+            job.wait(max(0.0, room))
+            if job.done:
+                self.runner.finish(key)
+                try:
+                    samples.extend(self._record(c, job.value()))
+                except Exception as exc:
+                    self._record_failure(c, exc)
+            elif job.age() >= limit:
+                job.abandoned = True
+                self._record_failure(c, CollectorTimeout(f"no answer within {limit:g}s"))
+            else:
+                pending.append((c, job, key))
+        return samples, pending
+
+    def _record(self, c, samples: list[Sample]) -> list[Sample]:
+        if not self.status[c.id].available:
+            log.info("source %s: available again", c.id)
+            self.status[c.id] = SourceStatus(source=c.id, available=True, reason="")
+        return samples
+
+    def _record_failure(self, c, exc: BaseException) -> None:
+        log.warning("collector %s failed: %s", c.id, exc)
+        self.status[c.id] = SourceStatus(source=c.id, available=False,
+                                         reason=f"collect error: {type(exc).__name__}: {exc}")
+
+    def collect_samples(self, tier: str | None = None, watched: bool = False) -> list[Sample]:
+        """Samples from the collectors of one tier (or all when `tier` is None), or from the
+        watched and probed collectors. Every collector runs on a worker thread within its time
+        limit. The watched read waits only EVENT_GRACE_S and leaves a slow collector to finish for a
+        later read, so it is safe on the event path; a tier read waits for each collector up to its
+        limit."""
+        self._ensure_detected()
+        samples, _ = self._settle(self._launch(tier, watched), EVENT_GRACE_S if watched else None)
         return samples
 
     def _outbox_status(self) -> None:
@@ -446,9 +509,27 @@ class Agent:
         return fresh
 
     def run_tier(self, tier: str) -> None:
-        """Collect one tier and queue the result. The availability tier carries the heartbeat, the
-        source status report and the rates in force instead of collector readings."""
-        samples = self.collect_samples(tier)
+        """Collect one tier, wait for it and queue the result."""
+        self._complete_tier(tier, self.collect_samples(tier))
+
+    def _begin_tier(self, tier: str) -> None:
+        self._ensure_detected()
+        self._tier_runs[tier] = _TierRun(self._launch(tier, False))
+
+    def _harvest_tier(self, tier: str) -> None:
+        """Take what the tier's collectors have finished and queue the tier once all are done or
+        given up on. Until then the run stays in flight and the loop does other work."""
+        run = self._tier_runs[tier]
+        got, run.pending = self._settle(run.pending, TIER_GRACE_S)
+        run.samples.extend(got)
+        if run.pending:
+            return
+        del self._tier_runs[tier]
+        self._complete_tier(tier, run.samples)
+
+    def _complete_tier(self, tier: str, samples: list[Sample]) -> None:
+        """Queue the result of one tier. The availability tier carries the heartbeat, the source
+        status report and the rates in force instead of collector readings."""
         now = self._wall()
         points: list[Point] = otel_map.map_samples(samples, self.map_context)
         logs = self._new_failsafe_logs(samples)
@@ -535,16 +616,23 @@ class Agent:
                 self._next_watch = now + WATCH_S
             # Send the events before a slow tier can hold them back.
             self._try_flush(client)
+        # Collectors run on worker threads, so a tier is started here and queued when its collectors
+        # have answered or run out of time. Events are read at the top of every pass either way.
         for tier in self.schedule.due(self._clock()):
-            self._guard(f"{tier} poll", lambda tier=tier: self.run_tier(tier))
+            if tier not in self._tier_runs:  # still running from an earlier beat: skip this one
+                self._guard(f"{tier} poll", lambda tier=tier: self._begin_tier(tier))
             self.schedule.done(tier, self._clock())
+        for tier in list(self._tier_runs):
+            self._guard(f"{tier} poll", lambda tier=tier: self._harvest_tier(tier))
         self._try_flush(client)
 
     def sleep_s(self) -> float:
         """How long the loop may wait before the next thing is due."""
         now = self._clock()
-        return max(0.1, min(tiers.EVENT_POLL_S, self.schedule.seconds_until_next(now),
-                            self._next_events - now))
+        wait = min(tiers.EVENT_POLL_S, self.schedule.seconds_until_next(now), self._next_events - now)
+        if self._tier_runs:
+            wait = min(wait, TIER_GRACE_S)  # a tier is waiting on its collectors
+        return max(0.1, wait)
 
     # -- delivery ----------------------------------------------------------------------------
 
