@@ -184,3 +184,32 @@ def test_the_hub_settings_are_gone_from_the_configuration():
     for name in ("role", "hub_url", "hub_bind", "hub_port", "ingest_token", "interval_s", "tls_cert",
                  "allowed_clients", "mqtt_host", "prometheus_enabled", "power_witness"):
         assert name not in fields, name
+
+
+# -- TLS to Observe ----------------------------------------------------------------------------
+
+def test_the_agent_verifies_the_certificate_of_an_https_observe(tmp_path, monkeypatch):
+    """The client the loop builds keeps certificate verification on, and nothing in the agent code
+    switches it off."""
+    import httpx
+
+    from hostwatch import agent as agent_module
+
+    cfg = make_cfg(tmp_path, observe_url="https://observe.example")
+    assert agent_module.observe_tls_verify(cfg) is True
+    seen: dict = {}
+    real = httpx.Client
+
+    def spy(*args, **kwargs):
+        seen.update(kwargs)
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(agent_module.httpx, "Client", spy)
+    agent = Agent(cfg, platform="x86")
+    agent.stop()  # the loop exits after building its client
+    agent.run()
+    assert seen.get("verify") is True
+    # The TrueNAS client has its own, separate TLS setting for the local appliance; Observe's is not it.
+    for rel in ("hostwatch/agent.py", "hostwatch/windows/service.py"):
+        text = (ROOT / rel).read_text(encoding="utf-8")
+        assert not re.search(r"verify\s*=\s*False|CERT_NONE|check_hostname\s*=\s*False", text), rel
