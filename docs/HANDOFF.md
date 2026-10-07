@@ -3,6 +3,11 @@
 This records why the project looks the way it does, so later work does not
 undo a decision without knowing its reason.
 
+Note on the retired hub: the hub, its web UI, its login and API keys, and the Home Assistant, Orion and
+Prometheus outputs described in the decisions below were retired when the agent was converted to OTLP. They
+are kept here as history only. The agent now sends OTLP to Observe, on Linux and on Windows, and there is no
+migration path. `CLAUDE.md` and `docs/ARCHITECTURE.md` describe the current design.
+
 ## Origin
 
 MediaIn-SVR is a low-power Debian server built on an older ASUS Z77 board
