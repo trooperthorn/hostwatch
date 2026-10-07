@@ -23,8 +23,11 @@ class CollectorTimeout(Exception):
 
 
 class Job:
-    def __init__(self, fn: Callable[[], Any]) -> None:
+    def __init__(self, fn: Callable[[], Any], lock: threading.Lock | None = None) -> None:
+        # `started` is when the call began, so time spent waiting for the lock is not counted
+        # against the call's time limit.
         self.started = time.monotonic()
+        self._lock = lock
         self.result: Any = None
         self.error: BaseException | None = None
         # Set when the caller gave up on this call. A result that arrives later is discarded.
@@ -36,7 +39,12 @@ class Job:
 
     def _run(self) -> None:
         try:
-            self.result = self._fn()
+            if self._lock is not None:
+                with self._lock:
+                    self.started = time.monotonic()
+                    self.result = self._fn()
+            else:
+                self.result = self._fn()
         except BaseException as exc:  # carried to the caller, never lost with the thread
             self.error = exc
         finally:
@@ -66,16 +74,6 @@ class CollectorRunner:
         self._jobs: dict[str, Job] = {}
         self._locks: dict[str, threading.Lock] = {}
 
-    def _exclusive(self, collector: str, fn: Callable[[], Any]) -> Callable[[], Any]:
-        """Wrap `fn` so two runs of one collector never overlap, whatever asked for them: a
-        collector keeps state between calls and is not written to be re-entered."""
-        lock = self._locks.setdefault(collector, threading.Lock())
-
-        def locked() -> Any:
-            with lock:
-                return fn()
-        return locked
-
     def current(self, key: str) -> Job | None:
         return self._jobs.get(key)
 
@@ -87,7 +85,8 @@ class CollectorRunner:
         if job is not None and job.abandoned and job.done:
             job = None  # its answer came too late to be a reading; ask again
         if job is None:
-            job = self._jobs[key] = Job(self._exclusive(collector, fn) if collector else fn)
+            lock = self._locks.setdefault(collector, threading.Lock()) if collector else None
+            job = self._jobs[key] = Job(fn, lock)
         return job
 
     def finish(self, key: str) -> None:

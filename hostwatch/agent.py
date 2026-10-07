@@ -411,7 +411,9 @@ class Agent:
                 continue
             probe = watched and c.event_probe
             key = f"{c.id}:{'watch' if watched else 'tier'}"
-            launched.append((c, self.runner.start(key, c.probe if probe else c.collect, c.id), key))
+            # A probe that shares nothing with the tier read does not queue behind it.
+            share = None if probe and c.probe_independent else c.id
+            launched.append((c, self.runner.start(key, c.probe if probe else c.collect, share), key))
         return launched
 
     def _settle(self, launched: list[tuple], wait_s: float | None) -> tuple[list[Sample], list[tuple]]:
@@ -433,8 +435,9 @@ class Agent:
                 except Exception as exc:
                     self._record_failure(c, exc)
             elif job.age() >= limit:
-                job.abandoned = True
-                self._record_failure(c, CollectorTimeout(f"no answer within {limit:g}s"))
+                if not job.abandoned:  # report a hang once, not on every pass until it returns
+                    job.abandoned = True
+                    self._record_failure(c, CollectorTimeout(f"no answer within {limit:g}s"))
             else:
                 pending.append((c, job, key))
         return samples, pending

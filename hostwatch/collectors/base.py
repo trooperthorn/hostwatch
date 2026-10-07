@@ -32,6 +32,9 @@ class Collector:
     # a worker thread, off the event path, and raises threshold events from what it returns, so a failure
     # is not held to the slow tier. collect() still runs on the tier for the metrics.
     event_probe: bool = False
+    # True when probe() does not share state with collect(), so the probe may run while a slow tier
+    # read of the same collector is still going. Otherwise the two take turns.
+    probe_independent: bool = False
     # Seconds one collect() or probe() call may take before the agent gives up on it and reports the source
     # unavailable. The call is left to finish on its worker thread and its late answer is discarded.
     time_limit_s: float = 60.0

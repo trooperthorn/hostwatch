@@ -23,6 +23,7 @@ class ScrutinyCollector(Collector):
     tier = tiers.STORAGE_HEALTH
     # One HTTP request, so the whole collect is the probe.
     event_probe = True
+    probe_independent = True
 
     def __init__(self, sysfs, procfs, url: str) -> None:
         super().__init__(sysfs, procfs)

@@ -68,6 +68,7 @@ def test_the_smartctl_probe_reads_only_the_health_verdict(tmp_path):
     assert c.event_probe
     got = c.probe()
     assert got and {s.metric for s in got} == {"smart_passed"}
+    assert [s.value for s in got] == [1, 0]  # the passing SATA disk and the failing NVMe disk
     assert c.time_limit_s > 60.0  # a full read of many drives needs a longer limit than the default
 
 
@@ -195,3 +196,61 @@ def test_an_event_with_an_unpaired_surrogate_does_not_block_the_others(tmp_path)
     sent = [r["dedup_key"] for req in observe.posts if req.url.path == "/v1/logs"
             for r in log_records(body_json(req))]
     assert "journal:good" in sent
+    assert "journal:bad" in sent  # the bad event is sent too, with the lone surrogate made safe
+    assert not any("\ud800" in str(r) for req in observe.posts if req.url.path == "/v1/logs"
+                   for r in log_records(body_json(req)))
+
+
+class SlowTierScrutiny(FakeScrutiny):
+    """A Scrutiny whose full tier read is stuck, while its probe answers at once."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.release = threading.Event()
+        self.tier_started = threading.Event()
+
+    def collect(self):
+        self.tier_started.set()
+        self.release.wait(30)
+        return []
+
+    def probe(self):
+        return ScrutinyCollector.collect(self)
+
+
+def test_a_failure_is_raised_while_the_tier_read_is_still_running(tmp_path):
+    clock = Clock()
+    agent = make_agent(tmp_path, clock)
+    scrutiny = SlowTierScrutiny()
+    agent.collectors = [scrutiny]
+    observe = FakeObserve()
+    try:
+        with observe.client() as client:
+            agent.tick(client)  # starts the tier read, which does not return
+            assert scrutiny.tier_started.wait(5)
+            scrutiny.status = 2
+            for _ in range(int(WATCH_S) + 5):
+                clock.t += 1
+                agent.tick(client)
+                if "hostwatch.scrutiny.status_raised" in sent_event_names(observe):
+                    break
+    finally:
+        scrutiny.release.set()
+    assert "hostwatch.scrutiny.status_raised" in sent_event_names(observe)
+    assert agent.status["scrutiny"].available  # the probe was not timed out behind the tier
+
+
+def test_a_hang_is_reported_once_not_on_every_pass(tmp_path, caplog):
+    clock = Clock()
+    agent = make_agent(tmp_path, clock)
+    hung = Hangs(limit=0.01)
+    agent.collectors = [hung]
+    try:
+        with FakeObserve().client() as client, caplog.at_level("WARNING", logger="hostwatch.agent"):
+            for _ in range(6):
+                agent.tick(client)
+                clock.t += 1
+                time.sleep(0.02)  # real time must pass for the worker to outlive its limit
+    finally:
+        hung.release.set()
+    assert sum("collector hung failed" in r.getMessage() for r in caplog.records) == 1

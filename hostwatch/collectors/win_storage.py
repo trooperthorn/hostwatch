@@ -20,12 +20,15 @@ does not. smartctl reports `smart_passed` (1 passed, 0 failed), `temp`, `power_o
 from __future__ import annotations
 
 import json
+import logging
 import re
 from typing import Any
 
 from ..windows import SeamError
 from .. import tiers
 from .base import Collector
+
+log = logging.getLogger("hostwatch.agent")
 
 NAMESPACE = "root/Microsoft/Windows/Storage"
 DISK_CLASS = "MSFT_PhysicalDisk"
@@ -113,6 +116,7 @@ class WinStorageCollector(Collector):
     tier = tiers.STORAGE_HEALTH
     # The CIM health queries are the probe.
     event_probe = True
+    probe_independent = True
 
     def detect(self) -> tuple[bool, str]:
         if self.seam is None:
@@ -219,6 +223,7 @@ class WinSmartctlCollector(Collector):
     id = "win_smartctl"
     tier = tiers.SMART
     event_probe = True
+    probe_independent = True
     # A full read runs smartctl once per device, up to MAX_DEVICES, each with its own time limit.
     time_limit_s = SMARTCTL_TIMEOUT_S * 16
 
@@ -281,6 +286,7 @@ class WinSmartctlCollector(Collector):
             args = ["-H", "-j"] + (["-d", kind] if kind else []) + [name]
             data = _json(self._run(args).stdout)
             if data is None:
+                log.warning("smartctl -H for %s did not print JSON; no verdict this pass", name)
                 continue
             labels = {"id": name, "device": name, "model": _text(data.get("model_name")),
                       "serial": _text(data.get("serial_number"))}
