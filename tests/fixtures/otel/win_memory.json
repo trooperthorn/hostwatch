@@ -1,0 +1,74 @@
+{
+ "points": [
+  {
+   "attributes": {},
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.memory.limit",
+   "scope": "hostwatch.collector.memory",
+   "ts": 1700000000.0,
+   "unit": "By",
+   "value": 16000.0
+  },
+  {
+   "attributes": {},
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.legacy.memory.commit_used",
+   "scope": "hostwatch.collector.memory",
+   "ts": 1700000000.0,
+   "unit": "By",
+   "value": 5.0
+  },
+  {
+   "attributes": {
+    "system.memory.state": "used"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.memory.usage",
+   "scope": "hostwatch.collector.memory",
+   "ts": 1700000000.0,
+   "unit": "By",
+   "value": 10000.0
+  },
+  {
+   "attributes": {
+    "system.memory.state": "free"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.memory.usage",
+   "scope": "hostwatch.collector.memory",
+   "ts": 1700000000.0,
+   "unit": "By",
+   "value": 6000.0
+  }
+ ],
+ "samples": [
+  {
+   "labels": {},
+   "metric": "mem_total",
+   "source": "memory",
+   "ts": 1700000000.0,
+   "unit": "B",
+   "value": 16000
+  },
+  {
+   "labels": {},
+   "metric": "mem_available",
+   "source": "memory",
+   "ts": 1700000000.0,
+   "unit": "B",
+   "value": 6000
+  },
+  {
+   "labels": {},
+   "metric": "commit_used",
+   "source": "memory",
+   "ts": 1700000000.0,
+   "unit": "B",
+   "value": 5
+  }
+ ]
+}

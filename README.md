@@ -443,6 +443,13 @@ python -m hostwatch windows run                # foreground, for a console check
 
 The durable outbox lives in `C:/ProgramData/hostwatch` (`HOSTWATCH_DATA_DIR`), so batches survive a restart or a hub outage and replay oldest first. The credential is the same `HOSTWATCH_INGEST_KEY` (a host-bound key, preferred) or `HOSTWATCH_INGEST_TOKEN` as on Linux. The installer reads it as a secure string, never prints it, and writes it to `agent.env` in the data directory with an ACL that grants only SYSTEM and Administrators. The service runs as LocalSystem, starts after boot, restarts after a failure (after 5, 30 and 60 seconds, with the count reset after a day), and on a clean stop makes one last delivery attempt so queued batches are not left behind. The `pywin32` package is declared only as the Windows-marked `windows` extra and is not in `requirements.lock`. None of this has run on a real Windows host yet; see `UNVERIFIED.md`.
 
+## OTEL mapping
+
+`hostwatch/otel_map.py` maps every collector sample and event to OpenTelemetry metric names, UCUM
+units, attributes and log records as Observe defines them. Metrics a collector adds before the
+table is updated are sent as `observe.legacy.<source>.<metric>`. The module is not wired to a sender
+yet. See `docs/ARCHITECTURE.md`.
+
 ## hostwatch-control
 
 `hostwatch/control/` is the start of the per-host control daemon from `docs/CONTROL.md` in the Observe

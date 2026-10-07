@@ -1,0 +1,101 @@
+{
+ "points": [
+  {
+   "attributes": {},
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.scrutiny.up",
+   "scope": "hostwatch.collector.scrutiny",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  },
+  {
+   "attributes": {
+    "error.type": "URLError"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.scrutiny.up",
+   "scope": "hostwatch.collector.scrutiny",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.0
+  },
+  {
+   "attributes": {
+    "hw.id": "disk:0x5000",
+    "hw.type": "physical_disk",
+    "observe.scrutiny.status": "0"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.status",
+   "scope": "hostwatch.collector.scrutiny",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.0
+  },
+  {
+   "attributes": {
+    "device": "sda",
+    "model": "M",
+    "serial": "S",
+    "wwn": "0x5000"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.legacy.scrutiny.temp",
+   "scope": "hostwatch.collector.scrutiny",
+   "ts": 1700000000.0,
+   "unit": "Cel",
+   "value": 33.0
+  }
+ ],
+ "samples": [
+  {
+   "labels": {},
+   "metric": "api_up",
+   "source": "scrutiny",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 1
+  },
+  {
+   "labels": {
+    "error": "URLError"
+   },
+   "metric": "api_up",
+   "source": "scrutiny",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 0
+  },
+  {
+   "labels": {
+    "device": "sda",
+    "model": "M",
+    "serial": "S",
+    "wwn": "0x5000"
+   },
+   "metric": "device_status",
+   "source": "scrutiny",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 0
+  },
+  {
+   "labels": {
+    "device": "sda",
+    "model": "M",
+    "serial": "S",
+    "wwn": "0x5000"
+   },
+   "metric": "temp",
+   "source": "scrutiny",
+   "ts": 1700000000.0,
+   "unit": "C",
+   "value": 33
+  }
+ ]
+}

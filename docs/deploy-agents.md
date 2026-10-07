@@ -122,6 +122,12 @@ A pool seen by both the kstat and API sources appears once on the hub, at the wo
 Follow `docs/deploy-truenas.md`. Add the TrueNAS-SVR address to `HOSTWATCH_ALLOWED_CLIENTS`
 on the hub and use its own ingest key, as in step 1 above.
 
+## OTEL metric names
+
+The agent is being converted to send OTLP to Observe. The names, units and attributes each
+collector will use are defined in `hostwatch/otel_map.py` and described in `docs/ARCHITECTURE.md`.
+Nothing is sent that way yet, so no deployment step changes with this slice.
+
 ## hostwatch-control
 
 The control daemon is a separate program from the collector. It pulls signed commands from Observe, checks them against

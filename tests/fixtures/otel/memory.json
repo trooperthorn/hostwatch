@@ -1,0 +1,96 @@
+{
+ "points": [
+  {
+   "attributes": {},
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.memory.limit",
+   "scope": "hostwatch.collector.memory",
+   "ts": 1700000000.0,
+   "unit": "By",
+   "value": 8000.0
+  },
+  {
+   "attributes": {
+    "system.memory.state": "used"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.memory.usage",
+   "scope": "hostwatch.collector.memory",
+   "ts": 1700000000.0,
+   "unit": "By",
+   "value": 5000.0
+  },
+  {
+   "attributes": {
+    "system.memory.state": "free"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.memory.usage",
+   "scope": "hostwatch.collector.memory",
+   "ts": 1700000000.0,
+   "unit": "By",
+   "value": 3000.0
+  },
+  {
+   "attributes": {
+    "system.paging.state": "used"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.paging.usage",
+   "scope": "hostwatch.collector.memory",
+   "ts": 1700000000.0,
+   "unit": "By",
+   "value": 600.0
+  },
+  {
+   "attributes": {
+    "system.paging.state": "free"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.paging.usage",
+   "scope": "hostwatch.collector.memory",
+   "ts": 1700000000.0,
+   "unit": "By",
+   "value": 400.0
+  }
+ ],
+ "samples": [
+  {
+   "labels": {},
+   "metric": "mem_total",
+   "source": "memory",
+   "ts": 1700000000.0,
+   "unit": "B",
+   "value": 8000
+  },
+  {
+   "labels": {},
+   "metric": "mem_available",
+   "source": "memory",
+   "ts": 1700000000.0,
+   "unit": "B",
+   "value": 3000
+  },
+  {
+   "labels": {},
+   "metric": "swap_total",
+   "source": "memory",
+   "ts": 1700000000.0,
+   "unit": "B",
+   "value": 1000
+  },
+  {
+   "labels": {},
+   "metric": "swap_free",
+   "source": "memory",
+   "ts": 1700000000.0,
+   "unit": "B",
+   "value": 400
+  }
+ ]
+}

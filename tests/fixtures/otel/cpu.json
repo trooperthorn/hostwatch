@@ -1,0 +1,138 @@
+{
+ "points": [
+  {
+   "attributes": {},
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.cpu.utilization",
+   "scope": "hostwatch.collector.cpu",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.125
+  },
+  {
+   "attributes": {},
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.cpu.load_average.1m",
+   "scope": "hostwatch.collector.cpu",
+   "ts": 1700000000.0,
+   "unit": "{thread}",
+   "value": 0.5
+  },
+  {
+   "attributes": {},
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.cpu.load_average.5m",
+   "scope": "hostwatch.collector.cpu",
+   "ts": 1700000000.0,
+   "unit": "{thread}",
+   "value": 0.4
+  },
+  {
+   "attributes": {},
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.cpu.load_average.15m",
+   "scope": "hostwatch.collector.cpu",
+   "ts": 1700000000.0,
+   "unit": "{thread}",
+   "value": 0.3
+  },
+  {
+   "attributes": {
+    "cpu.logical_number": 3
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.cpu.frequency",
+   "scope": "hostwatch.collector.cpu",
+   "ts": 1700000000.0,
+   "unit": "Hz",
+   "value": 2400500000.0
+  },
+  {
+   "attributes": {
+    "cpu.logical_number": 0,
+    "observe.cpu.idle_state": "C6"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.cpu.idle_residency",
+   "scope": "hostwatch.collector.cpu",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.8
+  }
+ ],
+ "samples": [
+  {
+   "labels": {},
+   "metric": "utilization_pct",
+   "source": "cpu",
+   "ts": 1700000000.0,
+   "unit": "%",
+   "value": 12.5
+  },
+  {
+   "labels": {
+    "span": "1m"
+   },
+   "metric": "load",
+   "source": "cpu",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 0.5
+  },
+  {
+   "labels": {
+    "span": "5m"
+   },
+   "metric": "load",
+   "source": "cpu",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 0.4
+  },
+  {
+   "labels": {
+    "span": "15m"
+   },
+   "metric": "load",
+   "source": "cpu",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 0.3
+  },
+  {
+   "labels": {
+    "cpu": "cpu3"
+   },
+   "metric": "freq_mhz",
+   "source": "cpu",
+   "ts": 1700000000.0,
+   "unit": "MHz",
+   "value": 2400.5
+  },
+  {
+   "labels": {
+    "cpu": "cpu0",
+    "state": "C6"
+   },
+   "metric": "idle_residency_pct",
+   "source": "cpu",
+   "ts": 1700000000.0,
+   "unit": "%",
+   "value": 80
+  },
+  {
+   "labels": {},
+   "metric": "utilization_pct",
+   "source": "cpu",
+   "ts": 1700000000.0,
+   "unit": "%",
+   "value": null
+  }
+ ]
+}

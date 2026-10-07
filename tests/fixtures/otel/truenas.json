@@ -1,0 +1,295 @@
+{
+ "points": [
+  {
+   "attributes": {
+    "hw.id": "zpool:tank",
+    "hw.state": "ONLINE",
+    "hw.type": "logical_disk"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.status",
+   "scope": "hostwatch.collector.truenas",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  },
+  {
+   "attributes": {
+    "hw.id": "zpool:tank"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.zfs.pool.health",
+   "scope": "hostwatch.collector.truenas",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  },
+  {
+   "attributes": {
+    "hw.id": "zpool:tank",
+    "hw.state": "healthy"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.status",
+   "scope": "hostwatch.collector.truenas",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  },
+  {
+   "attributes": {
+    "hw.id": "zpool:tank",
+    "hw.state": "warning"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.status",
+   "scope": "hostwatch.collector.truenas",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.0
+  },
+  {
+   "attributes": {
+    "hw.id": "zpool:tank"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.zfs.pool.scan.errors",
+   "scope": "hostwatch.collector.truenas",
+   "ts": 1700000000.0,
+   "unit": "{error}",
+   "value": 0.0
+  },
+  {
+   "attributes": {
+    "hw.id": "zpool:tank",
+    "observe.zfs.scan_state": "FINISHED"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.zfs.pool.scan.state",
+   "scope": "hostwatch.collector.truenas",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  },
+  {
+   "attributes": {
+    "error.type": "read",
+    "hw.id": "zpool:tank/sda"
+   },
+   "kind": "sum",
+   "monotonic": true,
+   "name": "hw.errors",
+   "scope": "hostwatch.collector.truenas",
+   "ts": 1700000000.0,
+   "unit": "{error}",
+   "value": 2.0
+  },
+  {
+   "attributes": {
+    "error.type": "write",
+    "hw.id": "zpool:tank/sda"
+   },
+   "kind": "sum",
+   "monotonic": true,
+   "name": "hw.errors",
+   "scope": "hostwatch.collector.truenas",
+   "ts": 1700000000.0,
+   "unit": "{error}",
+   "value": 0.0
+  },
+  {
+   "attributes": {
+    "error.type": "checksum",
+    "hw.id": "zpool:tank/sda"
+   },
+   "kind": "sum",
+   "monotonic": true,
+   "name": "hw.errors",
+   "scope": "hostwatch.collector.truenas",
+   "ts": 1700000000.0,
+   "unit": "{error}",
+   "value": 1.0
+  },
+  {
+   "attributes": {
+    "error.type": "read",
+    "hw.id": "zpool:tank"
+   },
+   "kind": "sum",
+   "monotonic": true,
+   "name": "hw.errors",
+   "scope": "hostwatch.collector.truenas",
+   "ts": 1700000000.0,
+   "unit": "{error}",
+   "value": 3.0
+  },
+  {
+   "attributes": {
+    "hw.id": "zpool:tank/sda"
+   },
+   "kind": "sum",
+   "monotonic": true,
+   "name": "observe.zfs.vdev.self_healed",
+   "scope": "hostwatch.collector.truenas",
+   "ts": 1700000000.0,
+   "unit": "By",
+   "value": 4096.0
+  },
+  {
+   "attributes": {
+    "hw.id": "disk:sda",
+    "hw.type": "physical_disk"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.temperature",
+   "scope": "hostwatch.collector.truenas",
+   "ts": 1700000000.0,
+   "unit": "Cel",
+   "value": 38.0
+  }
+ ],
+ "samples": [
+  {
+   "labels": {
+    "pool": "tank",
+    "state": "ONLINE"
+   },
+   "metric": "pool_state",
+   "source": "truenas",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 1
+  },
+  {
+   "labels": {
+    "pool": "tank",
+    "status": "ONLINE"
+   },
+   "metric": "pool_health",
+   "source": "truenas",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 1
+  },
+  {
+   "labels": {
+    "pool": "tank"
+   },
+   "metric": "pool_healthy",
+   "source": "truenas",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 1
+  },
+  {
+   "labels": {
+    "pool": "tank"
+   },
+   "metric": "pool_warning",
+   "source": "truenas",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 0
+  },
+  {
+   "labels": {
+    "pool": "tank",
+    "scan_function": "SCRUB",
+    "scan_state": "FINISHED"
+   },
+   "metric": "pool_scan_errors",
+   "source": "truenas",
+   "ts": 1700000000.0,
+   "unit": "count",
+   "value": 0
+  },
+  {
+   "labels": {
+    "pool": "tank",
+    "scan_state": "FINISHED"
+   },
+   "metric": "scan_state",
+   "source": "truenas",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 1
+  },
+  {
+   "labels": {
+    "disk": "sda",
+    "pool": "tank",
+    "vdev": "sda"
+   },
+   "metric": "vdev_read_errors",
+   "source": "truenas",
+   "ts": 1700000000.0,
+   "unit": "count",
+   "value": 2
+  },
+  {
+   "labels": {
+    "disk": "sda",
+    "pool": "tank",
+    "vdev": "sda"
+   },
+   "metric": "vdev_write_errors",
+   "source": "truenas",
+   "ts": 1700000000.0,
+   "unit": "count",
+   "value": 0
+  },
+  {
+   "labels": {
+    "disk": "sda",
+    "pool": "tank",
+    "vdev": "sda"
+   },
+   "metric": "vdev_checksum_errors",
+   "source": "truenas",
+   "ts": 1700000000.0,
+   "unit": "count",
+   "value": 1
+  },
+  {
+   "labels": {
+    "pool": "tank"
+   },
+   "metric": "read_errors",
+   "source": "truenas",
+   "ts": 1700000000.0,
+   "unit": "count",
+   "value": 3
+  },
+  {
+   "labels": {
+    "pool": "tank",
+    "vdev": "sda"
+   },
+   "metric": "vdev_self_healed_bytes",
+   "source": "truenas",
+   "ts": 1700000000.0,
+   "unit": "B",
+   "value": 4096
+  },
+  {
+   "labels": {
+    "disk": "sda",
+    "model": "Y",
+    "pool": "tank",
+    "serial": "X"
+   },
+   "metric": "disk_temp_c",
+   "source": "truenas",
+   "ts": 1700000000.0,
+   "unit": "C",
+   "value": 38
+  }
+ ]
+}

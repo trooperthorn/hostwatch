@@ -1,0 +1,31 @@
+{
+ "points": [
+  {
+   "attributes": {
+    "hw.id": "zpool:tank",
+    "hw.state": "ONLINE",
+    "hw.type": "logical_disk"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.status",
+   "scope": "hostwatch.collector.zfs",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  }
+ ],
+ "samples": [
+  {
+   "labels": {
+    "pool": "tank",
+    "state": "ONLINE"
+   },
+   "metric": "pool_state",
+   "source": "zfs",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 1
+  }
+ ]
+}

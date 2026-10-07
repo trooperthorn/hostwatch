@@ -1,0 +1,24 @@
+{
+ "points": [
+  {
+   "attributes": {},
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "system.cpu.utilization",
+   "scope": "hostwatch.collector.win_cpu",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.4
+  }
+ ],
+ "samples": [
+  {
+   "labels": {},
+   "metric": "utilization_pct",
+   "source": "win_cpu",
+   "ts": 1700000000.0,
+   "unit": "%",
+   "value": 40
+  }
+ ]
+}

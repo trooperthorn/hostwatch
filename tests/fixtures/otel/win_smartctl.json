@@ -1,0 +1,79 @@
+{
+ "points": [
+  {
+   "attributes": {
+    "hw.id": "/dev/sda",
+    "hw.state": "smart_ok"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.status",
+   "scope": "hostwatch.collector.win_smartctl",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  },
+  {
+   "attributes": {
+    "error.type": "media",
+    "hw.id": "/dev/sda"
+   },
+   "kind": "sum",
+   "monotonic": true,
+   "name": "hw.errors",
+   "scope": "hostwatch.collector.win_smartctl",
+   "ts": 1700000000.0,
+   "unit": "{error}",
+   "value": 4.0
+  },
+  {
+   "attributes": {
+    "hw.id": "/dev/sda"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.physical_disk.endurance_utilization",
+   "scope": "hostwatch.collector.win_smartctl",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.07
+  }
+ ],
+ "samples": [
+  {
+   "labels": {
+    "device": "/dev/sda",
+    "id": "/dev/sda",
+    "model": "M",
+    "serial": "S"
+   },
+   "metric": "smart_passed",
+   "source": "win_smartctl",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 1
+  },
+  {
+   "labels": {
+    "device": "/dev/sda",
+    "id": "/dev/sda"
+   },
+   "metric": "media_errors",
+   "source": "win_smartctl",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 4
+  },
+  {
+   "labels": {
+    "device": "/dev/sda",
+    "id": "/dev/sda"
+   },
+   "metric": "wear_pct",
+   "source": "win_smartctl",
+   "ts": 1700000000.0,
+   "unit": "%",
+   "value": 7
+  }
+ ]
+}

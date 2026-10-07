@@ -1,0 +1,216 @@
+{
+ "events": [
+  {
+   "boot_id": "b1",
+   "dedup_key": "boot:b1",
+   "detail": {
+    "heartbeat_age_s": 3
+   },
+   "kind": "boot.clean_shutdown",
+   "severity": "info",
+   "source": "boot",
+   "title": "Previous boot ended: clean shutdown",
+   "ts": 1700000000.0
+  },
+  {
+   "boot_id": "b2",
+   "dedup_key": "boot:b2",
+   "detail": {},
+   "kind": "boot.power_loss",
+   "severity": "critical",
+   "source": "boot",
+   "title": "Previous boot ended: power loss",
+   "ts": 1700000000.0
+  },
+  {
+   "boot_id": null,
+   "dedup_key": "journal:md",
+   "detail": {
+    "cursor": "s=1",
+    "message": "md/raid1:md0: Disk failure",
+    "nested": {
+     "a": 1
+    }
+   },
+   "kind": "md.degraded",
+   "severity": "critical",
+   "source": "journal",
+   "title": "md0 degraded",
+   "ts": 1700000000.0
+  },
+  {
+   "boot_id": null,
+   "dedup_key": "journal:zfs",
+   "detail": {},
+   "kind": "zfs.pool_degraded",
+   "severity": "warning",
+   "source": "journal",
+   "title": "pool degraded",
+   "ts": 1700000000.0
+  },
+  {
+   "boot_id": null,
+   "dedup_key": "th:smart",
+   "detail": {
+    "rule_key": "k",
+    "state": "firing"
+   },
+   "kind": "smart.failing",
+   "severity": "warning",
+   "source": "thresholds",
+   "title": "smart",
+   "ts": 1700000000.0
+  },
+  {
+   "boot_id": null,
+   "dedup_key": "nut:ob",
+   "detail": {},
+   "kind": "ups.on_battery",
+   "severity": "warning",
+   "source": "nut",
+   "title": "UPS on battery",
+   "ts": 1700000000.0
+  },
+  {
+   "boot_id": null,
+   "dedup_key": "whea:1",
+   "detail": {
+    "record": 7
+   },
+   "kind": "whea.error",
+   "severity": "critical",
+   "source": "winevent",
+   "title": "WHEA-Logger 18: machine check",
+   "ts": 1700000000.0
+  },
+  {
+   "boot_id": null,
+   "dedup_key": "pstore:1",
+   "detail": {},
+   "kind": "kernel.panic",
+   "severity": "info",
+   "source": "pstore",
+   "title": "note",
+   "ts": 1700000000.0
+  }
+ ],
+ "logs": [
+  {
+   "attributes": {
+    "observe.boot_id": "b1",
+    "observe.dedup_key": "boot:b1",
+    "observe.detail.heartbeat_age_s": 3,
+    "observe.event.kind": "boot.clean_shutdown",
+    "observe.host.clean_shutdown": true,
+    "observe.severity": "info",
+    "observe.source": "boot"
+   },
+   "body": "Previous boot ended: clean shutdown",
+   "event_name": "observe.host.boot",
+   "scope": "hostwatch.agent",
+   "severity_number": 9,
+   "severity_text": "INFO",
+   "ts": 1700000000.0
+  },
+  {
+   "attributes": {
+    "observe.boot_id": "b2",
+    "observe.dedup_key": "boot:b2",
+    "observe.event.kind": "boot.power_loss",
+    "observe.host.clean_shutdown": false,
+    "observe.severity": "critical",
+    "observe.source": "boot"
+   },
+   "body": "Previous boot ended: power loss",
+   "event_name": "observe.host.boot",
+   "scope": "hostwatch.agent",
+   "severity_number": 13,
+   "severity_text": "WARN",
+   "ts": 1700000000.0
+  },
+  {
+   "attributes": {
+    "observe.dedup_key": "journal:md",
+    "observe.detail.cursor": "s=1",
+    "observe.detail.message": "md/raid1:md0: Disk failure",
+    "observe.detail.nested": "{\"a\": 1}",
+    "observe.severity": "critical",
+    "observe.source": "journal"
+   },
+   "body": "md0 degraded",
+   "event_name": "hostwatch.md.degraded",
+   "scope": "hostwatch.collector.journal",
+   "severity_number": 17,
+   "severity_text": "ERROR",
+   "ts": 1700000000.0
+  },
+  {
+   "attributes": {
+    "observe.dedup_key": "journal:zfs",
+    "observe.severity": "warning",
+    "observe.source": "journal"
+   },
+   "body": "pool degraded",
+   "event_name": "hostwatch.zfs.pool_degraded",
+   "scope": "hostwatch.collector.journal",
+   "severity_number": 13,
+   "severity_text": "WARN",
+   "ts": 1700000000.0
+  },
+  {
+   "attributes": {
+    "observe.dedup_key": "th:smart",
+    "observe.detail.rule_key": "k",
+    "observe.detail.state": "firing",
+    "observe.severity": "warning",
+    "observe.source": "thresholds"
+   },
+   "body": "smart",
+   "event_name": "hostwatch.smart.failing",
+   "scope": "hostwatch.collector.thresholds",
+   "severity_number": 13,
+   "severity_text": "WARN",
+   "ts": 1700000000.0
+  },
+  {
+   "attributes": {
+    "observe.dedup_key": "nut:ob",
+    "observe.severity": "warning",
+    "observe.source": "nut"
+   },
+   "body": "UPS on battery",
+   "event_name": "hostwatch.ups.on_battery",
+   "scope": "hostwatch.collector.nut",
+   "severity_number": 13,
+   "severity_text": "WARN",
+   "ts": 1700000000.0
+  },
+  {
+   "attributes": {
+    "observe.dedup_key": "whea:1",
+    "observe.detail.record": 7,
+    "observe.severity": "critical",
+    "observe.source": "winevent"
+   },
+   "body": "WHEA-Logger 18: machine check",
+   "event_name": "hostwatch.whea.error",
+   "scope": "hostwatch.collector.winevent",
+   "severity_number": 17,
+   "severity_text": "ERROR",
+   "ts": 1700000000.0
+  },
+  {
+   "attributes": {
+    "observe.dedup_key": "pstore:1",
+    "observe.severity": "info",
+    "observe.source": "pstore"
+   },
+   "body": "note",
+   "event_name": "hostwatch.kernel.panic",
+   "scope": "hostwatch.collector.pstore",
+   "severity_number": 9,
+   "severity_text": "INFO",
+   "ts": 1700000000.0
+  }
+ ]
+}

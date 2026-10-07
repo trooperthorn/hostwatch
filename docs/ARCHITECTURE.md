@@ -133,6 +133,24 @@ collectors -> agent -> POST /internal/v1/ingest -> hub -> store (SQLite)
                                                          HA MQTT, Orion poller
 ```
 
+## OTEL mapping (`hostwatch/otel_map.py`)
+
+`hostwatch/otel_map.py` converts collector samples, source statuses and events into OpenTelemetry
+points and log records, following section 3 of the Observe data API design. It is pure conversion
+with no network access, and the OTLP encoder and sender consume its output. Resource attributes
+come from `resource_attributes`, and each collector is its own instrumentation scope named
+`hostwatch.collector.<source>`. Percentages become ratios from 0 to 1, units are UCUM, and a sample
+with no value is dropped rather than sent as zero, because the source status metrics already say
+the source could not be read. Memory and swap usage are split into used and free from the total
+and the available reading. A pair the table does not list is sent as
+`observe.legacy.<source>.<metric>` with the unit converted where that is obvious, and logged once
+per process. Events map to logs named `hostwatch.<kind>`, except boot classifications, which use
+`observe.host.boot` with severity 9 or 13 as the design gives them; the original severity stays in
+the `observe.severity` attribute. Event detail is flattened under `observe.detail.*` with a cap on
+keys and value length. The golden inputs and outputs live in `tests/fixtures/otel/`, one file per
+collector plus `events.json`, so Observe can reuse them. This slice adds the mapping only; the
+encoder, the tiered scheduler and the removal of the batch format come in later slices.
+
 ## Events on the wire
 
 A batch may carry an optional `events` list (kind, severity, source, ts, title,

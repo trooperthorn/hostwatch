@@ -1,0 +1,117 @@
+{
+ "points": [
+  {
+   "attributes": {
+    "hw.id": "0",
+    "hw.state": "Healthy",
+    "hw.type": "physical_disk",
+    "observe.win.operational": "OK"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.status",
+   "scope": "hostwatch.collector.win_storage",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.0
+  },
+  {
+   "attributes": {
+    "hw.id": "Pool1",
+    "hw.state": "Healthy",
+    "hw.type": "logical_disk",
+    "observe.win.operational": "OK"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.status",
+   "scope": "hostwatch.collector.win_storage",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.0
+  },
+  {
+   "attributes": {
+    "hw.id": "VD1",
+    "hw.state": "Warning",
+    "hw.type": "logical_disk",
+    "observe.win.operational": "Degraded"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.status",
+   "scope": "hostwatch.collector.win_storage",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  },
+  {
+   "attributes": {
+    "id": "0",
+    "name": "Disk"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.legacy.win_storage.temp",
+   "scope": "hostwatch.collector.win_storage",
+   "ts": 1700000000.0,
+   "unit": "Cel",
+   "value": 30.0
+  }
+ ],
+ "samples": [
+  {
+   "labels": {
+    "bus": "NVMe",
+    "health": "Healthy",
+    "id": "0",
+    "media": "SSD",
+    "name": "Disk",
+    "operational": "OK",
+    "serial": "S"
+   },
+   "metric": "disk_health",
+   "source": "win_storage",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 0
+  },
+  {
+   "labels": {
+    "health": "Healthy",
+    "id": "Pool1",
+    "operational": "OK",
+    "pool": "Pool1"
+   },
+   "metric": "pool_health",
+   "source": "win_storage",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 0
+  },
+  {
+   "labels": {
+    "health": "Warning",
+    "id": "VD1",
+    "operational": "Degraded",
+    "virtual_disk": "VD1"
+   },
+   "metric": "virtual_disk_health",
+   "source": "win_storage",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 1
+  },
+  {
+   "labels": {
+    "id": "0",
+    "name": "Disk"
+   },
+   "metric": "temp",
+   "source": "win_storage",
+   "ts": 1700000000.0,
+   "unit": "C",
+   "value": 30
+  }
+ ]
+}

@@ -1,0 +1,116 @@
+{
+ "points": [
+  {
+   "attributes": {
+    "hw.id": "zone:cpu",
+    "observe.thermal.zone": "cpu"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.temperature",
+   "scope": "hostwatch.collector.thermalctl",
+   "ts": 1700000000.0,
+   "unit": "Cel",
+   "value": 55.0
+  },
+  {
+   "attributes": {
+    "observe.thermal.zone": "cpu"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.thermal.zone.load",
+   "scope": "hostwatch.collector.thermalctl",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.6
+  },
+  {
+   "attributes": {
+    "hw.id": "fan:FAN1"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.thermal.fan.duty",
+   "scope": "hostwatch.collector.thermalctl",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.35
+  },
+  {
+   "attributes": {
+    "hw.id": "fan:FAN1",
+    "observe.thermal.controlled": true
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.fan.speed",
+   "scope": "hostwatch.collector.thermalctl",
+   "ts": 1700000000.0,
+   "unit": "{rpm}",
+   "value": 900.0
+  },
+  {
+   "attributes": {
+    "observe.thermal.mode": "auto"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.thermal.mode",
+   "scope": "hostwatch.collector.thermalctl",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  }
+ ],
+ "samples": [
+  {
+   "labels": {
+    "zone": "cpu"
+   },
+   "metric": "zone_temp",
+   "source": "thermalctl",
+   "ts": 1700000000.0,
+   "unit": "C",
+   "value": 55
+  },
+  {
+   "labels": {
+    "zone": "cpu"
+   },
+   "metric": "zone_load",
+   "source": "thermalctl",
+   "ts": 1700000000.0,
+   "unit": "%",
+   "value": 60
+  },
+  {
+   "labels": {
+    "chip": "thermalctl",
+    "mode": "auto",
+    "reasons": "",
+    "sensor": "FAN1",
+    "state": "active"
+   },
+   "metric": "fan_duty",
+   "source": "thermalctl",
+   "ts": 1700000000.0,
+   "unit": "%",
+   "value": 35
+  },
+  {
+   "labels": {
+    "chip": "thermalctl",
+    "mode": "auto",
+    "reasons": "",
+    "sensor": "FAN1",
+    "state": "active"
+   },
+   "metric": "fan",
+   "source": "thermalctl",
+   "ts": 1700000000.0,
+   "unit": "RPM",
+   "value": 900
+  }
+ ]
+}

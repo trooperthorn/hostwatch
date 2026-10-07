@@ -1,0 +1,111 @@
+{
+ "points": [
+  {
+   "attributes": {
+    "hw.id": "ups:ups"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.battery.charge",
+   "scope": "hostwatch.collector.nut",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  },
+  {
+   "attributes": {
+    "hw.id": "ups:ups"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.battery.time_left",
+   "scope": "hostwatch.collector.nut",
+   "ts": 1700000000.0,
+   "unit": "s",
+   "value": 1200.0
+  },
+  {
+   "attributes": {
+    "hw.id": "ups:ups",
+    "hw.type": "power_supply"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.voltage",
+   "scope": "hostwatch.collector.nut",
+   "ts": 1700000000.0,
+   "unit": "V",
+   "value": 230.1
+  },
+  {
+   "attributes": {
+    "hw.id": "ups:ups"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.ups.load",
+   "scope": "hostwatch.collector.nut",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.25
+  },
+  {
+   "attributes": {
+    "hw.id": "ups:ups",
+    "observe.ups.flag": "OL"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.ups.status",
+   "scope": "hostwatch.collector.nut",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  }
+ ],
+ "samples": [
+  {
+   "labels": {},
+   "metric": "battery_charge_pct",
+   "source": "nut",
+   "ts": 1700000000.0,
+   "unit": "%",
+   "value": 100
+  },
+  {
+   "labels": {},
+   "metric": "battery_runtime_s",
+   "source": "nut",
+   "ts": 1700000000.0,
+   "unit": "s",
+   "value": 1200
+  },
+  {
+   "labels": {},
+   "metric": "input_voltage_v",
+   "source": "nut",
+   "ts": 1700000000.0,
+   "unit": "V",
+   "value": 230.1
+  },
+  {
+   "labels": {},
+   "metric": "ups_load_pct",
+   "source": "nut",
+   "ts": 1700000000.0,
+   "unit": "%",
+   "value": 25
+  },
+  {
+   "labels": {
+    "flag": "OL",
+    "status": "OL"
+   },
+   "metric": "ups_status_flag",
+   "source": "nut",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 1
+  }
+ ]
+}

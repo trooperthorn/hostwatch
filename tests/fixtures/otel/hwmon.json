@@ -1,0 +1,104 @@
+{
+ "points": [
+  {
+   "attributes": {
+    "hw.id": "coretemp:Package id 0",
+    "hw.name": "Package id 0",
+    "hw.parent": "coretemp"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.temperature",
+   "scope": "hostwatch.collector.hwmon",
+   "ts": 1700000000.0,
+   "unit": "Cel",
+   "value": 45.5
+  },
+  {
+   "attributes": {
+    "hw.id": "nct6775:fan1",
+    "hw.name": "fan1",
+    "hw.parent": "nct6775"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.fan.speed",
+   "scope": "hostwatch.collector.hwmon",
+   "ts": 1700000000.0,
+   "unit": "{rpm}",
+   "value": 1200.0
+  },
+  {
+   "attributes": {
+    "hw.id": "nct6775:in0",
+    "hw.name": "in0"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.voltage",
+   "scope": "hostwatch.collector.hwmon",
+   "ts": 1700000000.0,
+   "unit": "V",
+   "value": 12.1
+  },
+  {
+   "attributes": {
+    "hw.id": "amdgpu:power1",
+    "hw.name": "power1"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.power",
+   "scope": "hostwatch.collector.hwmon",
+   "ts": 1700000000.0,
+   "unit": "W",
+   "value": 55.2
+  }
+ ],
+ "samples": [
+  {
+   "labels": {
+    "chip": "coretemp",
+    "sensor": "Package id 0"
+   },
+   "metric": "temp",
+   "source": "hwmon",
+   "ts": 1700000000.0,
+   "unit": "C",
+   "value": 45.5
+  },
+  {
+   "labels": {
+    "chip": "nct6775",
+    "sensor": "fan1"
+   },
+   "metric": "fan",
+   "source": "hwmon",
+   "ts": 1700000000.0,
+   "unit": "RPM",
+   "value": 1200
+  },
+  {
+   "labels": {
+    "chip": "nct6775",
+    "sensor": "in0"
+   },
+   "metric": "voltage",
+   "source": "hwmon",
+   "ts": 1700000000.0,
+   "unit": "V",
+   "value": 12.1
+  },
+  {
+   "labels": {
+    "chip": "amdgpu",
+    "sensor": "power1"
+   },
+   "metric": "power",
+   "source": "hwmon",
+   "ts": 1700000000.0,
+   "unit": "W",
+   "value": 55.2
+  }
+ ]
+}

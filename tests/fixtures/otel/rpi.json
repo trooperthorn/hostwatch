@@ -1,0 +1,67 @@
+{
+ "points": [
+  {
+   "attributes": {
+    "hw.id": "soc",
+    "hw.type": "cpu"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.temperature",
+   "scope": "hostwatch.collector.rpi",
+   "ts": 1700000000.0,
+   "unit": "Cel",
+   "value": 51.2
+  },
+  {
+   "attributes": {
+    "observe.rpi.flag": "under_voltage_now"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.rpi.throttled",
+   "scope": "hostwatch.collector.rpi",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  },
+  {
+   "attributes": {},
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.rpi.throttled_raw",
+   "scope": "hostwatch.collector.rpi",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 5.0
+  }
+ ],
+ "samples": [
+  {
+   "labels": {},
+   "metric": "soc_temp",
+   "source": "rpi",
+   "ts": 1700000000.0,
+   "unit": "C",
+   "value": 51.2
+  },
+  {
+   "labels": {
+    "flag": "under_voltage_now"
+   },
+   "metric": "throttle_flag",
+   "source": "rpi",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 1
+  },
+  {
+   "labels": {},
+   "metric": "throttled_raw",
+   "source": "rpi",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 5
+  }
+ ]
+}

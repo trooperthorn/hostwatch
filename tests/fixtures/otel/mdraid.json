@@ -1,0 +1,101 @@
+{
+ "points": [
+  {
+   "attributes": {
+    "hw.id": "md:md0",
+    "hw.state": "clean",
+    "hw.type": "logical_disk"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "hw.status",
+   "scope": "hostwatch.collector.mdraid",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  },
+  {
+   "attributes": {
+    "hw.id": "md:md0",
+    "observe.mdraid.action": "idle"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.mdraid.sync_action",
+   "scope": "hostwatch.collector.mdraid",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 1.0
+  },
+  {
+   "attributes": {
+    "hw.id": "md:md0"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.mdraid.sync_progress",
+   "scope": "hostwatch.collector.mdraid",
+   "ts": 1700000000.0,
+   "unit": "1",
+   "value": 0.425
+  },
+  {
+   "attributes": {
+    "array": "md0",
+    "level": "raid1"
+   },
+   "kind": "gauge",
+   "monotonic": false,
+   "name": "observe.legacy.mdraid.degraded",
+   "scope": "hostwatch.collector.mdraid",
+   "ts": 1700000000.0,
+   "unit": "{count}",
+   "value": 0.0
+  }
+ ],
+ "samples": [
+  {
+   "labels": {
+    "array": "md0",
+    "state": "clean"
+   },
+   "metric": "array_state",
+   "source": "mdraid",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 1
+  },
+  {
+   "labels": {
+    "action": "idle",
+    "array": "md0"
+   },
+   "metric": "sync_action",
+   "source": "mdraid",
+   "ts": 1700000000.0,
+   "unit": "",
+   "value": 1
+  },
+  {
+   "labels": {
+    "array": "md0"
+   },
+   "metric": "sync_progress_pct",
+   "source": "mdraid",
+   "ts": 1700000000.0,
+   "unit": "%",
+   "value": 42.5
+  },
+  {
+   "labels": {
+    "array": "md0",
+    "level": "raid1"
+   },
+   "metric": "degraded",
+   "source": "mdraid",
+   "ts": 1700000000.0,
+   "unit": "count",
+   "value": 0
+  }
+ ]
+}
