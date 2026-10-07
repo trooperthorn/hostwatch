@@ -161,6 +161,13 @@ class Outbox:
         db = sqlite3.connect(path, check_same_thread=False)
         try:
             db.execute("PRAGMA synchronous=FULL")
+            try:
+                legacy = db.execute("SELECT COUNT(*) FROM batches").fetchone()[0]
+            except sqlite3.DatabaseError:
+                legacy = 0  # no legacy table (or an unreadable file, which the checks below report)
+            if legacy:
+                log.warning("dropping %d unsent batches queued by an older version; "
+                            "the old batch format is no longer sent", legacy)
             with db:
                 db.executescript(_SCHEMA)
             db.execute("SELECT COUNT(*) FROM requests").fetchone()

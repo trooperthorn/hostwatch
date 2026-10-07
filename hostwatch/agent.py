@@ -184,24 +184,6 @@ class Agent:
                               json.dumps((sent + [e.dedup_key for e in new])[-MAX_SEEN_KEYS:]))
         return status, new
 
-    def _stage_pending(self, events: list[Event]) -> None:
-        self.outbox.stage(PENDING_BOOT_MARKER,
-                          json.dumps([e.model_dump() for e in events]) if events else None)
-
-    def _read_pstore(self) -> tuple[SourceStatus, list[Event]]:
-        """Pstore records are re-read whole, so the keys already queued are
-        kept as a marker and committed with the request that carries the rest."""
-        status, found = pstore.read_pstore(self.cfg.pstore)
-        try:
-            sent = json.loads(self.outbox.get(PSTORE_SENT_MARKER) or "[]")
-        except ValueError:
-            sent = []
-        new = [e for e in found if e.dedup_key not in sent]
-        if new:
-            self.outbox.stage(PSTORE_SENT_MARKER,
-                              json.dumps((sent + [e.dedup_key for e in new])[-MAX_SEEN_KEYS:]))
-        return status, new
-
     # -- rates from Observe ------------------------------------------------------------------
 
     def fetch_config(self, client: httpx.Client) -> bool:
@@ -351,38 +333,6 @@ class Agent:
                 why = str(exc)
             out.append(boot.boot_event(boot.missed_boot_classification(rec, hints, why, prev_id)))
         return out
-
-    def detect(self) -> None:
-        for c in self.collectors:
-            absent = False
-            if self.platform == "windows" and c.linux_only:
-                # Nothing was probed: these sources read sysfs, procfs or /run, which a Windows host
-                # does not have, so they are not present rather than present but unavailable.
-                ok, reason, absent = False, f"{c.id} reads Linux-only locations and is not present on Windows", True
-            else:
-                try:
-                    ok, reason = c.detect()
-                except Exception as exc:
-                    ok, reason = False, f"detect error: {type(exc).__name__}: {exc}"
-            prev = self.status.get(c.id)
-            if prev is None or prev.available != ok:
-                log.info("source %s: %s %s", c.id, "available" if ok else "unavailable", reason)
-            if not ok and not absent:
-                try:
-                    absent = c.is_absent()
-                except Exception as exc:
-                    log.warning("source %s: could not establish absence: %s", c.id, exc)
-            self.status[c.id] = SourceStatus(source=c.id, available=ok, reason=reason, present=not absent)
-        self._last_detect = time.monotonic()
-
-    def _retry_now(self, c) -> bool:
-        """A configured polled source is tried again every cycle after a failure."""
-        if not c.retry_each_cycle:
-            return False
-        try:
-            return not c.is_absent()
-        except Exception:
-            return False
 
     def detect(self) -> None:
         for c in self.collectors:

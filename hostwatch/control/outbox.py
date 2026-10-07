@@ -2,7 +2,7 @@
 
 A result waits in a SQLite file in the control data directory until Observe answers 2xx, so a
 network outage or a restart delays the report but does not lose it. The outbox is separate from the
-collector's batch outbox and holds nothing but results. A command id has at most one queued row per
+collector's outbox and holds nothing but results. A command id has at most one queued row per
 status and at most one final one (done, failed or cancelled): the first final result queued for it wins, so
 a later report can never overwrite the report of what really happened. A scheduled reboot queues a
 `scheduled` row first and its final row later, in that order. A refusal is queued only when nothing else is

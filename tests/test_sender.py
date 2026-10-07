@@ -157,7 +157,7 @@ def test_the_agent_is_the_only_place_that_sends_and_it_uses_no_other_path():
 
 # -- the old batch format is gone --------------------------------------------------------------
 
-OLD = re.compile(r"\bBatch\b|batch_id|/internal/v1/ingest|bschema_versionb|\bSCHEMA_VERSION\b|"
+OLD = re.compile(r"\bBatch\b|batch_id|/internal/v1/ingest|\bschema_version\b|\bSCHEMA_VERSION\b|"
                  r"hostwatch\.schema|from \.+schema import|ingest_batch|internal/v1/events")
 
 
