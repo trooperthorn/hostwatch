@@ -157,9 +157,9 @@ overrides in memory, keeping every floor already set, and pipes them to the one 
 that touches thermalctl: `sudo -n /opt/thermalctl/venv/bin/thermalctl install-override`. thermalctl requires
 `/etc/thermalctl/overrides.toml` to be owned by root, so the daemon never writes it itself; install-override validates
 the text, replaces the file atomically as root and signals the service. Floor changes expire with the signed command
-(at most 900 seconds). The rule matches the example in thermal-control-linux exactly, with no arguments. The thermalctl
+(at most 900 seconds). A floor change is refused when the file holds a mode or floors without an expiry, and a mode change is refused while time-bounded floors exist, so no override outlives its purpose. Floors whose expiry has passed are dropped, not renewed. The rule matches the example in thermal-control-linux exactly, with no arguments. The thermalctl
 path, the venv's bin directory and its interpreter must be root owned and not writable by anyone else. The unit sets
-`ReadWritePaths=-/etc/thermalctl` because `ProtectSystem=strict` would otherwise keep `/etc` read-only for that root
+`ReadWritePaths=-/etc/thermalctl -/run/thermalctl` (the second is the lock file thermalctl opens while its service runs) because `ProtectSystem=strict` would otherwise keep `/etc` read-only for that root
 command too; the directory stays root owned, so the control account itself still cannot write it. If thermalctl refuses
 the text the command is reported failed with its message and the live overrides and the fans are untouched.
 

@@ -1287,12 +1287,12 @@ def test_an_old_format_state_is_logged_with_its_path_and_the_upgrade_command(env
     assert str(env.data / STATE_FILE) in text and "state-upgrade" in text
 
 
-def test_the_unit_makes_only_the_thermalctl_directory_writable_and_the_sudoers_rule_is_install_override():
+def test_the_unit_makes_only_the_thermalctl_directories_writable_and_the_sudoers_rule_is_install_override():
     u = _unit()
     assert u["ProtectSystem"] == ["strict"]
     # The sudo children of the daemon inherit the read-only /etc, so the one directory is opened up. The dash lets
     # the unit start where thermalctl is not installed.
-    assert u["ReadWritePaths"] == ["-/etc/thermalctl"]
+    assert u["ReadWritePaths"] == ["-/etc/thermalctl -/run/thermalctl"]
     assert "ProtectSystem=full" not in UNIT.read_text(encoding="utf-8")
     rules = [l.split("NOPASSWD: ", 1)[1] for l in SUDOERS.read_text(encoding="utf-8").splitlines()
              if l and not l.startswith("#")]

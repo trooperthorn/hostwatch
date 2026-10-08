@@ -104,9 +104,11 @@ def test_the_expiry_is_the_signed_commands_and_never_beyond_the_configured_maxim
     assert tomllib.loads(path.read_text())["expires_at"] == NOW + al.MAX_OVERRIDE_S
     assert actions.execute({"action": "fan.set_floor", "params": {"header": "pwm1", "min_duty": 25}}).ok
     assert tomllib.loads(path.read_text())["expires_at"] == NOW + al.MAX_OVERRIDE_S
-    assert actions.execute({"action": "fan.set_floor", "expires_at": True,
-                            "params": {"header": "pwm1", "min_duty": 25}}).ok
-    assert tomllib.loads(path.read_text())["expires_at"] == NOW + al.MAX_OVERRIDE_S
+    # A command expiry that is not an integer is refused rather than replaced by a later cap.
+    for bad in (True, 1.5e9 + 70000.5, "soon"):
+        result = actions.execute({"action": "fan.set_floor", "expires_at": bad,
+                                  "params": {"header": "pwm1", "min_duty": 25}})
+        assert result.status == "refused", bad
 
 
 def test_a_command_that_has_already_expired_installs_nothing(setup):
@@ -145,39 +147,84 @@ def test_the_default_argv_is_exactly_the_sudoers_rule_with_no_extra_arguments():
     seen = []
     actions = al.LinuxActions(config(), lambda a, t: seen.append(" ".join(a)) or al.RunResult(0, "ok"),
                               use_sudo=True, writer=lambda a, d, t: seen.append(" ".join(a)) or al.RunResult(0, ""))
-    actions._read_overrides = lambda: (None, None, {})
+    actions._read_overrides = lambda: (None, None, {}, None)
     assert actions.fan_set_floor("pwm1", 30).ok
     assert seen == ["sudo -n /opt/thermalctl/venv/bin/thermalctl install-override"]
     assert seen[0].removeprefix("sudo -n ") in al.sudoers_commands(config())
 
 
-def test_set_floor_keeps_every_existing_floor_and_the_mode(setup):
-    actions, root, path = setup
-    path.write_text('mode = "dry_run"\n\n[headers.pwm1]\nmin_duty = 30\n')
-    assert actions.fan_set_floor("pwm2", 20).ok
-    assert tomllib.loads(path.read_text()) == {"mode": "dry_run",
-                                               "headers": {"pwm1": {"min_duty": 30}, "pwm2": {"min_duty": 20}}}
-
-
 def test_a_float_floor_survives_a_floor_change_on_another_header(setup):
     actions, root, path = setup
-    path.write_text('expires_at = 1700000000\n\n[headers.pwm1]\nmin_duty = 32.5\n\n[headers.pwm3]\nmin_duty = 41\n')
+    path.write_text(f'expires_at = {NOW + 300}\n\n[headers.pwm1]\nmin_duty = 32.5\n\n[headers.pwm3]\nmin_duty = 41\n')
     assert actions.fan_set_floor("pwm2", 20, NOW + 60).ok
     assert tomllib.loads(path.read_text()) == {
         "expires_at": NOW + 60,
         "headers": {"pwm1": {"min_duty": 32.5}, "pwm2": {"min_duty": 20}, "pwm3": {"min_duty": 41}}}
-    # A mode change keeps them too, and a whole number written as a float stays a float.
-    path.write_text('[headers.pwm1]\nmin_duty = 32.0\n')
-    assert actions.fan_set_mode("active").ok
-    assert tomllib.loads(path.read_text()) == {"mode": "active", "headers": {"pwm1": {"min_duty": 32.0}}}
-    assert isinstance(tomllib.loads(path.read_text())["headers"]["pwm1"]["min_duty"], float)
 
 
-def test_a_mode_in_the_file_is_never_given_an_expiry_because_thermalctl_refuses_the_pair(setup):
+def test_a_floor_change_never_extends_the_life_of_floors_already_in_the_file(setup):
+    actions, root, path = setup
+    path.write_text(f'expires_at = {NOW + 30}\n\n[headers.pwm1]\nmin_duty = 30\n')
+    assert actions.fan_set_floor("pwm2", 20, NOW + 600).ok
+    assert tomllib.loads(path.read_text())["expires_at"] == NOW + 30
+
+
+def test_floors_whose_expiry_has_passed_are_dropped_not_renewed(setup):
+    actions, root, path = setup
+    path.write_text('expires_at = 1700000000\n\n[headers.pwm1]\nmin_duty = 32.5\n\n[headers.pwm3]\nmin_duty = 41\n')
+    assert actions.fan_set_floor("pwm2", 20, NOW + 60).ok
+    assert tomllib.loads(path.read_text()) == {"expires_at": NOW + 60, "headers": {"pwm2": {"min_duty": 20}}}
+
+
+def test_a_floor_change_is_refused_when_the_file_holds_floors_without_an_expiry(setup):
+    actions, root, path = setup
+    old = '[headers.pwm1]\nmin_duty = 40\n'
+    path.write_text(old)
+    result = actions.fan_set_floor("pwm2", 25)
+    assert result.status == "refused" and "without an expiry" in result.output
+    assert root.order == [] and path.read_text() == old
+
+
+def test_a_floor_change_is_refused_when_the_file_sets_a_mode(setup):
     actions, root, path = setup
     path.write_text('mode = "active"\n')
-    assert actions.fan_set_floor("pwm1", 20, NOW + 60).ok
-    assert "expires_at" not in tomllib.loads(path.read_text())
+    result = actions.fan_set_floor("pwm1", 20, NOW + 60)
+    assert result.status == "refused" and "mode" in result.output
+    assert root.order == [] and path.read_text() == 'mode = "active"\n'
+
+
+def test_a_mode_change_keeps_floors_that_have_no_expiry_and_keeps_float_values(setup):
+    actions, root, path = setup
+    path.write_text('[headers.pwm1]\nmin_duty = 32.0\n')
+    assert actions.fan_set_mode("active").ok
+    loaded = tomllib.loads(path.read_text())
+    assert loaded == {"mode": "active", "headers": {"pwm1": {"min_duty": 32.0}}}
+    assert isinstance(loaded["headers"]["pwm1"]["min_duty"], float)
+
+
+def test_a_mode_change_is_refused_while_time_bounded_floors_exist(setup):
+    actions, root, path = setup
+    old = f'expires_at = {NOW + 300}\n\n[headers.pwm1]\nmin_duty = 30\n'
+    path.write_text(old)
+    result = actions.fan_set_mode("active")
+    assert result.status == "refused" and "permanent" in result.output
+    assert root.order == [] and path.read_text() == old
+
+
+def test_a_mode_change_drops_floors_whose_expiry_has_passed(setup):
+    actions, root, path = setup
+    path.write_text('expires_at = 1700000000\n\n[headers.pwm1]\nmin_duty = 30\n')
+    assert actions.fan_set_mode("active").ok
+    assert tomllib.loads(path.read_text()) == {"mode": "active"}
+
+
+def test_floors_on_header_ids_outside_the_command_pattern_are_preserved(setup):
+    actions, root, path = setup
+    long_id = "h" * 40
+    path.write_text(f'expires_at = {NOW + 300}\n\n[headers."fan.1 a"]\nmin_duty = 30\n\n[headers.{long_id}]\nmin_duty = 35.5\n')
+    assert actions.fan_set_floor("pwm2", 20, NOW + 60).ok
+    assert tomllib.loads(path.read_text())["headers"] == {
+        "fan.1 a": {"min_duty": 30}, long_id: {"min_duty": 35.5}, "pwm2": {"min_duty": 20}}
 
 
 def test_set_mode_restarts_the_service_and_sets_no_expiry(setup):
@@ -192,7 +239,7 @@ def test_set_mode_restarts_the_service_and_sets_no_expiry(setup):
 def test_a_refused_install_reports_failed_with_thermalctls_message_and_leaves_nothing_behind(tmp_path):
     msg = "thermalctl: override not installed, the live file is unchanged: min_duty 5 is below the allowed minimum 20"
     actions, root, path = build(tmp_path, {al.THERMALCTL_BIN: al.RunResult(1, msg)})
-    old = b"[headers.pwm1]\nmin_duty = 32.5\n"
+    old = f"expires_at = {NOW + 300}\n\n[headers.pwm1]\nmin_duty = 32.5\n".encode()
     path.write_bytes(old)
     result = actions.fan_set_floor("pwm2", 5)
     assert not result.ok and result.status == "failed"
@@ -502,3 +549,17 @@ def test_thermalctl_fan_actions_are_refused_without_a_fan_section(tmp_path):
     assert actions.fan_set_floor("pwm1", 30).status == "refused"
     assert actions.fan_set_mode("active").status == "refused"
     assert runner.calls == []
+
+
+def test_the_shipped_unit_lets_install_override_open_its_lock_under_run():
+    unit = (ROOT / "deploy" / "hostwatch-control.service").read_text(encoding="utf-8")
+    paths = [l.removeprefix("ReadWritePaths=") for l in unit.splitlines() if l.startswith("ReadWritePaths=")]
+    assert len(paths) == 1 and "-/etc/thermalctl" in paths[0].split() and "-/run/thermalctl" in paths[0].split()
+
+
+def test_the_docs_name_the_exact_example_rule_command():
+    rule = _rules(EXAMPLE.read_text(encoding="utf-8"))[0]
+    for doc in ("README.md", "docs/deploy-agents.md"):
+        text = (ROOT / doc).read_text(encoding="utf-8")
+        assert "install-override" in text, doc
+    assert rule in (ROOT / "docs" / "deploy-agents.md").read_text(encoding="utf-8")

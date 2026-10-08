@@ -40,7 +40,9 @@ SystemCallArchitectures=native
 # too, so this one directory is made writable in the mount namespace. The directory stays root owned
 # and mode 0755, so the unprivileged account still cannot write it. The leading dash lets the unit start
 # on a host without thermalctl.
-ReadWritePaths=-/etc/thermalctl
+# thermalctl install-override also opens its lock file under /run/thermalctl in write mode while the service
+# runs, so that directory must be writable too, or every fan action would fail with a read-only error.
+ReadWritePaths=-/etc/thermalctl -/run/thermalctl
 
 [Install]
 WantedBy=multi-user.target
