@@ -1,12 +1,13 @@
 # hostwatch-control: the only commands the control account may run as root.
 # Check it with visudo -c -f, then copy it to /etc/sudoers.d/ with mode 0440.
 # Regenerate it when the restart list in control.toml changes.
+#
+# The thermalctl rule matches thermal-control-linux's example exactly: no arguments, so sudo refuses
+# --overrides, --config and --from, and the candidate comes on standard input. The thermalctl path,
+# every directory above it and the interpreter it points to must be root-owned and not writable by
+# any other user, or the account could replace them and gain root.
 
-hostwatch-control ALL=(root) NOPASSWD: /opt/thermalctl/venv/bin/thermalctl check-config /etc/thermalctl/config.toml --overrides /etc/thermalctl/overrides.toml.candidate
-hostwatch-control ALL=(root) NOPASSWD: /usr/bin/tee /etc/thermalctl/overrides.toml.candidate
-hostwatch-control ALL=(root) NOPASSWD: /usr/bin/mv -f /etc/thermalctl/overrides.toml.candidate /etc/thermalctl/overrides.toml
-hostwatch-control ALL=(root) NOPASSWD: /usr/bin/rm -f /etc/thermalctl/overrides.toml.candidate
-hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl kill -s HUP thermalctl
+hostwatch-control ALL=(root) NOPASSWD: /opt/thermalctl/venv/bin/thermalctl install-override
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl restart thermalctl
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl restart hostwatch-agent
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl restart nut-monitor

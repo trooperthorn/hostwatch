@@ -152,15 +152,16 @@ Linux (systemd), as root:
 6. Install `deploy/hostwatch-control.service` into `/etc/systemd/system/`, then `systemctl daemon-reload` and
    `systemctl enable --now hostwatch-control`. Logs are in `journalctl -u hostwatch-control`.
 
-The unit leaves `NoNewPrivileges` off because `sudo` would stop working with it. Fan actions run only when `[fan] controller` is `thermalctl` on Linux. A candidate overrides file is written to
-`/etc/thermalctl/overrides.toml.candidate`, validated, then renamed over the real file. thermalctl requires
-`/etc/thermalctl/overrides.toml` to be owned by root, so the daemon never writes it itself. It runs three exact commands
-from `hostwatch-control.sudoers` as root: `tee` of the candidate (the new text goes on standard input), `mv -f` of the
-candidate over the real file, and `rm -f` of the candidate after a failure. The unit sets `ReadWritePaths=-/etc/thermalctl`
-because `ProtectSystem=strict` would otherwise keep `/etc` read-only for those root commands too; the directory stays
-root owned, so the control account itself still cannot write it. Keep `/etc/thermalctl` owned by root with mode 0755 and
-leave the root umask at 022, because thermalctl ignores an overrides file that its group or others can write. If any step
-fails the command is reported failed and the live overrides and the fans are untouched.
+The unit leaves `NoNewPrivileges` off because `sudo` would stop working with it. Fan actions run only when `[fan] controller` is `thermalctl` on Linux. The daemon builds the new
+overrides in memory, keeping every floor already set, and pipes them to the one command in `hostwatch-control.sudoers`
+that touches thermalctl: `sudo -n /opt/thermalctl/venv/bin/thermalctl install-override`. thermalctl requires
+`/etc/thermalctl/overrides.toml` to be owned by root, so the daemon never writes it itself; install-override validates
+the text, replaces the file atomically as root and signals the service. Floor changes expire with the signed command
+(at most 900 seconds). The rule matches the example in thermal-control-linux exactly, with no arguments. The thermalctl
+path, the venv's bin directory and its interpreter must be root owned and not writable by anyone else. The unit sets
+`ReadWritePaths=-/etc/thermalctl` because `ProtectSystem=strict` would otherwise keep `/etc` read-only for that root
+command too; the directory stays root owned, so the control account itself still cannot write it. If thermalctl refuses
+the text the command is reported failed with its message and the live overrides and the fans are untouched.
 
 Windows, from an elevated PowerShell (a separate service from `hostwatch-agent`):
 

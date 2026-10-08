@@ -301,10 +301,13 @@ persisted one and at most 1000 above it, and the local allowlist. Every refusal 
 restored-older state file refuses every
 command. On Windows `control.toml` must also have a DACL that gives write access only to SYSTEM and Administrators,
 and the installers refuse a data folder owned by another account and lock it to SYSTEM and Administrators. The Linux executors are in `hostwatch/control/actions_linux.py`: `fan.set_floor` and `fan.set_mode`
-stage a candidate beside `/etc/thermalctl/overrides.toml` through the sudo rule `tee`, which keeps the file root
-owned as thermalctl requires, run `thermalctl check-config` with `--overrides` on the candidate, install it with
-`mv -f` only if the check passes, and otherwise remove it and leave the live file and the fans alone, then reload thermalctl with
-`systemctl kill -s HUP` (floor) or restart it (mode); `service.restart` runs `systemctl restart <unit>` or
+build the new overrides in memory, keeping every floor already in `/etc/thermalctl/overrides.toml` (whole numbers and
+decimals such as 32.5) and the mode, and hand the text on standard input to the one sudo rule
+`thermalctl install-override`. thermalctl validates it, replaces the live file atomically with root ownership and
+signals the service, so the account has no `tee`, `mv` or `rm` rule. A floor change carries `expires_at`, the signed
+command's expiry or 900 seconds from now, whichever is sooner, so it never outlives its purpose; a mode change
+sets none, because thermalctl refuses an expiry beside a mode, and restarts thermalctl. A non-zero exit from thermalctl
+is reported as `failed` with its message and nothing changes; `service.restart` runs `systemctl restart <unit>` or
 `docker restart <name>` as an argument list, never a shell, for names that pass a strict pattern (letters,
 digits, `_`, `.`, `-`, no `@`, no `..`, no leading dash); `host.reboot` runs `shutdown -r +N` after `delay_s`
 (rounded up to whole minutes) and can be cancelled with `shutdown -c`, which is what the local

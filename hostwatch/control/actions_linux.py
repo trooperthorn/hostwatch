@@ -8,18 +8,21 @@ command line. Programs are named by absolute path so that the sudoers rule rende
 
 Privilege: when the process is not root, the privileged programs are run as `sudo -n <program>`.
 thermalctl refuses an overrides file that is not root-owned, so the daemon never writes
-`/etc/thermalctl` itself. The new overrides text goes to `sudo -n tee <candidate>` on standard input,
-`thermalctl check-config` validates the candidate, and `sudo -n mv -f <candidate> <overrides>` installs it.
-Each of those is one exact command line in the sudoers rule. If any step fails the command is reported
-failed, the candidate is removed with `sudo -n rm -f <candidate>`, and the live overrides and the fans
-are untouched.
+`/etc/thermalctl` itself. The new overrides text goes to `sudo -n thermalctl install-override` on standard
+input and nothing else: thermalctl validates it with the code the service uses, replaces the live file
+atomically with root ownership and signals the service. That is one exact command line in the sudoers rule,
+so the account gets no generic tee, mv or rm. If thermalctl exits non-zero the command is reported failed
+with its message, and the live overrides and the fans are untouched. Every floor already in the file,
+integer or float, is kept, and a floor change carries an `expires_at` so it never outlives its purpose.
 """
 
 from __future__ import annotations
 
+import math
 import os
 import re
 import subprocess
+import time
 import tomllib
 from dataclasses import dataclass
 from pathlib import Path
@@ -30,16 +33,15 @@ from .redact import MAX_OUTPUT, redact  # noqa: F401
 
 SYSTEMCTL = "/usr/bin/systemctl"
 DOCKER = "/usr/bin/docker"
-TEE = "/usr/bin/tee"
-MV = "/usr/bin/mv"
-RM = "/usr/bin/rm"
 THERMALCTL_BIN = "/opt/thermalctl/venv/bin/thermalctl"
-THERMALCTL_CONFIG = "/etc/thermalctl/config.toml"
 OVERRIDES_PATH = "/etc/thermalctl/overrides.toml"
 THERMALCTL_UNIT = "thermalctl"
 THERMALCTL_CONTROLLER = "thermalctl"
-# The candidate overrides are checked under this fixed name so the sudoers rule can name it exactly.
-CANDIDATE_SUFFIX = ".candidate"
+# The one privileged command that delivers overrides. It takes no arguments: the candidate is on standard input
+# and thermalctl's own defaults name the config and the live file, so the sudoers rule can match it exactly.
+INSTALL_OVERRIDE_ARGS = ("install-override",)
+# A floor override expires with the signed command, and never later than this many seconds from now.
+MAX_OVERRIDE_S = 900
 # The reboot is a transient systemd timer, so the delay is exact to the second. shutdown(8) only counts minutes.
 REBOOT_UNIT = "hostwatch-reboot"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
@@ -98,12 +100,13 @@ def _clip(text: str) -> str:
 class LinuxActions:
     def __init__(self, config: ControlConfig, runner: Runner = subprocess_runner, *,
                  overrides_path: str | Path = OVERRIDES_PATH, thermalctl_bin: str = THERMALCTL_BIN,
-                 thermalctl_config: str = THERMALCTL_CONFIG, use_sudo: bool | None = None,
-                 timeout: float = 120.0, writer: Writer = subprocess_writer):
+                 use_sudo: bool | None = None, timeout: float = 120.0, writer: Writer = subprocess_writer,
+                 clock: Callable[[], float] = time.time):
         self.config, self.runner, self.writer, self.timeout = config, runner, writer, timeout
+        self.clock = clock
+        # Only read here: thermalctl installs to its own default path, which the sudoers rule names.
         self.overrides_path = Path(overrides_path)
-        self.candidate_path = self.overrides_path.with_name(self.overrides_path.name + CANDIDATE_SUFFIX)
-        self.thermalctl_bin, self.thermalctl_config = thermalctl_bin, thermalctl_config
+        self.thermalctl_bin = thermalctl_bin
         if use_sudo is None:
             use_sudo = hasattr(os, "geteuid") and os.geteuid() != 0
         self.use_sudo = use_sudo
@@ -114,7 +117,7 @@ class LinuxActions:
         if not isinstance(params, dict):
             return ActionResult(False, "refused", "params must be an object")
         if action == "fan.set_floor":
-            return self.fan_set_floor(params.get("header"), params.get("min_duty"))
+            return self.fan_set_floor(params.get("header"), params.get("min_duty"), command.get("expires_at"))
         if action == "fan.set_mode":
             return self.fan_set_mode(params.get("mode"))
         if action == "service.restart":
@@ -133,14 +136,15 @@ class LinuxActions:
 
     # fan actions ------------------------------------------------------------------------------
 
-    def fan_set_floor(self, header: object, min_duty: object) -> ActionResult:
+    def fan_set_floor(self, header: object, min_duty: object, command_expires_at: object = None) -> ActionResult:
         if (refused := self._fan_refusal()) is not None:
             return refused
         if not isinstance(header, str) or not HEADER_ID.fullmatch(header):
             return ActionResult(False, "refused", "invalid header name")
         if isinstance(min_duty, bool) or not isinstance(min_duty, int) or not 0 <= min_duty <= 100:
             return ActionResult(False, "refused", "min_duty must be an integer from 0 to 100")
-        return self._apply_overrides(lambda mode, floors: (mode, {**floors, header: min_duty}), restart=False)
+        return self._apply_overrides(lambda mode, floors: (mode, {**floors, header: min_duty}), restart=False,
+                                     expires_at=self._expiry(command_expires_at))
 
     def fan_set_mode(self, mode: object) -> ActionResult:
         if (refused := self._fan_refusal()) is not None:
@@ -149,7 +153,14 @@ class LinuxActions:
             return ActionResult(False, "refused", "mode must be dry_run or active")
         return self._apply_overrides(lambda _mode, floors: (mode, floors), restart=True)
 
-    def _read_overrides(self) -> tuple[bytes | None, str | None, dict[str, int]]:
+    def _expiry(self, command_expires_at: object) -> int:
+        """Epoch second at which a floor override stops applying: the signed command's expiry, capped."""
+        cap = int(self.clock()) + MAX_OVERRIDE_S
+        if isinstance(command_expires_at, bool) or not isinstance(command_expires_at, int):
+            return cap
+        return min(command_expires_at, cap)
+
+    def _read_overrides(self) -> tuple[bytes | None, str | None, dict[str, int | float]]:
         try:
             raw = self.overrides_path.read_bytes()
         except FileNotFoundError:
@@ -157,25 +168,25 @@ class LinuxActions:
         data = tomllib.loads(raw.decode("utf-8"))
         mode = data.get("mode")
         headers = data.get("headers", {})
+        # thermalctl accepts a float floor such as 32.5, so every number is kept as it was written.
         floors = {name: t["min_duty"] for name, t in headers.items()
                   if HEADER_ID.fullmatch(name) and isinstance(t, dict)
-                  and isinstance(t.get("min_duty"), int) and not isinstance(t["min_duty"], bool)}
+                  and isinstance(t.get("min_duty"), (int, float)) and not isinstance(t["min_duty"], bool)
+                  and math.isfinite(t["min_duty"])}
         if mode is not None and mode not in MODES:
             raise ValueError("existing overrides have an unknown mode")
         return raw, mode, floors
 
     @staticmethod
-    def _render(mode: str | None, floors: dict[str, int]) -> bytes:
-        lines = ["# Written by hostwatch-control. Changes are validated by thermalctl check-config.\n"]
+    def _render(mode: str | None, floors: dict[str, int | float], expires_at: int | None = None) -> bytes:
+        lines = ["# Written by hostwatch-control. Changes are validated by thermalctl install-override.\n"]
         if mode is not None:
             lines.append(f'mode = "{mode}"\n')
+        if expires_at is not None:
+            lines.append(f"expires_at = {expires_at}\n")
         for name in sorted(floors):
-            lines.append(f"\n[headers.{name}]\nmin_duty = {floors[name]}\n")
+            lines.append(f"\n[headers.{name}]\nmin_duty = {floors[name]!r}\n")
         return "".join(lines).encode("utf-8")
-
-    def _discard_candidate(self) -> None:
-        """Best effort removal of the candidate. It is never the live file, so a failure here changes nothing."""
-        self._run([RM, "-f", str(self.candidate_path)])
 
     def _fan_refusal(self) -> ActionResult | None:
         fan = self.config.fan
@@ -183,36 +194,30 @@ class LinuxActions:
             return ActionResult(False, "refused", "fan.controller is not thermalctl")
         return None
 
-    def _apply_overrides(self, change: Callable, restart: bool) -> ActionResult:
+    def _apply_overrides(self, change: Callable, restart: bool, expires_at: int | None = None) -> ActionResult:
         try:
             _previous, mode, floors = self._read_overrides()
         except (OSError, ValueError, KeyError, UnicodeDecodeError, tomllib.TOMLDecodeError) as exc:
             return ActionResult(False, "failed", f"cannot read the existing overrides: {exc}")
         new_mode, new_floors = change(mode, floors)
-        staged = self._write([TEE, str(self.candidate_path)], self._render(new_mode, new_floors))
-        if staged.returncode != 0:
-            self._discard_candidate()
-            return ActionResult(False, "failed", _clip(
-                f"cannot write the overrides. The existing overrides and the fans were not changed. {staged.output}"))
-        check = self._run([self.thermalctl_bin, "check-config", self.thermalctl_config,
-                           "--overrides", str(self.candidate_path)])
-        if check.returncode != 0:
-            self._discard_candidate()
-            return ActionResult(False, "failed", _clip(
-                f"check-config rejected the overrides. The existing overrides were not changed. {check.output}"))
-        installed = self._run([MV, "-f", str(self.candidate_path), str(self.overrides_path)])
+        if new_mode is not None:
+            # thermalctl refuses an expiry beside a mode, because a mode change needs a restart to revert.
+            expires_at = None
+        elif expires_at is not None and expires_at <= int(self.clock()):
+            return ActionResult(False, "failed", "the command has already expired, so no override was installed")
+        installed = self._write([self.thermalctl_bin, *INSTALL_OVERRIDE_ARGS],
+                                self._render(new_mode, new_floors, expires_at))
         if installed.returncode != 0:
-            self._discard_candidate()
             return ActionResult(False, "failed", _clip(
-                f"cannot install the overrides. The existing overrides and the fans were not changed. {installed.output}"))
+                "thermalctl install-override failed. The existing overrides and the fans were not changed. "
+                f"{installed.output}"))
         if restart:
+            # install-override signals the service itself, but a reload refuses a mode change, so restart.
             applied = self._run([SYSTEMCTL, "restart", THERMALCTL_UNIT])
-        else:
-            applied = self._run([SYSTEMCTL, "kill", "-s", "HUP", THERMALCTL_UNIT])
-        if applied.returncode != 0:
-            verb = "restarted" if restart else "reloaded"
-            return ActionResult(False, "failed", _clip(f"overrides written but thermalctl was not {verb}. {applied.output}"))
-        return ActionResult(True, "done", _clip(check.output))
+            if applied.returncode != 0:
+                return ActionResult(False, "failed", _clip(
+                    f"overrides written but thermalctl was not restarted. {applied.output}"))
+        return ActionResult(True, "done", _clip(installed.output))
 
     # services ---------------------------------------------------------------------------------
 
@@ -263,11 +268,7 @@ def sudoers_commands(config: ControlConfig) -> list[str]:
     """Exactly the privileged command shapes the Linux executors can run, nothing wider."""
     cmds = []
     if config.fan is not None and config.fan.controller == "thermalctl":
-        cmds += [f"{THERMALCTL_BIN} check-config {THERMALCTL_CONFIG} --overrides {OVERRIDES_PATH}{CANDIDATE_SUFFIX}",
-                 f"{TEE} {OVERRIDES_PATH}{CANDIDATE_SUFFIX}",
-                 f"{MV} -f {OVERRIDES_PATH}{CANDIDATE_SUFFIX} {OVERRIDES_PATH}",
-                 f"{RM} -f {OVERRIDES_PATH}{CANDIDATE_SUFFIX}",
-                 f"{SYSTEMCTL} kill -s HUP {THERMALCTL_UNIT}",
+        cmds += [" ".join([THERMALCTL_BIN, *INSTALL_OVERRIDE_ARGS]),
                  f"{SYSTEMCTL} restart {THERMALCTL_UNIT}"]
     for name in config.restart:
         if name.startswith("docker:"):
@@ -291,7 +292,12 @@ def render_sudoers(config: ControlConfig, account: str = "hostwatch-control") ->
         raise ValueError("invalid account name")
     lines = ["# hostwatch-control: the only commands the control account may run as root.",
              "# Check it with visudo -c -f, then copy it to /etc/sudoers.d/ with mode 0440.",
-             "# Regenerate it when the restart list in control.toml changes."]
+             "# Regenerate it when the restart list in control.toml changes.",
+             "#",
+             "# The thermalctl rule matches thermal-control-linux's example exactly: no arguments, so sudo refuses",
+             "# --overrides, --config and --from, and the candidate comes on standard input. The thermalctl path,",
+             "# every directory above it and the interpreter it points to must be root-owned and not writable by",
+             "# any other user, or the account could replace them and gain root."]
     cmds = sudoers_commands(config)
     if cmds:
         lines.append("")

@@ -34,8 +34,9 @@ RestrictRealtime=true
 LockPersonality=true
 SystemCallArchitectures=native
 # Fan actions on thermalctl change /etc/thermalctl/overrides.toml, which thermalctl requires to be root
-# owned. The daemon never writes it directly: it runs the exact tee, check-config, mv and rm commands in
-# hostwatch-control.sudoers as root. ProtectSystem=strict makes /etc read-only for those root children
+# owned. The daemon never writes it directly: it runs the one exact thermalctl install-override command in
+# hostwatch-control.sudoers as root, which writes a temporary file beside the live one and renames it over it.
+# ProtectSystem=strict makes /etc read-only for those root children
 # too, so this one directory is made writable in the mount namespace. The directory stays root owned
 # and mode 0755, so the unprivileged account still cannot write it. The leading dash lets the unit start
 # on a host without thermalctl.

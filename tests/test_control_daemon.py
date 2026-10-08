@@ -179,38 +179,34 @@ def test_a_fan_command_writes_overrides_through_the_real_executor_with_a_fake_ru
     overrides = tmp_path / "overrides.toml"
 
     def writer(argv, data, timeout):
-        ran.append(list(argv))
-        Path(argv[-1]).write_bytes(data)
-        return RunResult(0, "")
+        ran.append((list(argv), data))
+        overrides.write_bytes(data)
+        return RunResult(0, "override installed")
 
-    def runner(argv, timeout):
-        ran.append(list(argv))
-        if argv[0] == "/usr/bin/mv":
-            os.replace(argv[2], argv[3])
-        return RunResult(0, "ok")
-
-    actions = LinuxActions(cfgmod.load(env.settings.config_path), runner, use_sudo=False,
-                           overrides_path=overrides, writer=writer)
-    env.wp.add(env.signer)
+    actions = LinuxActions(cfgmod.load(env.settings.config_path), lambda argv, timeout: RunResult(0, "ok"),
+                           use_sudo=False, overrides_path=overrides, writer=writer, clock=lambda: NOW)
+    cmd = env.wp.add(env.signer)
     env.build(actions).cycle()
     assert env.wp.results[0]["state"] == "done"
-    assert "min_duty = 25" in overrides.read_text(encoding="utf-8")
-    assert any(a[:2] == ["/opt/thermalctl/venv/bin/thermalctl", "check-config"] for a in ran)
+    (argv, data), = ran
+    assert argv == ["/opt/thermalctl/venv/bin/thermalctl", "install-override"]
+    text = data.decode("utf-8")
+    assert "min_duty = 25" in text and f"expires_at = {cmd['expires_at']}" in text
 
 
-def test_a_fan_command_whose_write_fails_is_reported_failed_and_nothing_else_runs(env, tmp_path):
+def test_a_fan_command_whose_install_is_refused_is_reported_failed_and_nothing_else_runs(env, tmp_path):
     ran = []
     overrides = tmp_path / "overrides.toml"
     actions = LinuxActions(cfgmod.load(env.settings.config_path),
                            lambda argv, timeout: ran.append(list(argv)) or RunResult(0, "ok"),
-                           use_sudo=False, overrides_path=overrides,
-                           writer=lambda argv, data, timeout: RunResult(1, "tee: Permission denied"))
+                           use_sudo=False, overrides_path=overrides, clock=lambda: NOW,
+                           writer=lambda argv, data, timeout: RunResult(1, "thermalctl: override not installed"))
     env.wp.add(env.signer)
     env.build(actions).cycle()
     result = env.wp.results[0]
-    assert result["state"] == "failed" and "Permission denied" in result["output"]
+    assert result["state"] == "failed" and "override not installed" in result["output"]
     assert not overrides.exists()
-    assert all(a[0] == "/usr/bin/rm" for a in ran), "only the candidate cleanup may run after a failed write"
+    assert ran == [], "nothing runs after a refused install"
 
 
 def test_commands_run_one_at_a_time_in_seq_order(env):
@@ -1291,7 +1287,7 @@ def test_an_old_format_state_is_logged_with_its_path_and_the_upgrade_command(env
     assert str(env.data / STATE_FILE) in text and "state-upgrade" in text
 
 
-def test_the_unit_makes_only_the_thermalctl_directory_writable_and_the_sudoers_rule_stages_through_it():
+def test_the_unit_makes_only_the_thermalctl_directory_writable_and_the_sudoers_rule_is_install_override():
     u = _unit()
     assert u["ProtectSystem"] == ["strict"]
     # The sudo children of the daemon inherit the read-only /etc, so the one directory is opened up. The dash lets
@@ -1300,10 +1296,7 @@ def test_the_unit_makes_only_the_thermalctl_directory_writable_and_the_sudoers_r
     assert "ProtectSystem=full" not in UNIT.read_text(encoding="utf-8")
     rules = [l.split("NOPASSWD: ", 1)[1] for l in SUDOERS.read_text(encoding="utf-8").splitlines()
              if l and not l.startswith("#")]
-    cand = "/etc/thermalctl/overrides.toml.candidate"
-    assert f"/usr/bin/tee {cand}" in rules
-    assert f"/usr/bin/mv -f {cand} /etc/thermalctl/overrides.toml" in rules
-    assert f"/usr/bin/rm -f {cand}" in rules
+    assert "/opt/thermalctl/venv/bin/thermalctl install-override" in rules
     for rule in rules:
-        if rule.startswith(("/usr/bin/tee", "/usr/bin/mv", "/usr/bin/rm")):
-            assert "*" not in rule and "," not in rule
+        assert not rule.startswith(("/usr/bin/tee", "/usr/bin/mv", "/usr/bin/rm")), rule
+        assert "*" not in rule and "," not in rule
