@@ -8,6 +8,10 @@ The dedup key is the file name plus a hash of the whole content, so reading the 
 record again gives the same key and Observe keeps one row. A record that is
 rewritten with different content gets a new key. The exact file names and the
 record layout are not confirmed on hardware; see UNVERIFIED.md.
+
+A caller that reads the directory repeatedly passes a cache dict. A record whose name, size and
+modification time are unchanged since the last read reuses its event without reading or hashing
+the file again, so a directory of large records costs a stat per file and not a full read per pass.
 """
 
 from __future__ import annotations
@@ -66,10 +70,11 @@ def _read_file(path: Path) -> tuple[bytes, bytes, int, str]:
     return head, tail, size, h.hexdigest()[:16]
 
 
-def read_pstore(root: Path) -> tuple[SourceStatus, list[Event]]:
+def read_pstore(root: Path, cache: dict | None = None) -> tuple[SourceStatus, list[Event]]:
     """Read every regular record file under root. Symlinks are skipped. A
     missing or unreadable directory, or a directory whose records all failed to
-    read, is reported unavailable with a reason."""
+    read, is reported unavailable with a reason. `cache` maps a file name to its last
+    (size, mtime_ns, event); entries for files that are gone are removed."""
     try:
         entries = sorted(root.iterdir())
     except FileNotFoundError:
@@ -91,6 +96,11 @@ def read_pstore(root: Path) -> tuple[SourceStatus, list[Event]]:
         if not stat.S_ISREG(st.st_mode):
             continue
         attempted += 1
+        signature = (st.st_size, st.st_mtime_ns)
+        hit = cache.get(path.name) if cache is not None else None
+        if hit is not None and hit[0] == signature:
+            events.append(hit[1].model_copy(deep=True))
+            continue
         try:
             head, tail, size, digest = _read_file(path)
         except OSError:
@@ -102,12 +112,18 @@ def read_pstore(root: Path) -> tuple[SourceStatus, list[Event]]:
         if truncated:
             scan = text + chr(10) + tail.decode("utf-8", errors="replace")
         kind, severity = classify_record(path.name, scan)
-        events.append(Event(
+        event = Event(
             kind=kind, severity=severity, source=SOURCE, ts=st.st_mtime,
             title=f"pstore record {path.name}",
             detail={"file": path.name, "size_bytes": size, "sha256_16": digest,
                     "truncated": truncated, "excerpt": text[:EXCERPT_CHARS]},
-            dedup_key=f"pstore:{path.name}:{digest}"))
+            dedup_key=f"pstore:{path.name}:{digest}")
+        if cache is not None:
+            cache[path.name] = (signature, event.model_copy(deep=True))
+        events.append(event)
+    if cache is not None:
+        for gone in set(cache) - {p.name for p in entries}:
+            del cache[gone]
     if attempted and skipped == attempted:
         return SourceStatus(
             source=SOURCE, available=False,

@@ -168,7 +168,7 @@ def test_format_and_compression_defaults(monkeypatch):
     monkeypatch.delenv("HOSTWATCH_OTLP_FORMAT", raising=False)
     monkeypatch.delenv("HOSTWATCH_OTLP_GZIP", raising=False)
     cfg = Config()
-    assert cfg.otlp_format == "protobuf" and cfg.otlp_gzip is True
+    assert cfg.otlp_format == "json" and cfg.otlp_gzip is True
     monkeypatch.setenv("HOSTWATCH_OTLP_FORMAT", " JSON ")
     monkeypatch.setenv("HOSTWATCH_OTLP_GZIP", "off")
     cfg = Config()

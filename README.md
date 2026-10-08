@@ -23,8 +23,8 @@ model is in `docs/THREAT-MODEL.md`.
 * **Sends events at once.** Boot classifications, kernel journal matches, RAID, ZFS, SMART, UPS and
   WHEA events, TrueNAS alerts and threshold events are read every five seconds and sent as OTLP logs
   without waiting for their tier.
-* **Sends OTLP only.** `POST /v1/metrics` and `POST /v1/logs`, protobuf by default (JSON with
-  `HOSTWATCH_OTLP_FORMAT=json`), gzip, an `Idempotency-Key` per request and a bearer ingest key.
+* **Sends OTLP only.** `POST /v1/metrics` and `POST /v1/logs`, JSON by default (protobuf with
+  `HOSTWATCH_OTLP_FORMAT=protobuf`), gzip, an `Idempotency-Key` per request and a bearer ingest key.
   A partial success is acknowledged and counted. A request Observe can never accept is
   dead-lettered; everything else waits and is retried with backoff.
 * **Keeps a durable outbox.** Encoded requests wait in `outbox.db` until Observe answers 2xx, bounded
@@ -207,7 +207,7 @@ with an error naming the variable (enforced).
 | `HOSTWATCH_OBSERVE_URL` | The Observe base URL. `HOSTWATCH_HUB_URL` is accepted as an alias, because Observe's install scripts set it. When both are set the first wins |
 | `HOSTWATCH_INGEST_KEY` | The ingest key for this host. It is sent only in the `Authorization` header and is never logged |
 | `HOSTWATCH_HOST_NAME` | The host name in every request. Observe checks it against the host the key is bound to. Defaults to the machine name |
-| `HOSTWATCH_OTLP_FORMAT` | `protobuf` (default) or `json` |
+| `HOSTWATCH_OTLP_FORMAT` | `json` (default) or `protobuf` |
 | `HOSTWATCH_OTLP_GZIP` | gzip the bodies (default on) |
 | `HOSTWATCH_DATA_DIR` | Where `outbox.db`, the heartbeat and the liveness marker live (default `/data`) |
 | `HOSTWATCH_REDETECT` | Seconds between source re-detection (default 600). A source that fails after it was detected is read again within seconds, not after this interval |

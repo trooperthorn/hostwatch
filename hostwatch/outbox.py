@@ -164,6 +164,7 @@ class Outbox:
         self.recovered_from: Path | None = None
         self._incidents: list[str] = []
         self._staged: dict[str, str | None] = {}
+        self._acks_pending = False
         self._warned_drop = 0
         try:
             self._db = self._open(path)
@@ -263,7 +264,11 @@ class Outbox:
             return row[0] if row else None
 
     def stage(self, key: str, value: str | None) -> None:
+        """Stage a value. A value equal to the current one (staged, else durable) is not staged,
+        so a source that reports its unchanged state on every pass causes no marker-only commit."""
         with self._lock:
+            if self.get(key) == value:
+                return
             self._staged[key] = value
 
     def _write_staged(self) -> None:
@@ -379,13 +384,27 @@ class Outbox:
                     self.dead_letter(row[0], 0, f"undecodable headers: {exc}")
 
     @_recovering
-    def ack(self, seq: int) -> None:
-        """Remove a delivered request. Called only after a 2xx answer."""
-        with self._lock, self._db:
+    def ack(self, seq: int, commit: bool = True) -> None:
+        """Remove a delivered request. Called only after a 2xx answer. With commit=False the
+        removal is visible to this connection at once but is made durable by the next
+        commit_acks (or any other write), so a delivery pass commits once for all its requests."""
+        with self._lock:
             self._db.execute("DELETE FROM requests WHERE seq=?", (seq,))
-            if self._db.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0:
-                self._db.execute("DELETE FROM counters WHERE name='dropped_since_drain'")
-                self._warned_drop = 0
+            self._acks_pending = True
+            if commit:
+                self.commit_acks()
+
+    @_recovering
+    def commit_acks(self) -> None:
+        """Make the removals made by ack(commit=False) durable. Does nothing when none are pending."""
+        with self._lock:
+            if not self._acks_pending:
+                return
+            with self._db:
+                if self._db.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 0:
+                    self._db.execute("DELETE FROM counters WHERE name='dropped_since_drain'")
+                    self._warned_drop = 0
+            self._acks_pending = False
 
     @_recovering
     def dead_letter(self, seq: int, status: int, error: str = "") -> None:

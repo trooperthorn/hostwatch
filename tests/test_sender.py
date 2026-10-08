@@ -121,13 +121,20 @@ def test_only_the_otlp_paths_are_posted_and_the_headers_are_the_contract(tmp_pat
     assert observe.posts and set(observe.signals()) <= {"/v1/metrics", "/v1/logs"}
     for req in observe.posts:
         assert req.method == "POST"
-        assert req.headers["content-type"] == "application/x-protobuf"
+        assert req.headers["content-type"] == "application/json"
         assert req.headers["content-encoding"] == "gzip"
         assert req.headers["authorization"] == "Bearer " + "k" * 24
         assert re.fullmatch(r"hw-[0-9a-f]{32}-[ml]\d+", req.headers["idempotency-key"])
         assert len(req.headers["idempotency-key"]) <= 128
         assert len(req.content) <= otlp.MAX_BODY_BYTES
     assert not [c for c in observe.calls if "ingest" in c.url.path]
+
+
+def test_protobuf_and_uncompressed_output_are_options(tmp_path):
+    observe = run_once(tmp_path, otlp_format="protobuf")
+    assert observe.posts
+    for req in observe.posts:
+        assert req.headers["content-type"] == "application/x-protobuf"
 
 
 def test_json_and_uncompressed_output_are_options(tmp_path):

@@ -38,7 +38,7 @@ fetches its polling rates from Observe at start and every five minutes, so a rat
 console applies without a visit to the host. When Observe cannot be reached the defaults apply (availability 30 s,
 device metrics 60 s, storage health 15 min, SMART 1 h, inventory 1 h) and the agent keeps collecting and
 queueing. Events (boot, kernel, RAID, ZFS, SMART, UPS and WHEA) are sent within a few seconds whatever the
-rates are. Data is sent as protobuf with gzip; set `HOSTWATCH_OTLP_FORMAT=json` to debug a receiver.
+rates are. Data is sent as JSON with gzip; set `HOSTWATCH_OTLP_FORMAT=protobuf` to send protobuf instead.
 
 To retire a host, revoke its key in Observe and stop the agent.
 

@@ -1,4 +1,4 @@
-"""OTLP request builder: metrics and logs as protobuf (default) or JSON, optionally gzip.
+"""OTLP request builder: metrics and logs as JSON (default) or protobuf, optionally gzip.
 
 The encoder is hand written so the agent has no new runtime dependency. A request is first built
 in the OTLP JSON shape (lowerCamelCase names, 64-bit integers as decimal strings) and the

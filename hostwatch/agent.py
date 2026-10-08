@@ -197,6 +197,8 @@ class Agent:
         # Pstore and rasdaemon re-read whole records, so keys already handed to a request are
         # remembered and not sent again by this process.
         self._seen_keys: dict[str, None] = {}
+        # Pstore records by name with their size and mtime, so unchanged files are not re-read.
+        self._pstore_cache: dict = {}
         self._cycle_keys: list[str] = []
         self._next_events = 0.0
         self._next_watch = 0.0
@@ -235,7 +237,7 @@ class Agent:
     def _read_pstore(self) -> tuple[SourceStatus, list[Event]]:
         """Pstore records are re-read whole, so the keys already queued are
         kept as a marker and committed with the requests that carry the rest."""
-        status, found = pstore.read_pstore(self.cfg.pstore)
+        status, found = pstore.read_pstore(self.cfg.pstore, self._pstore_cache)
         try:
             sent = json.loads(self.outbox.get(PSTORE_SENT_MARKER) or "[]")
         except ValueError:
@@ -828,8 +830,18 @@ class Agent:
 
         Each send times out after SEND_TIMEOUT_S seconds. A stop request ends the loop between sends
         (unless honour_stop is False, as in the final flush), and a monotonic deadline caps the total
-        time. Unsent requests stay in the outbox either way."""
+        time. Unsent requests stay in the outbox either way.
+
+        Acknowledgements are committed once at the end of the pass, also when the pass ends in an
+        error, so a pass costs one fsync for them and not one per request. A crash before that commit
+        only repeats requests, which carry the same Idempotency-Key."""
         self.outbox.prune()
+        try:
+            self._send_queued(client, deadline, honour_stop)
+        finally:
+            self.outbox.commit_acks()
+
+    def _send_queued(self, client: httpx.Client, deadline: float | None, honour_stop: bool) -> None:
         while (req := self.outbox.peek()) is not None:
             if honour_stop and self._stop.is_set():
                 return
@@ -859,7 +871,7 @@ class Agent:
                                 "observe.agent.rejected.items")
                         log.warning("Observe accepted %s request %s but rejected %d item(s): %s",
                                     req.signal, req.entry_id, rejected, message or "no reason given")
-                self.outbox.ack(req.seq)
+                self.outbox.ack(req.seq, commit=False)
                 continue
             if r.status_code in (401, 403):
                 log.error("Observe answered %d. Check that HOSTWATCH_INGEST_KEY is valid and is bound to "
