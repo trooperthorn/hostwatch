@@ -186,7 +186,7 @@ class ControlDaemon:
         self._failures = 0
         self._pulled = False  # whether the last cycle got an answer to its pull
         self._followed: set[str] = set()  # reboots resolved or cancelled in this cycle, after the pull
-        self.started_at = clock()  # a reboot due before this moment happened while the daemon was down
+        self.started_at = clock()  # a reboot due before this moment stays pending for BOOT_WAIT_S; only the boot id proves it done
         self._headers = {"Authorization": f"Bearer {settings.key}"}
 
     # network ----------------------------------------------------------------------------------
@@ -331,11 +331,21 @@ class ControlDaemon:
         self.outbox.unschedule(cid)
         self._followed.add(cid)
 
+    def _adopt_boot_id(self, cid: str) -> None:
+        """A reboot scheduled before boot ids were recorded has none. While it is not yet due the host is
+        still on the boot it was scheduled on, so the current id is taken as the one to compare against."""
+        if self.outbox.scheduled_boot_id(cid) is None:
+            current = self.boot_id()
+            if current:
+                self.outbox.set_scheduled_boot_id(cid, current)
+
     def resolve_reboots(self) -> None:
         """Report done or failed for a reboot whose time has passed. It is done only when the host boot id
         differs from the one recorded when it was scheduled. A daemon that merely restarted on the same boot
         leaves it pending, and a pending reboot that the host never carries out is failed after BOOT_WAIT_S."""
         for cid, due in self.outbox.scheduled().items():
+            if self.clock() < due:
+                self._adopt_boot_id(cid)
             if self.clock() < due + RESOLVE_GRACE_S:
                 continue
             moved = bootid.changed(self.outbox.scheduled_boot_id(cid), self.boot_id())

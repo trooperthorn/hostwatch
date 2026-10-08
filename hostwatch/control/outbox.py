@@ -188,6 +188,12 @@ class ResultOutbox:
             row = self._db.execute("SELECT boot_id FROM scheduled WHERE command_id=?", (command_id,)).fetchone()
         return row[0] if row else None
 
+    def set_scheduled_boot_id(self, command_id: str, boot_id: str) -> None:
+        """Record the boot id of a pending reboot that was scheduled before boot ids were kept."""
+        with self._lock, self._db:
+            self._db.execute("UPDATE scheduled SET boot_id=? WHERE command_id=? AND boot_id IS NULL",
+                             (boot_id, command_id))
+
     def unschedule(self, command_id: str) -> None:
         with self._lock, self._db:
             self._db.execute("DELETE FROM scheduled WHERE command_id=?", (command_id,))

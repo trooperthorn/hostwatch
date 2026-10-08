@@ -579,3 +579,33 @@ def test_the_real_owner_check_still_refuses_a_stranger_with_pywin32_importable(m
         cfgmod.load(p)
     monkeypatch.setitem(sys.modules, "win32security", _FakeWin32Security("S-1-5-32-544"))
     cfgmod.load(p)
+
+
+def test_the_windows_fixture_trusts_the_test_owner_when_pywin32_is_importable_from_the_start(monkeypatch, tmp_path, signer):
+    """The conftest fixture runs before a test body can install anything, so this runs its Windows branch
+    directly with a simulated pywin32 that is already importable: the user's own SID is trusted, any other
+    owner is still refused, and the production trusted list is what the owner check starts from."""
+    from conftest import trust_the_test_user_as_control_file_owner
+    p = write_cfg(tmp_path, signer)
+    test_user = "S-1-5-21-1-2-3-1001"
+    monkeypatch.setattr(cfgmod.os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "win32security", _FakeWin32Security(test_user))
+    monkeypatch.setattr(cfgmod, "WINDOWS_TRUSTED_SIDS", ("S-1-5-18", "S-1-5-32-544"))
+    with pytest.raises(cfgmod.ConfigError, match="SYSTEM or Administrators"):
+        cfgmod.load(p)  # without the fixture the test user is a stranger
+    trust_the_test_user_as_control_file_owner(monkeypatch, tmp_path)
+    assert cfgmod.WINDOWS_TRUSTED_SIDS == ("S-1-5-18", "S-1-5-32-544", test_user)
+    cfgmod.load(p)
+    monkeypatch.setitem(sys.modules, "win32security", _FakeWin32Security("S-1-5-21-9-9-9-500"))
+    with pytest.raises(cfgmod.ConfigError, match="SYSTEM or Administrators"):
+        cfgmod.load(p)  # a different stranger is still refused
+
+
+def test_the_windows_fixture_adds_nothing_when_the_owner_cannot_be_read(monkeypatch, tmp_path):
+    from conftest import trust_the_test_user_as_control_file_owner
+    fake = _FakeWin32Security()
+    monkeypatch.setattr(cfgmod.os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "win32security", fake)
+    monkeypatch.setattr(cfgmod, "WINDOWS_TRUSTED_SIDS", ("S-1-5-18", "S-1-5-32-544"))
+    trust_the_test_user_as_control_file_owner(monkeypatch, tmp_path / "missing")
+    assert cfgmod.WINDOWS_TRUSTED_SIDS == ("S-1-5-18", "S-1-5-32-544")

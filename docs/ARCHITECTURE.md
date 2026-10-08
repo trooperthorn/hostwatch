@@ -523,7 +523,9 @@ files are described in the section after the executors. Modules:
   decides. The daemon repeats the check before every command, so a renamed or cloned disk answers `refused` with
   reason `wrong_machine` and runs nothing. The agent only warns once when `HOSTWATCH_HOST_NAME` differs from the
   machine name, because containers often differ. The name lookup (the FQDN costs a DNS query, 838 ms in the audit)
-  is cached and read again only at daemon start and when the operating system host name changes.
+  is cached and read again only at daemon start and when the operating system host name changes. A lookup now costs
+  about 35 microseconds once cached (the first lookup on the development machine took 1267 ms). A change in the FQDN
+  or the DNS alone, with the same short host name, is not seen until the daemon restarts; `machine_id` decides when set.
 - `signing.py` builds canonical JSON (sorted keys, no spaces, UTF-8 without ASCII escaping) and verifies the Ed25519
   signature, sent as base64 beside the command, against the pinned key written as `ed25519:` plus base64. The
   `cryptography` import happens only inside the check, and win32 modules are never imported.
@@ -624,7 +626,10 @@ at send time; output is clipped to 4096 characters, the amount Observe keeps.
 
 A `host.reboot` that sets its timer is reported `scheduled`, and the outbox records the promise in its `scheduled`
 table with the due time and the host boot id read when it was scheduled (`control/bootid.py`: the kernel boot_id on
-Linux, the boot time from the tick counter on Windows, same boot within 120 s). Later the same id is reported `done`
+Linux, the boot time and the tick count on Windows). Windows is the same boot when the tick count has not gone down and the
+boot time is within 120 s, a new boot when the tick count went back, and unknown otherwise, so a wall clock correction
+of the host never gives a false `done`. A reboot that was already pending when the daemon was upgraded has no recorded
+id; the new daemon records the current one if it starts before the due time. Later the same id is reported `done`
 only when the boot id at the due time differs from the recorded one. A daemon that restarted on the same boot leaves the
 reboot pending, and it is `failed` (`reboot_not_seen`) when the due time plus 600 s passed on the same boot, or when the
 due time plus 30 s passed and the same daemon process is still running. An unreadable boot id never gives `done`; it ends

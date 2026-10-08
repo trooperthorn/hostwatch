@@ -36,22 +36,26 @@ def pytest_configure(config):
     config.addinivalue_line("markers", "real_platform: use the real detect_platform instead of the Linux stand-in")
 
 
-@pytest.fixture(autouse=True)
-def _control_file_owner_is_the_test_user(monkeypatch, tmp_path_factory):
-    """control.toml must be root-owned (SYSTEM or Administrators on Windows) in production. Tests write
-    it as the current user, so that user is trusted here by adding to the trusted list. The owner check
-    itself is untouched, and the owner tests set the trusted list back to the production value."""
+def trust_the_test_user_as_control_file_owner(monkeypatch, probe):
+    """Trust whoever owns `probe` as the owner of control.toml. On Windows with pywin32 importable the real
+    owner SID of the probe is added to the trusted list. Without pywin32 the check is advisory and there
+    is nothing to widen. POSIX trusts the current uid. The owner check itself is untouched."""
     import os
     import hostwatch.control.config as control_config
     if os.name == "posix":
         monkeypatch.setattr(control_config, "TRUSTED_UIDS", (0, os.getuid()))
         return
-    # Windows with pywin32 installed reads the real owner of the file. Without pywin32 the check is
-    # advisory and there is nothing to widen.
-    probe = tmp_path_factory.getbasetemp()
     try:
         sid = control_config._windows_owner_sid(probe)
     except OSError:
         return
     if sid is not None:
         monkeypatch.setattr(control_config, "WINDOWS_TRUSTED_SIDS", (*control_config.WINDOWS_TRUSTED_SIDS, sid))
+
+
+@pytest.fixture(autouse=True)
+def _control_file_owner_is_the_test_user(monkeypatch, tmp_path_factory):
+    """control.toml must be root-owned (SYSTEM or Administrators on Windows) in production. Tests write
+    it as the current user, so that user is trusted here by adding to the trusted list. The owner check
+    itself is untouched, and the owner tests set the trusted list back to the production value."""
+    trust_the_test_user_as_control_file_owner(monkeypatch, tmp_path_factory.getbasetemp())

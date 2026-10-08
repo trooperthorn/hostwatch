@@ -4,11 +4,15 @@ A daemon that starts again after the due time proves nothing: the service can be
 crash or by an update, with the host still on the same boot. So the boot is recorded when the reboot is
 scheduled and compared when it falls due.
 
-Linux uses the kernel boot_id. Windows has none, so the id is the boot time worked out from the tick
-counter (`win:<epoch seconds>`) and two ids are the same boot when they are within BOOT_TIME_TOLERANCE_S,
-which absorbs clock adjustments. A Windows host that reboots through Fast Startup keeps its tick counter
-on some builds, so on those a real reboot may not be seen and is reported as not seen rather than done.
-When the boot id cannot be read the answer is None, and nothing is reported done on that basis.
+Linux uses the kernel boot_id. Windows has none, so the id is `win:<boot epoch seconds>:<tick ms>`: the boot
+time worked out from the tick counter, and the tick counter itself. The tick counter only grows within one
+boot, so a smaller tick count than the recorded one is a new boot whatever the wall clock did. When the tick
+count has not gone down, the same boot is a boot time within BOOT_TIME_TOLERANCE_S. A boot time further away
+is ambiguous, because it is either a wall clock correction (an NTP resync) or a reboot after which the host
+has been up longer than it was at scheduling, so it answers None and nothing is reported done. A Windows host
+that reboots through Fast Startup keeps its tick counter on some builds, so on those a real reboot may not be
+seen and is reported as not seen rather than done. When the boot id cannot be read the answer is None, and
+nothing is reported done on that basis.
 """
 
 from __future__ import annotations
@@ -29,7 +33,8 @@ def read() -> str | None:
             import ctypes
             kernel32 = ctypes.windll.kernel32  # type: ignore[attr-defined]
             kernel32.GetTickCount64.restype = ctypes.c_uint64
-            return f"{WINDOWS_PREFIX}{int(time.time() - kernel32.GetTickCount64() / 1000.0)}"
+            ticks = int(kernel32.GetTickCount64())
+            return f"{WINDOWS_PREFIX}{int(time.time() - ticks / 1000.0)}:{ticks}"
         text = BOOT_ID_PATH.read_text(encoding="ascii").strip().lower()
         return text or None
     except (OSError, ValueError, AttributeError):
@@ -42,7 +47,13 @@ def changed(before: str | None, now: str | None) -> bool | None:
         return None
     if before.startswith(WINDOWS_PREFIX) and now.startswith(WINDOWS_PREFIX):
         try:
-            return abs(int(now[len(WINDOWS_PREFIX):]) - int(before[len(WINDOWS_PREFIX):])) > BOOT_TIME_TOLERANCE_S
+            b_epoch, _, b_ticks = before[len(WINDOWS_PREFIX):].partition(":")
+            n_epoch, _, n_ticks = now[len(WINDOWS_PREFIX):].partition(":")
+            if b_ticks and n_ticks and int(n_ticks) < int(b_ticks):
+                return True  # the tick counter went back: the host started again
+            if abs(int(n_epoch) - int(b_epoch)) <= BOOT_TIME_TOLERANCE_S:
+                return False
+            return None  # a clock correction or a reboot that cannot be told apart: do not say done
         except ValueError:
             return None
     return before != now

@@ -954,6 +954,23 @@ def test_a_daemon_restart_after_the_due_time_on_the_same_boot_reports_pending_no
     assert env.wp.results[1]["output"].startswith("reboot_not_seen")
 
 
+def test_a_reboot_pending_from_before_boot_ids_adopts_the_boot_id_and_is_reported_done(env):
+    clock = Clock()
+    env.wp.add(env.signer, id="r1", action="host.reboot", params={})
+    first = _build_with_clock(env, SchedulingExecutor(), clock, lambda: None)  # scheduled with no id, as before
+    first.cycle()
+    first.close()
+    clock.now = NOW + 10  # not yet due: the host is still on the boot it was scheduled on
+    second = _build_with_clock(env, SchedulingExecutor(), clock, lambda: "boot-a")
+    second.cycle()
+    assert second.outbox.scheduled_boot_id("r1") == "boot-a"
+    second.close()
+    clock.now = NOW + 61 + d.RESOLVE_GRACE_S
+    third = _build_with_clock(env, SchedulingExecutor(), clock, lambda: "boot-b")
+    third.cycle()
+    assert [r["state"] for r in env.wp.results] == ["scheduled", "done"]
+
+
 def test_a_reboot_scheduled_with_an_unreadable_boot_id_is_never_reported_done(env):
     clock = Clock()
     env.wp.add(env.signer, id="r1", action="host.reboot", params={})
@@ -974,9 +991,11 @@ def test_the_boot_id_comparison():
     from hostwatch.control import bootid
     assert bootid.changed("a", "a") is False and bootid.changed("a", "b") is True
     assert bootid.changed(None, "a") is None and bootid.changed("a", None) is None
-    assert bootid.changed("win:1000", "win:1060") is False  # clock adjustment inside the tolerance
-    assert bootid.changed("win:1000", "win:5000") is True
-    assert bootid.changed("win:x", "win:1") is None
+    assert bootid.changed("win:1000:5000", "win:1060:65000") is False  # clock adjustment inside the tolerance
+    assert bootid.changed("win:1000:600000", "win:1500:20000") is True  # the tick counter went back
+    # a wall clock correction of an hour with the tick counter still growing is the same boot, never a reboot
+    assert bootid.changed("win:1000:600000", "win:4600:660000") is None
+    assert bootid.changed("win:x:1", "win:1:2") is None
 
 
 def test_an_outbox_from_before_boot_ids_is_migrated(tmp_path):
