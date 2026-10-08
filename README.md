@@ -306,7 +306,7 @@ decimals such as 32.5) and the mode, and hand the text on standard input to the 
 `thermalctl install-override`. thermalctl validates it, replaces the live file atomically with root ownership and
 signals the service, so the account has no `tee`, `mv` or `rm` rule. A floor change carries `expires_at`, the signed
 command's expiry or 900 seconds from now, whichever is sooner, so it never outlives its purpose; a mode change
-sets none, because thermalctl refuses an expiry beside a mode, and restarts thermalctl. A non-zero exit from thermalctl
+sets none, because thermalctl refuses an expiry beside a mode, and restarts thermalctl. The expiry cap is fixed at 900 seconds and is not configurable. Because of that, a file that holds a mode refuses every later `fan.set_floor`, and `fan.set_mode` is refused while time-bounded floors exist; hostwatch has no action that clears a mode, so after one mode change the owner must edit `/etc/thermalctl/overrides.toml` by hand before floors can be set again. A file hostwatch cannot keep whole (an unreadable `expires_at`, or a header that is not a table with a numeric `min_duty`) is refused rather than rewritten. The sudoers rule is exactly `hostwatch-control ALL=(root) NOPASSWD: /opt/thermalctl/venv/bin/thermalctl install-override`. A non-zero exit from thermalctl
 is reported as `failed` with its message and nothing changes; `service.restart` runs `systemctl restart <unit>` or
 `docker restart <name>` as an argument list, never a shell, for names that pass a strict pattern (letters,
 digits, `_`, `.`, `-`, no `@`, no `..`, no leading dash); `host.reboot` runs `shutdown -r +N` after `delay_s`

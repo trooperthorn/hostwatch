@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import re
 import tomllib
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
@@ -97,7 +98,7 @@ def test_set_floor_delivers_the_overrides_only_through_install_override_with_an_
     assert root.order == [INSTALL]
 
 
-def test_the_expiry_is_the_signed_commands_and_never_beyond_the_configured_maximum(setup):
+def test_the_expiry_is_the_signed_commands_and_never_beyond_the_fixed_maximum(setup):
     actions, root, path = setup
     assert actions.execute({"action": "fan.set_floor", "expires_at": NOW + 100000,
                             "params": {"header": "pwm1", "min_duty": 25}}).ok
@@ -209,6 +210,50 @@ def test_a_mode_change_is_refused_while_time_bounded_floors_exist(setup):
     result = actions.fan_set_mode("active")
     assert result.status == "refused" and "permanent" in result.output
     assert root.order == [] and path.read_text() == old
+
+
+def test_a_datetime_expiry_is_read_like_epoch_seconds(setup):
+    actions, root, path = setup
+    when = datetime.fromtimestamp(NOW + 30, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    path.write_text(f'expires_at = {when}\n\n[headers.pwm1]\nmin_duty = 30\n')
+    assert actions.fan_set_floor("pwm2", 20, NOW + 600).ok
+    assert tomllib.loads(path.read_text())["expires_at"] == NOW + 30
+
+
+def test_a_mode_change_is_refused_while_floors_have_a_datetime_expiry(setup):
+    actions, root, path = setup
+    old = f'expires_at = {datetime.fromtimestamp(NOW + 300, timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")}\n\n[headers.pwm1]\nmin_duty = 30\n'
+    path.write_text(old)
+    result = actions.fan_set_mode("active")
+    assert result.status == "refused" and "permanent" in result.output
+    assert root.order == [] and path.read_text() == old
+
+
+def test_floors_with_a_passed_datetime_expiry_are_dropped_not_renewed(setup):
+    actions, root, path = setup
+    path.write_text('expires_at = 2020-01-01T00:00:00+00:00\n\n[headers.pwm1]\nmin_duty = 30\n')
+    assert actions.fan_set_mode("active").ok
+    assert tomllib.loads(path.read_text()) == {"mode": "active"}
+
+
+@pytest.mark.parametrize("text", [
+    'expires_at = 2030-01-01T00:00:00\n\n[headers.pwm1]\nmin_duty = 30\n',
+    'expires_at = "soon"\n\n[headers.pwm1]\nmin_duty = 30\n',
+    f'expires_at = {NOW + 300}\n\n[headers.pwm1]\nmin_duty = "30"\n',
+    f'expires_at = {NOW + 300}\n\n[headers]\npwm1 = 30\n',
+])
+def test_an_overrides_file_that_cannot_be_kept_whole_is_refused_not_rewritten(setup, text):
+    actions, root, path = setup
+    path.write_text(text)
+    for result in (actions.fan_set_floor("pwm2", 20, NOW + 60), actions.fan_set_mode("active")):
+        assert result.status == "failed" and "cannot read the existing overrides" in result.output
+    assert root.order == [] and path.read_text() == text
+
+
+def test_a_header_id_outside_the_basic_multilingual_plane_is_written_so_toml_reads_it_back():
+    name = "fan-😀-" + chr(127)
+    out = al.LinuxActions._render(None, {name: 30}, NOW + 60)
+    assert tomllib.loads(out.decode("utf-8"))["headers"] == {name: {"min_duty": 30}}
 
 
 def test_a_mode_change_drops_floors_whose_expiry_has_passed(setup):
@@ -563,3 +608,4 @@ def test_the_docs_name_the_exact_example_rule_command():
         text = (ROOT / doc).read_text(encoding="utf-8")
         assert "install-override" in text, doc
     assert rule in (ROOT / "docs" / "deploy-agents.md").read_text(encoding="utf-8")
+    assert "hostwatch-control ALL=(root) NOPASSWD: " + rule in (ROOT / "README.md").read_text(encoding="utf-8")

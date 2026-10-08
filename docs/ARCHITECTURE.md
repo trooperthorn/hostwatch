@@ -615,7 +615,7 @@ the mode and the service name, all before any call.
   reported as `failed` with thermalctl's message, the live file is never touched, and nothing else runs. A floor
   change writes a top level `expires_at` (epoch seconds): the signed command's `expires_at`, capped at 900 seconds
   from now, or that cap when the command has none; a command that has already expired fails without a call. thermalctl
-  refuses an expiry beside a mode, so a file that holds a mode, and every mode change, is written without one. A
+  refuses an expiry beside a mode, so a mode change is written without one, and `fan.set_floor` is refused when the file holds a mode (hostwatch has no action that clears a mode, so the owner edits the file by hand). `expires_at` is read as epoch seconds or as a TOML datetime with an offset. A
   mode change then runs `systemctl restart thermalctl`, because a reload refuses a mode change; thermalctl itself
   refuses a mode change that differs from the running mode, and that refusal is reported as `failed`. An existing
   overrides file that cannot be parsed fails the action rather than being overwritten.
@@ -640,7 +640,7 @@ the mode and the service name, all before any call.
   (`packaging/sudoers.d/hostwatch-control`), copied to `tests/fixtures/thermalctl_sudoers_example` and compared by a
   test. It has no wildcard and no arguments, so the account cannot pass `--overrides`, `--config` or `--from`, and no
   generic `tee`, `mv` or `rm` is allowed. The thermalctl path and every directory above it must be root owned and not
-  writable by others. The unit adds `ReadWritePaths=-/etc/thermalctl` so that `ProtectSystem=strict` does not make the directory read-only for the sudo children; the directory permissions,
+  writable by others. The unit adds `ReadWritePaths=-/etc/thermalctl -/run/thermalctl` (the second is where thermalctl keeps its lock) so that `ProtectSystem=strict` does not make the directory read-only for the sudo children; the directory permissions,
   not the mount, still stop the control account from writing it.
 
 ### Windows executors
@@ -739,7 +739,7 @@ Service files, with their labels:
 - `deploy/hostwatch-control.service` runs as `hostwatch-control`, a separate account from the collector, with a
   private state directory, `ProtectSystem=strict` and no writable path except that directory. `NoNewPrivileges` is left
   off on purpose because it would stop `sudo`. The root limit is the sudoers snippet (enforced by sudo). The rest of the
-  hardening is defence in depth, not authentication. The only extra writable path is `ReadWritePaths=-/etc/thermalctl`, needed so the sudo command that installs the fan
+  hardening is defence in depth, not authentication. The only extra writable paths are `ReadWritePaths=-/etc/thermalctl -/run/thermalctl`, needed so the sudo command that installs the fan
   overrides can write there under `ProtectSystem=strict`; the account itself still cannot write that root owned directory.
 - `deploy/windows/install-control.ps1` and `uninstall-control.ps1` register `hostwatch-control`, a service separate from
   `hostwatch-agent`, with its own virtual environment, as LocalSystem with restart-on-failure. The installer locks

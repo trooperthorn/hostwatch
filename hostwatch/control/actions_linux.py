@@ -26,6 +26,7 @@ import subprocess
 import time
 import tomllib
 from dataclasses import dataclass
+from datetime import datetime
 from pathlib import Path
 from typing import Callable, Protocol, Sequence
 
@@ -42,7 +43,7 @@ THERMALCTL_CONTROLLER = "thermalctl"
 # and thermalctl's own defaults name the config and the live file, so the sudoers rule can match it exactly.
 INSTALL_OVERRIDE_ARGS = ("install-override",)
 # A floor override expires with the signed command, and never later than this many seconds from now.
-MAX_OVERRIDE_S = 900
+MAX_OVERRIDE_S = 900  # fixed, not configurable
 # The reboot is a transient systemd timer, so the delay is exact to the second. shutdown(8) only counts minutes.
 REBOOT_UNIT = "hostwatch-reboot"
 SYSTEMD_RUN = "/usr/bin/systemd-run"
@@ -189,6 +190,20 @@ class LinuxActions:
             return cap
         return min(command_expires_at, cap)
 
+    @staticmethod
+    def _file_expiry(value: object) -> "int | float | None":
+        """The file's expires_at as epoch seconds. thermalctl accepts epoch seconds or a TOML datetime with an
+        offset, so both are read; anything else is refused, never treated as no expiry."""
+        if value is None:
+            return None
+        if isinstance(value, datetime):
+            if value.tzinfo is None:
+                raise ValueError("existing overrides have an expires_at datetime without an offset")
+            return value.timestamp()
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value):
+            raise ValueError("existing overrides have an expires_at that is not epoch seconds or a datetime")
+        return value
+
     def _read_overrides(self) -> tuple[bytes | None, str | None, dict[str, int | float], int | float | None]:
         try:
             raw = self.overrides_path.read_bytes()
@@ -197,14 +212,17 @@ class LinuxActions:
         data = tomllib.loads(raw.decode("utf-8"))
         mode = data.get("mode")
         headers = data.get("headers", {})
-        expiry = data.get("expires_at")
-        if isinstance(expiry, bool) or not isinstance(expiry, (int, float)) or not math.isfinite(expiry):
-            expiry = None
+        expiry = self._file_expiry(data.get("expires_at"))
+        if not isinstance(headers, dict):
+            raise ValueError("existing overrides have a headers entry that is not a table")
         # thermalctl accepts a float floor such as 32.5 and any string header id, so every floor is kept as written.
-        floors = {name: t["min_duty"] for name, t in headers.items()
-                  if isinstance(t, dict)
-                  and isinstance(t.get("min_duty"), (int, float)) and not isinstance(t["min_duty"], bool)
-                  and math.isfinite(t["min_duty"])}
+        # An entry that cannot be kept is refused rather than dropped, so an owner's edit is never lost silently.
+        floors: dict[str, int | float] = {}
+        for name, table in headers.items():
+            duty = table.get("min_duty") if isinstance(table, dict) else None
+            if isinstance(duty, bool) or not isinstance(duty, (int, float)) or not math.isfinite(duty):
+                raise ValueError(f"existing overrides have a header {name!r} that is not a table with a numeric min_duty")
+            floors[name] = duty
         if mode is not None and mode not in MODES:
             raise ValueError("existing overrides have an unknown mode")
         return raw, mode, floors, expiry
@@ -224,7 +242,10 @@ class LinuxActions:
 
     @classmethod
     def _key(cls, name: str) -> str:
-        return name if cls._BARE_KEY.fullmatch(name) else json.dumps(name)
+        if cls._BARE_KEY.fullmatch(name):
+            return name
+        # ensure_ascii=False keeps characters outside the BMP whole; json would write a surrogate pair TOML rejects.
+        return json.dumps(name, ensure_ascii=False).replace(chr(127), chr(92) + "u007f")
 
     @classmethod
     def _render(cls, mode: str | None, floors: dict[str, int | float], expires_at: int | None = None) -> bytes:
