@@ -130,7 +130,7 @@ def test_only_the_otlp_paths_are_posted_and_the_headers_are_the_contract(tmp_pat
     assert not [c for c in observe.calls if "ingest" in c.url.path]
 
 
-def test_protobuf_and_uncompressed_output_are_options(tmp_path):
+def test_protobuf_output_stays_available_by_config(tmp_path):
     observe = run_once(tmp_path, otlp_format="protobuf")
     assert observe.posts
     for req in observe.posts:

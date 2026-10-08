@@ -270,7 +270,7 @@ class Outbox:
             try:
                 if self.get(key) == value:
                     return
-            except sqlite3.DatabaseError:
+            except (sqlite3.DatabaseError, OSError):
                 pass  # cannot compare, so stage it: a redundant commit is better than a failed read
             self._staged[key] = value
 

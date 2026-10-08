@@ -61,6 +61,9 @@ ALIVE_FILE = "agent.alive"
 # queue moves on: malformed (400), a reused idempotency key with another body (409), too large
 # (413), an unsupported type (415) and unprocessable (422). Everything else describes Observe,
 # the network or the key (401, 403, 404, 429 and every 5xx), so the request stays queued.
+# A delivery pass commits its removals at the end, and also after this many, so a crash late in a
+# long drain resends at most this many requests.
+ACK_COMMIT_EVERY = 50
 DEAD_LETTER_STATUSES = {400, 409, 413, 415, 422}
 BACKOFF_BASE_S = 5.0
 MAX_BACKOFF_S = 300.0
@@ -849,6 +852,7 @@ class Agent:
         self.outbox.commit_acks()
 
     def _send_queued(self, client: httpx.Client, deadline: float | None, honour_stop: bool) -> None:
+        unflushed = 0
         while (req := self.outbox.peek()) is not None:
             if honour_stop and self._stop.is_set():
                 return
@@ -879,6 +883,10 @@ class Agent:
                         log.warning("Observe accepted %s request %s but rejected %d item(s): %s",
                                     req.signal, req.entry_id, rejected, message or "no reason given")
                 self.outbox.ack(req.seq, commit=False)
+                unflushed += 1
+                if unflushed >= ACK_COMMIT_EVERY:
+                    self.outbox.commit_acks()
+                    unflushed = 0
                 continue
             if r.status_code in (401, 403):
                 log.error("Observe answered %d. Check that HOSTWATCH_INGEST_KEY is valid and is bound to "

@@ -279,7 +279,7 @@ yet; see `UNVERIFIED.md`.
 `hostwatch/otel_map.py` maps every collector sample and event to OpenTelemetry metric names, UCUM units,
 attributes and log records as Observe defines them. Metrics a collector adds before the table is updated are
 sent as `observe.legacy.<source>.<metric>`. `hostwatch/otlp.py` encodes the result as OTLP JSON (default)
-or JSON, with optional gzip, split to Observe's request limits, with a stable `Idempotency-Key` per outbox
+or protobuf, with optional gzip, split to Observe's request limits, with a stable `Idempotency-Key` per outbox
 entry. The scheduler and the sender are described in `docs/ARCHITECTURE.md`.
 
 ## hostwatch-control

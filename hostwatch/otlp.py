@@ -354,7 +354,7 @@ def _check_format(fmt: str) -> None:
 
 
 def build_metrics_requests(entry_id: str, resource: dict[str, Attr], points: Iterable[Point], *,
-                           fmt: str = "protobuf", compress: bool = True,
+                           fmt: str = "json", compress: bool = True,
                            start_ts: float | None = None) -> BuiltRequests:
     """Requests for the points of one outbox entry. Nothing is built for an empty list."""
     _check_format(fmt)
@@ -367,7 +367,7 @@ def build_metrics_requests(entry_id: str, resource: dict[str, Attr], points: Ite
 
 
 def build_logs_requests(entry_id: str, resource: dict[str, Attr], records: Iterable[LogRecord], *,
-                        fmt: str = "protobuf", compress: bool = True) -> BuiltRequests:
+                        fmt: str = "json", compress: bool = True) -> BuiltRequests:
     """Requests for the log records of one outbox entry."""
     _check_format(fmt)
     _resource(resource)

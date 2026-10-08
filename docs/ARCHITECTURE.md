@@ -375,7 +375,7 @@ when no marker exists.
 
 ## Durable outbox
 
-Commit cost is kept low in three ways. `stage` ignores a value equal to the current one, so a source that restates unchanged progress (the Windows event log bookmark, the journal cursor) causes no marker-only commit. `flush` acknowledges delivered requests without committing and commits once at the end of the pass, also when the pass fails, so a pass costs one fsync; a crash before that commit repeats requests under the same `Idempotency-Key`. Pstore records are cached (see pstore ingestion).
+Commit cost is kept low in three ways. `stage` ignores a value equal to the current one, so a source that restates unchanged progress (the Windows event log bookmark, the journal cursor) causes no marker-only commit. `flush` acknowledges delivered requests without committing and commits at the end of the pass, also when the pass fails, and after every 50 acknowledgements during a long drain, so a normal pass costs one fsync and a crash repeats at most 50 requests; a crash before a commit repeats requests under the same `Idempotency-Key`. Pstore records are cached (see pstore ingestion).
 
 Measured on the development host (Windows) with `scripts/bench_io.py`, which anyone can re-run. Its outbox scenario is one minute of work: twelve event passes restating one marker, three tier entries, five queued requests and one delivery pass. Commits come from the SQLite statement trace. Write calls and bytes come from the process I/O counters. The script was run only on Windows for this change, so the Linux marker row shows the same outbox code with the journal cursor key, on the Windows file system; run the script on a Linux host for its own byte figures.
 

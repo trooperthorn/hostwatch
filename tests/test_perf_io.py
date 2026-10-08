@@ -201,6 +201,16 @@ def test_protobuf_stays_available_and_decodes_to_the_same_points():
     assert values(tree_json) == values(tree_pb) and len(values(tree_json)) == 40
     logs = otlp.build_logs_requests("e", RES, [rec(i) for i in range(3)], fmt="json").requests
     assert logs[0].headers["Content-Type"] == "application/json"
+    logs_pb = otlp.build_logs_requests("e", RES, [rec(i) for i in range(3)], fmt="protobuf").requests
+    assert logs_pb[0].headers["Content-Type"] == "application/x-protobuf"
+
+    def bodies(tree):
+        return sorted((str(lr["timeUnixNano"]), lr["body"]["stringValue"])
+                      for rl in tree["resourceLogs"] for sl in rl["scopeLogs"] for lr in sl["logRecords"])
+
+    log_json = json.loads(gzip.decompress(logs[0].body))
+    log_pb = decode(gzip.decompress(logs_pb[0].body), "logs")
+    assert bodies(log_json) == bodies(log_pb) and len(bodies(log_json)) == 3
 
 
 # -- failure paths of the single commit -------------------------------------------------------
@@ -240,3 +250,17 @@ def test_stage_survives_an_unreadable_marker_lookup(tmp_path, monkeypatch):
     monkeypatch.setattr(box, "get", broken)
     box.stage("k", "v")
     assert box._staged == {"k": "v"}
+
+
+def test_a_long_drain_commits_its_acknowledgements_in_bounded_batches(tmp_path, monkeypatch):
+    monkeypatch.setattr(agent_mod, "ACK_COMMIT_EVERY", 2)
+    agent = Agent(make_cfg(tmp_path))
+    for i in range(5):
+        agent.outbox.enqueue(requests_for(f"e{i}", n_points=1), f"e{i}")
+    commits = []
+    real = agent.outbox.commit_acks
+    monkeypatch.setattr(agent.outbox, "commit_acks", lambda: (commits.append(1), real())[1])
+    with FakeObserve().client() as client:
+        agent.flush(client)
+    assert agent.outbox.peek() is None
+    assert len(commits) >= 3  # two full batches of two, then the final commit
