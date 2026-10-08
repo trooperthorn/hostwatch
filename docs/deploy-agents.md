@@ -153,9 +153,14 @@ Linux (systemd), as root:
    `systemctl enable --now hostwatch-control`. Logs are in `journalctl -u hostwatch-control`.
 
 The unit leaves `NoNewPrivileges` off because `sudo` would stop working with it. Fan actions run only when `[fan] controller` is `thermalctl` on Linux. A candidate overrides file is written to
-`/etc/thermalctl/overrides.toml.candidate`, validated, then renamed over the real file. Fan actions on thermalctl need to write
-`/etc/thermalctl/overrides.toml`, which thermalctl requires to be root owned. The unit does not grant that write, so those
-actions report a failure until the owner chooses how it is granted.
+`/etc/thermalctl/overrides.toml.candidate`, validated, then renamed over the real file. thermalctl requires
+`/etc/thermalctl/overrides.toml` to be owned by root, so the daemon never writes it itself. It runs three exact commands
+from `hostwatch-control.sudoers` as root: `tee` of the candidate (the new text goes on standard input), `mv -f` of the
+candidate over the real file, and `rm -f` of the candidate after a failure. The unit sets `ReadWritePaths=-/etc/thermalctl`
+because `ProtectSystem=strict` would otherwise keep `/etc` read-only for those root commands too; the directory stays
+root owned, so the control account itself still cannot write it. Keep `/etc/thermalctl` owned by root with mode 0755 and
+leave the root umask at 022, because thermalctl ignores an overrides file that its group or others can write. If any step
+fails the command is reported failed and the live overrides and the fans are untouched.
 
 Windows, from an elevated PowerShell (a separate service from `hostwatch-agent`):
 

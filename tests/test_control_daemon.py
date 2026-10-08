@@ -176,14 +176,41 @@ def test_a_command_is_pulled_verified_executed_and_its_result_posted(env, tmp_pa
 
 def test_a_fan_command_writes_overrides_through_the_real_executor_with_a_fake_runner(env, tmp_path):
     ran = []
-    actions = LinuxActions(cfgmod.load(env.settings.config_path),
-                           lambda argv, timeout: ran.append(list(argv)) or RunResult(0, "ok"),
-                           use_sudo=False, overrides_path=tmp_path / "overrides.toml")
+    overrides = tmp_path / "overrides.toml"
+
+    def writer(argv, data, timeout):
+        ran.append(list(argv))
+        Path(argv[-1]).write_bytes(data)
+        return RunResult(0, "")
+
+    def runner(argv, timeout):
+        ran.append(list(argv))
+        if argv[0] == "/usr/bin/mv":
+            os.replace(argv[2], argv[3])
+        return RunResult(0, "ok")
+
+    actions = LinuxActions(cfgmod.load(env.settings.config_path), runner, use_sudo=False,
+                           overrides_path=overrides, writer=writer)
     env.wp.add(env.signer)
     env.build(actions).cycle()
     assert env.wp.results[0]["state"] == "done"
-    assert "min_duty = 25" in (tmp_path / "overrides.toml").read_text(encoding="utf-8")
+    assert "min_duty = 25" in overrides.read_text(encoding="utf-8")
     assert any(a[:2] == ["/opt/thermalctl/venv/bin/thermalctl", "check-config"] for a in ran)
+
+
+def test_a_fan_command_whose_write_fails_is_reported_failed_and_nothing_else_runs(env, tmp_path):
+    ran = []
+    overrides = tmp_path / "overrides.toml"
+    actions = LinuxActions(cfgmod.load(env.settings.config_path),
+                           lambda argv, timeout: ran.append(list(argv)) or RunResult(0, "ok"),
+                           use_sudo=False, overrides_path=overrides,
+                           writer=lambda argv, data, timeout: RunResult(1, "tee: Permission denied"))
+    env.wp.add(env.signer)
+    env.build(actions).cycle()
+    result = env.wp.results[0]
+    assert result["state"] == "failed" and "Permission denied" in result["output"]
+    assert not overrides.exists()
+    assert all(a[0] == "/usr/bin/rm" for a in ran), "only the candidate cleanup may run after a failed write"
 
 
 def test_commands_run_one_at_a_time_in_seq_order(env):
@@ -1262,3 +1289,21 @@ def test_an_old_format_state_is_logged_with_its_path_and_the_upgrade_command(env
         env.build().close()
     text = caplog.text
     assert str(env.data / STATE_FILE) in text and "state-upgrade" in text
+
+
+def test_the_unit_makes_only_the_thermalctl_directory_writable_and_the_sudoers_rule_stages_through_it():
+    u = _unit()
+    assert u["ProtectSystem"] == ["strict"]
+    # The sudo children of the daemon inherit the read-only /etc, so the one directory is opened up. The dash lets
+    # the unit start where thermalctl is not installed.
+    assert u["ReadWritePaths"] == ["-/etc/thermalctl"]
+    assert "ProtectSystem=full" not in UNIT.read_text(encoding="utf-8")
+    rules = [l.split("NOPASSWD: ", 1)[1] for l in SUDOERS.read_text(encoding="utf-8").splitlines()
+             if l and not l.startswith("#")]
+    cand = "/etc/thermalctl/overrides.toml.candidate"
+    assert f"/usr/bin/tee {cand}" in rules
+    assert f"/usr/bin/mv -f {cand} /etc/thermalctl/overrides.toml" in rules
+    assert f"/usr/bin/rm -f {cand}" in rules
+    for rule in rules:
+        if rule.startswith(("/usr/bin/tee", "/usr/bin/mv", "/usr/bin/rm")):
+            assert "*" not in rule and "," not in rule

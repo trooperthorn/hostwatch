@@ -299,8 +299,9 @@ persisted one and at most 1000 above it, and the local allowlist. Every refusal 
 restored-older state file refuses every
 command. On Windows `control.toml` must also have a DACL that gives write access only to SYSTEM and Administrators,
 and the installers refuse a data folder owned by another account and lock it to SYSTEM and Administrators. The Linux executors are in `hostwatch/control/actions_linux.py`: `fan.set_floor` and `fan.set_mode`
-write `/etc/thermalctl/overrides.toml` atomically with mode 0600, run `thermalctl check-config` with
-`--overrides` on it, put the previous file back if the check fails, then reload thermalctl with
+stage a candidate beside `/etc/thermalctl/overrides.toml` through the sudo rule `tee`, which keeps the file root
+owned as thermalctl requires, run `thermalctl check-config` with `--overrides` on the candidate, install it with
+`mv -f` only if the check passes, and otherwise remove it and leave the live file and the fans alone, then reload thermalctl with
 `systemctl kill -s HUP` (floor) or restart it (mode); `service.restart` runs `systemctl restart <unit>` or
 `docker restart <name>` as an argument list, never a shell, for names that pass a strict pattern (letters,
 digits, `_`, `.`, `-`, no `@`, no `..`, no leading dash); `host.reboot` runs `shutdown -r +N` after `delay_s`

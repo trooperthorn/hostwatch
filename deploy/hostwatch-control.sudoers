@@ -3,6 +3,9 @@
 # Regenerate it when the restart list in control.toml changes.
 
 hostwatch-control ALL=(root) NOPASSWD: /opt/thermalctl/venv/bin/thermalctl check-config /etc/thermalctl/config.toml --overrides /etc/thermalctl/overrides.toml.candidate
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/tee /etc/thermalctl/overrides.toml.candidate
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/mv -f /etc/thermalctl/overrides.toml.candidate /etc/thermalctl/overrides.toml
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/rm -f /etc/thermalctl/overrides.toml.candidate
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl kill -s HUP thermalctl
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl restart thermalctl
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl restart hostwatch-agent

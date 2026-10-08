@@ -568,10 +568,13 @@ matches what is run. The executors validate again what the allowlist already che
 the mode and the service name, all before any call.
 
 - Overrides: the file is read and merged (only `mode` and `[headers.<id>] min_duty` are kept, which is all thermalctl
-  accepts), written to a candidate file in the same directory (`overrides.toml.candidate`, mode 0600) and flushed. `thermalctl
-  check-config <config> --overrides <candidate>` validates the candidate, and only on success is it renamed over the
-  real path. On failure the candidate is deleted, the real file is never touched and the failure is reported with the
-  check output. A floor then sends SIGHUP through
+  accepts). thermalctl ignores an overrides file that is not root owned, so the daemon, which is not root, never writes
+  `/etc/thermalctl` itself. The new text goes on the standard input of `sudo -n /usr/bin/tee
+  /etc/thermalctl/overrides.toml.candidate` through the injected `Writer` (the real one is `subprocess_writer`, an
+  argument list with no shell). `thermalctl check-config <config> --overrides <candidate>` validates the candidate, and
+  only on success `sudo -n /usr/bin/mv -f <candidate> <real path>` renames it over the real path, atomically and still
+  root owned. On any failure, `sudo -n /usr/bin/rm -f <candidate>` removes the candidate, the real file is never
+  touched, no reload or restart runs, and the failure is reported as `failed` with the command output. A floor then sends SIGHUP through
   `systemctl kill -s HUP thermalctl`; a mode change runs `systemctl restart thermalctl`, because a reload refuses a
   mode change. An existing overrides file that cannot be parsed fails the action rather than being overwritten.
   Whether every header is mapped before going active is enforced by `check-config`, not duplicated here.
@@ -591,8 +594,11 @@ the mode and the service name, all before any call.
   rule from the allowlist, and `deploy/hostwatch-control.sudoers` is its output for an example list. The only wildcard
   is the digit pattern in the reboot delay (two to six digits, one rule each). The 30 second minimum is enforced by
   the executor, not by the sudoers pattern. This is an enforced limit on what the account may run as root. The
-  sudoers rule names the candidate path `/etc/thermalctl/overrides.toml.candidate`. The overrides file write itself is not a sudo command, so the fan actions still need a process able to write that
-  directory as root (see `UNVERIFIED.md`).
+  sudoers rule names the candidate path `/etc/thermalctl/overrides.toml.candidate` in three exact lines, `tee <candidate>`,
+  `mv -f <candidate> <real path>` and `rm -f <candidate>`, with no wildcard. thermalctl has no command that installs an
+  overrides file, so these three standard tools are the exact privileged path. The unit adds `ReadWritePaths=-/etc/thermalctl`
+  so that `ProtectSystem=strict` does not make the directory read-only for the sudo children; the directory permissions,
+  not the mount, still stop the control account from writing it.
 
 ### Windows executors
 
@@ -690,8 +696,8 @@ Service files, with their labels:
 - `deploy/hostwatch-control.service` runs as `hostwatch-control`, a separate account from the collector, with a
   private state directory, `ProtectSystem=strict` and no writable path except that directory. `NoNewPrivileges` is left
   off on purpose because it would stop `sudo`. The root limit is the sudoers snippet (enforced by sudo). The rest of the
-  hardening is defence in depth, not authentication. The unit grants no write to `/etc/thermalctl`, so Linux fan
-  actions fail with a clear report until the owner decides how that file is written (see `UNVERIFIED.md`).
+  hardening is defence in depth, not authentication. The only extra writable path is `ReadWritePaths=-/etc/thermalctl`, needed so the sudo commands that stage the fan
+  overrides can write there under `ProtectSystem=strict`; the account itself still cannot write that root owned directory.
 - `deploy/windows/install-control.ps1` and `uninstall-control.ps1` register `hostwatch-control`, a service separate from
   `hostwatch-agent`, with its own virtual environment, as LocalSystem with restart-on-failure. The installer locks
   `control.toml` and `control.env` to SYSTEM and Administrators before the key is written. The data folder is the

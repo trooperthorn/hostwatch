@@ -35,12 +35,56 @@ class FakeRunner:
         return self.results.pop(0) if self.results else al.RunResult(0, "ok")
 
 
+class FakeRoot:
+    """The privileged side of a fan write. It plays `tee`, `mv -f` and `rm -f` on real files under tmp_path
+    and answers check-config and systemctl from `fail`, a map from program path to the RunResult it returns.
+    `order` records every privileged step, so a test can see what ran and in which order."""
+
+    def __init__(self, fail=None):
+        self.fail = dict(fail or {})
+        self.order, self.writes = [], []
+
+    @property
+    def calls(self):
+        return self.order
+
+    @staticmethod
+    def _bare(argv):
+        argv = list(argv)
+        return argv[2:] if argv[:2] == ["sudo", "-n"] else argv
+
+    def write(self, argv, data, timeout):
+        assert isinstance(data, bytes)
+        argv = self._bare(argv)
+        self.order.append(argv)
+        self.writes.append((argv, data))
+        if argv[0] in self.fail:
+            return self.fail[argv[0]]
+        Path(argv[1]).write_bytes(data)
+        return al.RunResult(0, "")
+
+    def run(self, argv, timeout):
+        argv = self._bare(argv)
+        self.order.append(argv)
+        if argv[0] in self.fail:
+            return self.fail[argv[0]]
+        if argv[0] == al.MV:
+            os.replace(argv[2], argv[3])
+        elif argv[0] == al.RM:
+            Path(argv[2]).unlink(missing_ok=True)
+        return al.RunResult(0, "ok")
+
+
+def build(tmp_path, fail=None, cfg=None):
+    root = FakeRoot(fail)
+    path = tmp_path / "overrides.toml"
+    actions = al.LinuxActions(cfg or config(), root.run, overrides_path=path, use_sudo=False, writer=root.write)
+    return actions, root, path
+
+
 @pytest.fixture
 def setup(tmp_path):
-    runner = FakeRunner()
-    path = tmp_path / "overrides.toml"
-    actions = al.LinuxActions(config(), runner, overrides_path=path, use_sudo=False)
-    return actions, runner, path
+    return build(tmp_path)
 
 
 CHECK = [al.THERMALCTL_BIN, "check-config", al.THERMALCTL_CONFIG, "--overrides"]
@@ -50,20 +94,60 @@ def cand(path):
     return path.with_name(path.name + al.CANDIDATE_SUFFIX)
 
 
-def test_set_floor_writes_file_checks_and_reloads(setup):
-    actions, runner, path = setup
+def test_set_floor_stages_checks_installs_and_reloads_with_the_exact_argv(setup):
+    actions, root, path = setup
     result = actions.execute({"action": "fan.set_floor",
                               "params": {"controller": "thermalctl", "header": "pwm2", "min_duty": 25}})
     assert result.ok and result.status == "done"
     assert tomllib.loads(path.read_text()) == {"headers": {"pwm2": {"min_duty": 25}}}
-    assert runner.calls == [CHECK + [str(cand(path))], [al.SYSTEMCTL, "kill", "-s", "HUP", "thermalctl"]]
-    if os.name == "posix":
-        assert (path.stat().st_mode & 0o777) == 0o600
-    assert not path.with_name(path.name + al.CANDIDATE_SUFFIX).exists()
+    assert root.order == [[al.TEE, str(cand(path))], CHECK + [str(cand(path))],
+                          [al.MV, "-f", str(cand(path)), str(path)],
+                          [al.SYSTEMCTL, "kill", "-s", "HUP", "thermalctl"]]
+    assert not cand(path).exists()
+
+
+def test_the_candidate_text_goes_on_standard_input_never_on_a_command_line(setup):
+    actions, root, path = setup
+    assert actions.fan_set_floor("pwm2", 25).ok
+    (argv, data), = root.writes
+    assert argv == [al.TEE, str(cand(path))] and b"min_duty = 25" in data
+    assert not any("min_duty" in part for step in root.order for part in step)
+
+
+def test_the_executor_runs_the_privileged_steps_through_sudo_when_not_root(tmp_path):
+    seen = []
+
+    def run(argv, timeout):
+        seen.append(list(argv))
+        return al.RunResult(0, "ok")
+
+    def write(argv, data, timeout):
+        seen.append(list(argv))
+        return al.RunResult(0, "")
+
+    path = tmp_path / "overrides.toml"
+    al.LinuxActions(config(), run, overrides_path=path, use_sudo=True, writer=write).fan_set_mode("active")
+    assert seen == [["sudo", "-n", al.TEE, str(cand(path))],
+                    ["sudo", "-n", *CHECK, str(cand(path))],
+                    ["sudo", "-n", al.MV, "-f", str(cand(path)), str(path)],
+                    ["sudo", "-n", al.SYSTEMCTL, "restart", "thermalctl"]]
+
+
+def test_the_default_paths_give_exactly_the_argv_the_sudoers_rule_allows():
+    seen = []
+    actions = al.LinuxActions(config(), lambda a, t: seen.append(" ".join(a)) or al.RunResult(0, "ok"),
+                              use_sudo=True, writer=lambda a, d, t: seen.append(" ".join(a)) or al.RunResult(0, ""))
+    actions._read_overrides = lambda: (None, None, {})
+    assert actions.fan_set_floor("pwm1", 30).ok
+    rules = al.sudoers_commands(config())
+    assert len(seen) == 4
+    for line in seen:
+        # Path() turns the slashes into backslashes on a Windows development machine only.
+        assert line.replace("\\", "/").removeprefix("sudo -n ") in rules, line
 
 
 def test_set_floor_merges_with_existing_overrides(setup):
-    actions, runner, path = setup
+    actions, root, path = setup
     path.write_text('mode = "dry_run"\n\n[headers.pwm1]\nmin_duty = 30\n')
     assert actions.fan_set_floor("pwm2", 20).ok
     assert tomllib.loads(path.read_text()) == {"mode": "dry_run",
@@ -71,25 +155,51 @@ def test_set_floor_merges_with_existing_overrides(setup):
 
 
 def test_set_mode_restarts_the_service(setup):
-    actions, runner, path = setup
+    actions, root, path = setup
     result = actions.execute({"action": "fan.set_mode", "params": {"controller": "thermalctl", "mode": "active"}})
     assert result.ok
     assert tomllib.loads(path.read_text()) == {"mode": "active"}
-    assert runner.calls == [CHECK + [str(cand(path))], [al.SYSTEMCTL, "restart", "thermalctl"]]
+    assert root.order[-1] == [al.SYSTEMCTL, "restart", "thermalctl"]
 
 
-def test_check_config_failure_restores_the_previous_file(tmp_path):
-    runner = FakeRunner([al.RunResult(1, "header pwm2 below limit")])
-    path = tmp_path / "overrides.toml"
+def test_a_write_failure_reports_failed_and_touches_neither_the_file_nor_the_fans(tmp_path):
+    actions, root, path = build(tmp_path, {al.TEE: al.RunResult(1, "tee: Read-only file system")})
     old = b"[headers.pwm1]\nmin_duty = 30\n"
     path.write_bytes(old)
-    actions = al.LinuxActions(config(), runner, overrides_path=path, use_sudo=False)
+    result = actions.fan_set_floor("pwm2", 5)
+    assert not result.ok and result.status == "failed"
+    assert "Read-only file system" in result.output and "fans were not changed" in result.output
+    assert path.read_bytes() == old and not cand(path).exists()
+    assert all(step[0] in (al.TEE, al.RM) for step in root.order), "no check, install or reload after a failed write"
+
+
+def test_a_write_that_cannot_even_start_is_reported_failed(tmp_path):
+    actions, root, path = build(tmp_path, {al.TEE: al.RunResult(127, "FileNotFoundError: sudo")})
+    result = actions.fan_set_mode("active")
+    assert result.status == "failed" and not path.exists()
+    assert not any(step[0] == al.SYSTEMCTL for step in root.order)
+
+
+def test_an_install_failure_reports_failed_removes_the_candidate_and_leaves_the_fans_alone(tmp_path):
+    actions, root, path = build(tmp_path, {al.MV: al.RunResult(1, "mv: cannot move")})
+    old = b"[headers.pwm1]\nmin_duty = 30\n"
+    path.write_bytes(old)
+    result = actions.fan_set_floor("pwm2", 5)
+    assert not result.ok and result.status == "failed" and "cannot install" in result.output
+    assert path.read_bytes() == old
+    assert root.order[-1] == [al.RM, "-f", str(cand(path))]
+    assert not any(step[0] == al.SYSTEMCTL for step in root.order)
+
+
+def test_check_config_failure_keeps_the_previous_file_and_skips_the_reload(tmp_path):
+    actions, root, path = build(tmp_path, {al.THERMALCTL_BIN: al.RunResult(1, "header pwm2 below limit")})
+    old = b"[headers.pwm1]\nmin_duty = 30\n"
+    path.write_bytes(old)
     result = actions.fan_set_floor("pwm2", 5)
     assert not result.ok and result.status == "failed"
     assert "not changed" in result.output and "below limit" in result.output
-    assert path.read_bytes() == old
-    assert not cand(path).exists()
-    assert len(runner.calls) == 1, "no reload after a failed check"
+    assert path.read_bytes() == old and not cand(path).exists()
+    assert [step[0] for step in root.order] == [al.TEE, al.THERMALCTL_BIN, al.RM]
 
 
 def test_check_config_failure_never_exposes_the_candidate_at_the_real_path(tmp_path):
@@ -97,14 +207,17 @@ def test_check_config_failure_never_exposes_the_candidate_at_the_real_path(tmp_p
     old = b"[headers.pwm1]\nmin_duty = 30\n"
     path.write_bytes(old)
     seen = []
+    root = FakeRoot()
 
-    def runner(argv, timeout):
-        # While thermalctl checks the candidate, the real file must still hold the old bytes and
-        # the check must be pointed at the candidate, not at the real path.
-        seen.append((path.read_bytes(), argv[-1], cand(path).read_bytes()))
-        return al.RunResult(1, "rejected")
+    def run(argv, timeout):
+        if argv[0] == al.THERMALCTL_BIN:
+            # While thermalctl checks the candidate, the real file must still hold the old bytes and
+            # the check must be pointed at the candidate, not at the real path.
+            seen.append((path.read_bytes(), argv[-1], cand(path).read_bytes()))
+            return al.RunResult(1, "rejected")
+        return root.run(argv, timeout)
 
-    actions = al.LinuxActions(config(), runner, overrides_path=path, use_sudo=False)
+    actions = al.LinuxActions(config(), run, overrides_path=path, use_sudo=False, writer=root.write)
     assert not actions.fan_set_floor("pwm2", 5).ok
     (real_during, checked, candidate), = seen
     assert real_during == old and checked == str(cand(path)) and checked != str(path)
@@ -112,19 +225,22 @@ def test_check_config_failure_never_exposes_the_candidate_at_the_real_path(tmp_p
     assert path.read_bytes() == old and not cand(path).exists()
 
 
-def test_check_config_failure_removes_a_file_that_did_not_exist(tmp_path):
-    runner = FakeRunner([al.RunResult(1, "bad")])
-    path = tmp_path / "overrides.toml"
-    actions = al.LinuxActions(config(), runner, overrides_path=path, use_sudo=False)
+def test_check_config_failure_leaves_no_file_when_there_was_none(tmp_path):
+    actions, root, path = build(tmp_path, {al.THERMALCTL_BIN: al.RunResult(1, "bad")})
     assert not actions.fan_set_mode("active").ok
     assert not path.exists()
 
 
 def test_failed_reload_is_reported_not_hidden(tmp_path):
-    runner = FakeRunner([al.RunResult(0, "fine"), al.RunResult(1, "no such unit")])
-    actions = al.LinuxActions(config(), runner, overrides_path=tmp_path / "o.toml", use_sudo=False)
+    actions, root, path = build(tmp_path, {al.SYSTEMCTL: al.RunResult(1, "no such unit")})
     result = actions.fan_set_floor("pwm1", 40)
     assert not result.ok and "not reloaded" in result.output
+
+
+def test_the_real_writer_never_uses_a_shell_and_sends_the_data_on_stdin():
+    import inspect
+    src = inspect.getsource(al.subprocess_writer)
+    assert "shell=False" in src and "shell=True" not in src and "input=data" in src
 
 
 @pytest.mark.parametrize("header", ["", "pwm 1", "../x", "a;b", "$(id)", "-pwm1", "pw@m", "a" * 40, 5, None])
@@ -284,6 +400,9 @@ def test_real_runner_never_uses_a_shell():
 NAME = r"[A-Za-z0-9][A-Za-z0-9_.-]*"
 ALLOWED = [
     re.compile(re.escape(f"{al.THERMALCTL_BIN} check-config {al.THERMALCTL_CONFIG} --overrides {al.OVERRIDES_PATH}{al.CANDIDATE_SUFFIX}")),
+    re.compile(re.escape(f"{al.TEE} {al.OVERRIDES_PATH}{al.CANDIDATE_SUFFIX}")),
+    re.compile(re.escape(f"{al.MV} -f {al.OVERRIDES_PATH}{al.CANDIDATE_SUFFIX} {al.OVERRIDES_PATH}")),
+    re.compile(re.escape(f"{al.RM} -f {al.OVERRIDES_PATH}{al.CANDIDATE_SUFFIX}")),
     re.compile(re.escape(f"{al.SYSTEMCTL} kill -s HUP thermalctl")),
     re.compile(re.escape(f"{al.SYSTEMCTL} restart ") + NAME),
     re.compile(re.escape(f"{al.DOCKER} restart ") + NAME),
@@ -322,21 +441,25 @@ def test_sudoers_snippet_matches_the_renderer_for_the_example_config():
 
 def test_sudoers_covers_every_privileged_call_the_executors_make(tmp_path):
     cfg = config()
+    actions, root, overrides = build(tmp_path, cfg=cfg)
     runner = FakeRunner()
-    overrides = tmp_path / "o.toml"
-    actions = al.LinuxActions(cfg, runner, overrides_path=overrides, use_sudo=False)
+    other = al.LinuxActions(cfg, runner, overrides_path=overrides, use_sudo=False)
     actions.fan_set_floor("pwm1", 30)
     actions.fan_set_mode("active")
     for name in cfg.restart:
-        actions.service_restart(name)
-    actions.reboot()
-    actions.cancel_reboot()
+        other.service_restart(name)
+    other.reboot()
+    other.cancel_reboot()
     rules = al.sudoers_commands(cfg)
-    for call in runner.calls:
+    for call in root.order + runner.calls:
         line = " ".join(call).replace(str(overrides), al.OVERRIDES_PATH)
         if line.startswith(al.SYSTEMD_RUN):
             line = re.sub(r"--on-active=(\d+)s", lambda m: "--on-active=" + "[0-9]" * len(m.group(1)) + "s", line)
         assert line in rules, line
+    used = {" ".join(c).replace(str(overrides), al.OVERRIDES_PATH) for c in root.order}
+    for rule in rules:
+        if rule.startswith((al.TEE, al.MV)):
+            assert rule in used, rule
 
 
 def test_sudoers_renders_nothing_for_disabled_actions_and_rejects_bad_account():
