@@ -274,12 +274,13 @@ class WinEventReader:
         return SourceStatus(source=SOURCE, available=False,
                             reason=f"cannot read the {LOG_NAME} event log: {exc}")
 
-    def process(self, plan: "_Plan", raw: list[dict[str, Any]]) -> tuple[SourceStatus, list[Event]]:
+    def process(self, plan: "_Plan", raw: list[dict[str, Any]],
+                capped: bool | None = None) -> tuple[SourceStatus, list[Event]]:
         """Turn the records of one fetch into events and stage the new bookmark. Runs on the
         calling thread, so the staged state stays tied to the events it produced."""
         now = self.clock()
         bookmark, done, corrupt, since = plan.bookmark, plan.done, plan.corrupt, plan.since
-        capped = len(raw) >= MAX_EVENTS
+        capped = len(raw) >= MAX_EVENTS if capped is None else capped
         records = sorted((r for r in raw if _valid(r)), key=lambda r: r["time"])
         skipped = len(raw) - len(records)
         fresh = [r for r in records if record_key(r) not in done]
@@ -313,14 +314,16 @@ class BackgroundWinEvent:
     """Runs the blocking Event Log query on a worker thread so a PowerShell spawn never delays the
     agent loop. Each call to read() returns at once: it processes the result of a finished worker
     (on the calling thread, so the bookmark stays tied to the events it produced) and starts a new
-    worker when none is running. A result fetched from a bookmark that has since moved, because the
-    cycle that staged it failed and was discarded, is dropped and fetched again."""
+    worker when none is running. The records of the last result are kept. When the cycle that
+    consumed them failed, its staged bookmark and keys were discarded, so the records are processed
+    again with the next result and a boot or clean-shutdown record is delivered then, not lost. A
+    record whose key is already classified is skipped, so nothing is delivered twice."""
 
     def __init__(self, reader: WinEventReader) -> None:
         self.reader = reader
         self._thread: threading.Thread | None = None
         self._result: dict[str, Any] = {}
-        self._plan: _Plan | None = None
+        self._kept: list[dict[str, Any]] = []
         self._last = SourceStatus(source=SOURCE, available=False,
                                   reason="first Windows event log read in progress", pending=True)
 
@@ -339,14 +342,20 @@ class BackgroundWinEvent:
             if thread.is_alive():
                 return self._last, []
             self._thread = None
-            plan, result = self._plan, self._result
-            current = self.reader.prepare()
-            if plan is not None and "raw" in result and (current.bookmark, current.corrupt) == (plan.bookmark, plan.corrupt):
-                self._last, events = self.reader.process(plan, result["raw"])
+            result = self._result
+            if "raw" in result:
+                current = self.reader.prepare()
+                fetched = result["raw"]
+                known = {record_key(r) for r in fetched if _valid(r)}
+                older = [r for r in self._kept
+                         if _valid(r) and r["time"] >= current.since and record_key(r) not in known]
+                merged = older + list(fetched)
+                self._kept = merged
+                self._last, events = self.reader.process(current, merged, len(fetched) >= MAX_EVENTS)
             elif "error" in result:
                 self._last = self.reader.unavailable(result["error"])
         plan = self.reader.prepare()
-        self._plan, self._result = plan, {}
+        self._result = {}
         self._thread = threading.Thread(target=self._work, args=(plan.since, self._result),
                                         name="winevent-reader", daemon=True)
         self._thread.start()

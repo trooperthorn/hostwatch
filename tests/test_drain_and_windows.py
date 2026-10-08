@@ -10,6 +10,7 @@ from __future__ import annotations
 import logging
 import math
 import threading
+from pathlib import Path
 
 import httpx
 import pytest
@@ -407,3 +408,57 @@ def test_httpx_does_not_log_each_request_at_info(caplog):
             client.post("http://observe.test/v1/logs", content=b"x")
     assert [r for r in caplog.records if r.name.startswith(("httpx", "httpcore"))] == []
     assert logging.getLogger("httpx").getEffectiveLevel() >= logging.WARNING
+
+
+# The limits of Observe's protobuf decoder, from observe/otlp/wire.py of the ipMontior repository
+# at commit 9195b38. The test reads the decoder itself when that checkout is next to this one.
+OBSERVE_MAX_FIELDS = 200_000
+OBSERVE_REPO = Path(__file__).resolve().parents[2] / "ipMontior"
+
+
+def observe_decoder():
+    if not (OBSERVE_REPO / "observe" / "otlp" / "wire.py").is_file():
+        return None
+    import importlib.util
+    spec = importlib.util.spec_from_file_location("observe_wire_for_test", OBSERVE_REPO / "observe" / "otlp" / "wire.py")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def heavy_backlog_requests(i: int, **kw):
+    """50 points a cycle, each with four attributes, the shape of a busy host."""
+    from hostwatch.otel_map import GAUGE, Point
+    base = 1_700_000_000.0 + i * 30.0
+    pts = [Point("hostwatch.collector.c", f"hw.metric.{j % 5}", "1", GAUGE, i + j / 7, base + j * 0.001,
+                 {"a": f"a{j}", "b": f"b{j}", "c": f"c{j}", "d": f"d{j}"}) for j in range(50)]
+    return otlp.build_metrics_requests(f"e{i}", RES, pts, **kw).requests
+
+
+@pytest.mark.parametrize("fmt,compress", [("json", True), ("protobuf", True), ("protobuf", False)])
+def test_a_six_hour_backlog_is_merged_into_requests_observe_accepts(tmp_path, fmt, compress):
+    import gzip
+    entries = 6 * 3600 // 30
+    box = Outbox(tmp_path / "outbox.db")
+    built = [heavy_backlog_requests(i, fmt=fmt, compress=compress) for i in range(entries)]
+    total = sum(r.count for requests in built for r in requests)
+    for i, requests in enumerate(built):
+        box.enqueue(requests, f"e{i}")
+    if fmt == "protobuf":
+        whole = b"".join((gzip.decompress(r.body) if compress else r.body) for rs in built[:100] for r in rs)
+        assert otlp.protobuf_cost(whole, "metrics") > OBSERVE_MAX_FIELDS  # one 5000 point request is too costly
+    assert box.coalesce_metrics() > 0
+    wire = observe_decoder()
+    seen = 0
+    while (req := box.peek()) is not None:
+        raw = gzip.decompress(req.body) if req.headers.get("Content-Encoding") == "gzip" else req.body
+        assert len(req.body) <= 1_048_576 and len(raw) <= 4 * 1024 * 1024 and req.count <= 5000
+        if fmt == "protobuf":
+            assert otlp.protobuf_cost(raw, "metrics") <= OBSERVE_MAX_FIELDS
+            if wire is not None:
+                tree = wire.decode(raw, "MetricsRequest")  # raises WireError when the field budget is spent
+                assert sum(len(m["gauge"]["dataPoints"]) for rm in tree["resourceMetrics"]
+                           for sm in rm["scopeMetrics"] for m in sm["metrics"]) == req.count
+        seen += req.count
+        box.ack(req.seq, commit=False)
+    assert seen == total

@@ -231,3 +231,31 @@ def test_corrupt_bookmark_recovers_with_a_lookback(tmp_path, bad, caplog):
 def test_clean_shutdown_then_bugcheck_600s_later_are_two_events(tmp_path):
     _, events = reader(tmp_path, [el6006(T0), kp41(T0 + 600), bc1001(T0 + 620)]).read()
     assert [e.kind for e in events] == ["boot.clean_shutdown", "boot.kernel_panic"]
+
+
+def test_failed_cycle_with_a_lone_boot_record_delivers_it_next_cycle_exactly_once(tmp_path):
+    import sqlite3
+
+    from hostwatch.events.winevent import BackgroundWinEvent
+    agent, r = _agent_with_reader(tmp_path, [el6006(T0)], lambda: NOW)
+    background = BackgroundWinEvent(r)
+    agent.event_sources = {"winevent": background.read}
+
+    def settle():
+        background._thread.join()
+
+    assert event_cycle(agent) is True  # starts the first worker
+    settle()
+    real = agent.outbox.enqueue
+    agent.outbox.enqueue = lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("disk full"))
+    assert event_cycle(agent) is False  # consumes the record, then the cycle fails and its state is discarded
+    settle()
+    agent.outbox.enqueue = real
+    assert event_cycle(agent) is True
+    delivered = [e for e in drain_logs(agent) if e["source"] == "boot"]
+    assert len(delivered) == 1
+    settle()
+    assert event_cycle(agent) is True
+    settle()
+    assert event_cycle(agent) is True
+    assert [e for e in drain_logs(agent) if e["source"] == "boot"] == []

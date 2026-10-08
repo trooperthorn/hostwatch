@@ -47,6 +47,12 @@ MAX_INFLATED_BYTES = 4 * 1024 * 1024
 MAX_INFLATE_RATIO = 100
 MIN_INFLATED_ALLOWANCE = 64 * 1024
 MAX_POINTS = 5000
+# The work Observe's protobuf decoder allows one request: every field costs one unit and every
+# sub message costs MESSAGE_COST more. Copied from MAX_FIELDS and MESSAGE_COST in
+# observe/otlp/wire.py of the ipMontior repository at commit 9195b38. A body that costs more is
+# refused with a 400, which a client must not retry, so no request may be built or merged past it.
+MAX_FIELDS = 200_000
+MESSAGE_COST = 4
 MAX_RECORDS = 500
 MAX_RESOURCE_ATTRS = 64
 MAX_POINT_ATTRS = 32
@@ -304,8 +310,48 @@ def _gzip(data: bytes) -> bytes:
     return gzip.compress(data, compresslevel=6, mtime=0)
 
 
-def _within_limits(raw: bytes, wire: bytes, compress: bool) -> bool:
+def protobuf_cost(body: bytes, signal: str) -> int:
+    """The field budget Observe's decoder would spend on a protobuf request body, counted the same
+    way: one unit per field and MESSAGE_COST more for each sub message. A body that cannot be
+    walked is charged more than the whole budget, so it is never reported as cheap."""
+    cost = 0
+
+    def walk(start: int, end: int, name: str) -> None:
+        nonlocal cost
+        pos = start
+        while pos < end:
+            tag, pos = _read_varint(body, pos)
+            number, wire = tag >> 3, tag & 7
+            cost += 1
+            if wire == _VARINT:
+                _, pos = _read_varint(body, pos)
+            elif wire == _FIXED64:
+                pos += 8
+            elif wire == 5:
+                pos += 4
+            elif wire == _LEN:
+                size, pos = _read_varint(body, pos)
+                spec = _SCHEMAS[name].get(number)
+                if spec is not None and spec[1] == "msg" and pos + size <= end:
+                    cost += MESSAGE_COST
+                    walk(pos, pos + size, spec[2] or "")
+                pos += size
+            else:
+                raise OtlpError("not a protobuf message")
+            if pos > end:
+                raise OtlpError("not a protobuf message")
+
+    try:
+        walk(0, len(body), {"metrics": "MetricsRequest", "logs": "LogsRequest"}[signal])
+    except (OtlpError, KeyError):
+        return MAX_FIELDS + 1
+    return cost
+
+
+def _within_limits(raw: bytes, wire: bytes, compress: bool, fmt: str = "json", signal: str = "metrics") -> bool:
     if len(raw) > MAX_INFLATED_BYTES or len(wire) > MAX_BODY_BYTES:
+        return False
+    if fmt == "protobuf" and protobuf_cost(raw, signal) > MAX_FIELDS:
         return False
     return not (compress and len(raw) > max(MIN_INFLATED_ALLOWANCE, MAX_INFLATE_RATIO * len(wire)))
 
@@ -333,7 +379,7 @@ def _build(signal: str, items: list, make_tree: Callable[[list], dict[str, Any]]
             queue.extend([chunk[mid:], chunk[:mid]])
             continue
         wire = _gzip(raw) if compress else raw
-        if not _within_limits(raw, wire, compress):
+        if not _within_limits(raw, wire, compress, fmt, signal):
             if len(chunk) == 1:
                 raise OtlpError(f"a single {signal} item does not fit the request limits")
             mid = len(chunk) // 2
@@ -419,8 +465,8 @@ def merge_metrics(parts: Sequence[tuple[dict[str, str], bytes, int]]) -> OtlpReq
             merged.extend(json.loads(chunk)["resourceMetrics"])
         raw = to_json({"resourceMetrics": merged})
     wire = _gzip(raw) if compress else raw
-    if not _within_limits(raw, wire, compress):
-        raise OtlpError("the merged request exceeds the size limits")
+    if not _within_limits(raw, wire, compress, "protobuf" if first.get("Content-Type") == PROTOBUF else "json"):
+        raise OtlpError("the merged request exceeds the size or field limits")
     headers = {k: v for k, v in first.items() if k != "Idempotency-Key"}
     headers["Idempotency-Key"] = merged_key([h.get("Idempotency-Key", "") for h, _, _ in parts])
     return OtlpRequest("metrics", METRICS_PATH, headers, wire, count, len(raw))
