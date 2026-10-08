@@ -208,11 +208,14 @@ def check_permissions(path: Path) -> None:
 
 
 def load(path: str | Path) -> ControlConfig:
-    p = Path(path)
-    if not p.exists():
-        raise ConfigError(f"control.toml was not found at {p}; install the control service from the host's "
-                          "page in Observe, which writes this file, or point HOSTWATCH_CONTROL_CONFIG at it")
+    # Keep an existing Path as it is: re-wrapping it picks the class from os.name, which tests patch.
+    p = path if isinstance(path, Path) else Path(path)
     try:
+        try:
+            p.stat()
+        except FileNotFoundError:
+            raise ConfigError(f"control.toml was not found at {p}; install the control service from the host's "
+                              "page in Observe, which writes this file, or point HOSTWATCH_CONTROL_CONFIG at it")
         check_permissions(p)
         raw = p.read_bytes()
     except OSError as exc:

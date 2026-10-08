@@ -543,7 +543,7 @@ class _FakeWin32Security:
         self.owner = owner
 
     def GetFileSecurity(self, path, info):
-        if not Path(path).exists():
+        if not os.path.exists(str(path)):
             raise self.error(2, "GetFileSecurity", "The system cannot find the file specified.")
         return type("Desc", (), {"GetSecurityDescriptorOwner": lambda desc: self.owner})()
 
@@ -609,3 +609,14 @@ def test_the_windows_fixture_adds_nothing_when_the_owner_cannot_be_read(monkeypa
     monkeypatch.setattr(cfgmod, "WINDOWS_TRUSTED_SIDS", ("S-1-5-18", "S-1-5-32-544"))
     trust_the_test_user_as_control_file_owner(monkeypatch, tmp_path / "missing")
     assert cfgmod.WINDOWS_TRUSTED_SIDS == ("S-1-5-18", "S-1-5-32-544")
+
+
+def test_an_unsearchable_directory_is_a_cannot_read_error_not_a_raw_permission_error(monkeypatch, tmp_path):
+    p = tmp_path / "control.toml"
+
+    def denied(self, *args, **kwargs):
+        raise PermissionError(13, "Permission denied")
+
+    monkeypatch.setattr(type(p), "stat", denied)
+    with pytest.raises(cfgmod.ConfigError, match="cannot read .*Permission denied"):
+        cfgmod.load(p)
