@@ -1238,3 +1238,27 @@ def test_installers_lock_the_data_folder_owner_and_acl_and_refuse_a_foreign_owne
     # nothing outside the function sets the data folder ACL directly any more
     outside = text.replace(body, "")
     assert not re.search(r"icacls\.exe' @\(\$DataDir", outside)
+
+
+def test_build_daemon_keys_the_replay_state_from_the_settings_secret(env):
+    from hostwatch.control.state import ReplayState, StateError, derive_key
+    daemon = env.build()
+    daemon.verifier.state.record("x", 1)
+    daemon.close()
+    ReplayState(env.data / STATE_FILE, derive_key(KEY))
+    with pytest.raises(StateError, match="checksum"):
+        ReplayState(env.data / STATE_FILE)
+    # A separate state key leaves the bearer key free to rotate.
+    env.settings = d.Settings(URL, "wpc_rotated", env.settings.config_path, env.data, 5.0, state_key=KEY)
+    rotated = d.build_daemon(env.settings, client=env.wp.client(), actions=FakeExecutor(), clock=lambda: 0)
+    assert rotated.verifier.state is not None and rotated.verifier.state.last_seq == 1
+    rotated.close()
+
+
+def test_an_old_format_state_is_logged_with_its_path_and_the_upgrade_command(env, caplog):
+    env.data.mkdir(parents=True)
+    (env.data / STATE_FILE).write_text('{"last_seq": 3, "ids": ["x"]}', encoding="utf-8")
+    with caplog.at_level(logging.ERROR, logger="hostwatch.control"):
+        env.build().close()
+    text = caplog.text
+    assert str(env.data / STATE_FILE) in text and "state-upgrade" in text

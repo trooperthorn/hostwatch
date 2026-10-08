@@ -3,6 +3,8 @@
   python -m hostwatch windows run [--data-dir DIR] [--env-file FILE]
   python -m hostwatch control run [--config FILE] [--data-dir DIR] [--env-file FILE]
   python -m hostwatch control cancel [--config FILE]
+  python -m hostwatch control state-upgrade [--data-dir DIR] [--env-file FILE]
+  python -m hostwatch control state-reset --yes [--last-seq N] [--data-dir DIR] [--env-file FILE]
 
 `windows run` runs the native Windows agent in the foreground with its outbox in the data
 directory. `control` is the separate hostwatch-control daemon, which has its own account, data
@@ -32,6 +34,14 @@ def _parser() -> argparse.ArgumentParser:
     run_ctl.add_argument("--env-file", default=None, help="settings file (default: control.env in the data directory)")
     cancel_ctl = ctl.add_parser("cancel", help="cancel a scheduled reboot on this host")
     cancel_ctl.add_argument("--config", default=None, help="control.toml (default: HOSTWATCH_CONTROL_CONFIG or the platform path)")
+    up = ctl.add_parser("state-upgrade", help="upgrade an old replay state file, keeping its sequence number and ids")
+    rs = ctl.add_parser("state-reset", help="delete the replay state (last resort); stop the service first")
+    for sp in (up, rs):
+        sp.add_argument("--data-dir", default=None, help="state folder (default: HOSTWATCH_CONTROL_DATA_DIR)")
+        sp.add_argument("--env-file", default=None, help="settings file (default: control.env in the data directory)")
+    rs.add_argument("--yes", action="store_true", help="confirm that the replay history is deleted")
+    rs.add_argument("--last-seq", type=int, default=None, metavar="N",
+                    help="start again with this highest executed sequence number, so the seq-jump limit still applies")
     return p
 
 
@@ -43,4 +53,7 @@ def run(argv: list[str], cfg=None) -> int:
     from .control import daemon
     if args.action == "cancel":
         return daemon.run_cancel(args.config)
+    if args.action in ("state-upgrade", "state-reset"):
+        return daemon.run_state_tool(args.action, args.data_dir, args.env_file,
+                                     getattr(args, "yes", False), getattr(args, "last_seq", None))
     return daemon.run_foreground(args.config, args.data_dir, args.env_file)

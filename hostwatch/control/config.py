@@ -190,6 +190,11 @@ def _windows_owner_sid(path: Path) -> str | None:
 WINDOWS_WRITE_MASK = 0x2 | 0x4 | 0x10 | 0x100 | 0x10000 | 0x40000 | 0x80000 | 0x40000000 | 0x10000000
 
 
+# ACCESS_ALLOWED, ACCESS_ALLOWED_OBJECT, ACCESS_ALLOWED_CALLBACK and ACCESS_ALLOWED_CALLBACK_OBJECT.
+# A callback allow entry grants access whenever its condition holds, so it is treated as granting.
+ALLOW_ACE_TYPES = frozenset({0, 5, 9, 11})
+
+
 def _windows_dacl_problem(path: Path) -> str | None:
     """Why the DACL of a file is unsafe, or None when it is fine or cannot be read (no pywin32)."""
     try:
@@ -203,7 +208,7 @@ def _windows_dacl_problem(path: Path) -> str | None:
             return "has no DACL, so everyone can change it"
         for i in range(dacl.GetAceCount()):
             (ace_type, _flags), mask, sid = dacl.GetAce(i)
-            if ace_type != win32security.ACCESS_ALLOWED_ACE_TYPE:
+            if ace_type not in ALLOW_ACE_TYPES:
                 continue
             text = win32security.ConvertSidToStringSid(sid)
             if text not in WINDOWS_TRUSTED_SIDS and mask & WINDOWS_WRITE_MASK:
@@ -224,8 +229,13 @@ def check_permissions(path: Path) -> None:
             raise ConfigError(f"{path} is owned by {sid}, not SYSTEM or Administrators; refusing to use it")
         problem = _windows_dacl_problem(path)
         if problem:
-            raise ConfigError(f"the DACL of {path} {problem}; refusing to use it. "
-                              "Fix it with: icacls /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F")
+            raise ConfigError(f"the DACL of {path} {problem}; refusing to use it. Fix it with: "
+                              f'icacls "{path}" /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F')
+        parent_problem = _windows_dacl_problem(path.parent)
+        if parent_problem:
+            raise ConfigError(f"the DACL of the folder {path.parent} {parent_problem}; refusing to use {path}. "
+                              f'Fix it with: icacls "{path.parent}" /inheritance:r /grant:r '
+                              "*S-1-5-18:(OI)(CI)F *S-1-5-32-544:(OI)(CI)F")
         return
     st = path.stat()
     if st.st_uid not in TRUSTED_UIDS:

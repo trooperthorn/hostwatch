@@ -31,6 +31,10 @@ Settings (environment, optionally seeded from a KEY=value file named control.env
   HOSTWATCH_CONTROL_DATA_DIR    replay state, result outbox and logs (default /var/lib/hostwatch-control,
                                 or C:/ProgramData/hostwatch on Windows)
   HOSTWATCH_CONTROL_INTERVAL_S  poll interval, 5 to 300 (default 5)
+  HOSTWATCH_CONTROL_STATE_KEY   optional secret for the replay-state checksum. When unset the control key is
+                                used, so rotating the control key then needs `control state-reset`. Set this
+                                once, before the first command, to rotate the control key without touching
+                                the replay state.
 """
 
 from __future__ import annotations
@@ -56,7 +60,7 @@ from .actions_linux import ActionResult
 from .outbox import OUTBOX_FILE, ResultOutbox
 from .redact import redact
 from .signing import SigningUnavailable
-from .state import STATE_FILE, derive_key
+from .state import (RESET_HINT, STATE_FILE, StateError, derive_key, migrate_legacy, reset_state)
 from .verify import REPLAYED_ID, CommandVerifier
 
 log = logging.getLogger("hostwatch.control")
@@ -101,6 +105,12 @@ class Settings:
     config_path: Path
     data_dir: Path
     interval_s: float = MIN_INTERVAL_S
+    state_key: str = ""
+
+    @property
+    def state_secret(self) -> str:
+        """The secret the replay-state checksum is keyed from."""
+        return self.state_key or self.key
 
     def __repr__(self) -> str:  # the key must never reach a log line through a repr
         return f"Settings(url={self.url!r}, config_path={self.config_path!r}, data_dir={self.data_dir!r})"
@@ -134,7 +144,8 @@ def load_settings(environ: Mapping[str, str] | None = None, *, data_dir: str | P
         raise SettingsError("HOSTWATCH_CONTROL_INTERVAL_S must be a number") from exc
     if not MIN_INTERVAL_S <= interval <= MAX_INTERVAL_S:
         raise SettingsError(f"HOSTWATCH_CONTROL_INTERVAL_S must be from {MIN_INTERVAL_S:g} to {MAX_INTERVAL_S:g}")
-    return Settings(url, key, config, folder, interval)
+    state_key = (env.get("HOSTWATCH_CONTROL_STATE_KEY") or "").strip()
+    return Settings(url, key, config, folder, interval, state_key)
 
 
 class Executor(Protocol):
@@ -470,10 +481,11 @@ def build_daemon(settings: Settings, *, client: httpx.Client | None = None, acti
         raise SettingsError(wrong)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
     verifier = CommandVerifier(config, settings.data_dir / STATE_FILE, clock=clock,
-                               state_key=derive_key(settings.key))
+                               state_key=derive_key(settings.state_secret))
     if verifier.state is None:
-        log.error("the replay state is unusable (%s); every command will be refused until it is fixed",
-                  verifier.state_error)
+        log.error("the replay state %s is unusable (%s); every command will be refused until the operator fixes it "
+                  "(upgrade an old file with `python -m hostwatch control state-upgrade`; as a last resort run `%s`)",
+                  settings.data_dir / STATE_FILE, verifier.state_error, RESET_HINT)
     return ControlDaemon(settings, config, verifier, actions if actions is not None else build_actions(config),
                          ResultOutbox(settings.data_dir / OUTBOX_FILE), client or httpx.Client(), clock, boot_id)
 
@@ -541,3 +553,32 @@ def run_cancel(config_path: str | None = None,
     result = actions_factory(config).cancel_reboot()
     print(result.output)
     return 0 if result.ok else 1
+
+
+def run_state_tool(action: str, data_dir: str | None = None, env_file: str | None = None,
+                   yes: bool = False, last_seq: int | None = None) -> int:
+    """`control state-upgrade` and `control state-reset`: operator-run repairs of the replay state.
+
+    Stop the service first. Both use the same state key the daemon does, so run them with the same
+    environment or control.env."""
+    try:
+        settings = settings_from_files(data_dir, None, env_file)
+    except (SettingsError, OSError) as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    path = settings.data_dir / STATE_FILE
+    key = derive_key(settings.state_secret)
+    try:
+        if action == "state-upgrade":
+            state = migrate_legacy(path, key)
+            print(f"upgraded {path}: last_seq {state.last_seq}, {len(state.ids)} command id(s) kept")
+        else:
+            if not yes:
+                print(f"error: this deletes the replay history in {path}; add --yes to confirm", file=sys.stderr)
+                return 1
+            reset_state(path, key, last_seq)
+            print(f"reset {path}" + (f" with last_seq {last_seq}" if last_seq is not None else ""))
+    except StateError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0

@@ -534,8 +534,17 @@ files are described in the section after the executors. Modules:
   second file (`control-state.json.anchor`) repeats the generation with its own checksum. The state is written
   first and the anchor second. A state older than the anchor (a restored backup), a checksum mismatch, a missing
   anchor, a state with no checksum and a state missing beside its anchor are all errors, never an empty state; only a
-  folder with neither file is a fresh start. Restoring both files together is not detectable on the host. Changing
-  the control key invalidates the checksum, so rotating it needs the two state files removed on purpose.
+  folder with neither file is a fresh start. The anchor must be at the state's generation or exactly one behind (a
+  crash between the two writes); the one-behind anchor carries its own keyed generation checksum, so an unkeyed
+  anchor cannot hide a restored state, and any other generation is an error. Restoring both files together is not
+  detectable on the host. The files carry a format version (`v`, currently 2). The first release wrote
+  `{"last_seq","ids"}` with no checksum; loading it raises `LegacyStateError`, the daemon logs the file path, and the
+  operator runs `control state-upgrade`, which keeps the seq and ids (`migrate_legacy`). `control state-reset --yes
+  [--last-seq N]` is the explicit last resort that deletes the history. The checksum key comes from
+  `HOSTWATCH_CONTROL_STATE_KEY` when set, so the control key (the Observe bearer token) can be rotated without
+  touching the state; without it, changing the control key invalidates the checksum and needs a reset.
+  Known limit: the seq-jump bound needs a baseline, so on a fresh or reset state the first command may set any seq
+  unless the operator gave `--last-seq`.
 - `verify.py` runs the checks in order and returns a `Decision` with a reason code on refusal. After the expiry
   check it refuses a command whose expiry is more than 900 s after issue (`expiry_too_long`), whose `issued_at` is
   more than 30 s in the future (`issued_in_future`) or more than 600 s plus skew in the past (`issued_too_old`),

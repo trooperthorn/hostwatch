@@ -797,3 +797,120 @@ def test_a_forged_anchor_for_the_same_generation_is_refused(tmp_path):
     anchor_path.write_text(json.dumps({"gen": gen, "mac": "0" * 64}), encoding="utf-8")
     with pytest.raises(StateError, match="does not match"):
         ReplayState(path)
+
+
+# --- fixes after verification of slice h5 ----------------------------------------------------
+
+from hostwatch.control.state import LegacyStateError, migrate_legacy, reset_state  # noqa: E402
+
+
+def _anchor(tmp_path):
+    return tmp_path / (STATE_FILE + ".anchor")
+
+
+def test_an_old_format_state_names_the_file_and_the_upgrade_command(tmp_path):
+    path = tmp_path / STATE_FILE
+    path.write_text('{"last_seq": 3, "ids": ["x"]}', encoding="utf-8")
+    with pytest.raises(LegacyStateError, match="state-upgrade") as info:
+        ReplayState(path)
+    assert str(path) in str(info.value)
+
+
+def test_upgrading_an_old_state_keeps_its_seq_and_ids_and_writes_the_new_format(tmp_path):
+    path = tmp_path / STATE_FILE
+    path.write_text('{"last_seq": 7, "ids": ["a", "b"]}', encoding="utf-8")
+    state = migrate_legacy(path)
+    assert state.last_seq == 7 and state.ids == ["a", "b"]
+    again = ReplayState(path)
+    assert again.last_seq == 7 and again.seen("a") and not again.seq_ok(7)
+    assert json.loads(path.read_text(encoding="utf-8"))["v"] == 2
+    with pytest.raises(StateError, match="not an old format"):
+        migrate_legacy(path)
+
+
+def test_upgrading_refuses_a_missing_or_garbled_old_state(tmp_path):
+    with pytest.raises(StateError, match="nothing to upgrade"):
+        migrate_legacy(tmp_path / STATE_FILE)
+    (tmp_path / STATE_FILE).write_text('{"last_seq": "x", "ids": []}', encoding="utf-8")
+    with pytest.raises(StateError, match="unexpected field types"):
+        migrate_legacy(tmp_path / STATE_FILE)
+
+
+def test_a_state_from_a_newer_format_version_is_refused(tmp_path):
+    path = tmp_path / STATE_FILE
+    _record(path, 1)
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["v"] = 3
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(StateError, match="format version"):
+        ReplayState(path)
+
+
+def test_reset_removes_both_files_and_can_set_a_baseline(tmp_path):
+    path = tmp_path / STATE_FILE
+    _record(path, 2)
+    reset_state(path)
+    assert not path.exists() and not _anchor(tmp_path).exists()
+    reset_state(path, last_seq=40)
+    state = ReplayState(path)
+    assert state.last_seq == 40 and state.ids == []
+
+
+def test_an_unkeyed_older_anchor_cannot_hide_a_restored_state(tmp_path):
+    path = tmp_path / STATE_FILE
+    _record(path, 3)
+    gen = json.loads(path.read_text(encoding="utf-8"))["gen"]
+    for forged in ({"gen": 0, "mac": ""}, {"gen": gen - 1, "mac": "x"}, {"gen": gen - 1, "mac": "x", "gmac": "0" * 64}):
+        _anchor(tmp_path).write_text(json.dumps(forged), encoding="utf-8")
+        with pytest.raises(StateError):
+            ReplayState(path)
+
+
+def test_an_anchor_more_than_one_generation_behind_is_refused_even_when_validly_keyed(tmp_path):
+    path = tmp_path / STATE_FILE
+    _record(path, 1)
+    anchor = _anchor(tmp_path).read_bytes()
+    _record_more = ReplayState(path)
+    _record_more.record("n1", 10)
+    _record_more.record("n2", 11)
+    _anchor(tmp_path).write_bytes(anchor)
+    with pytest.raises(StateError, match="does not follow"):
+        ReplayState(path)
+
+
+def test_the_cli_runs_the_state_tools(tmp_path, monkeypatch, capsys):
+    from hostwatch import cli
+    from hostwatch.config import Config
+    from hostwatch.control import daemon as d
+    from hostwatch.control.state import derive_key
+    monkeypatch.setenv("HOSTWATCH_CONTROL_URL", "https://observe.test")
+    monkeypatch.setenv("HOSTWATCH_CONTROL_KEY", "wpc_testkey")
+    (tmp_path / STATE_FILE).write_text('{"last_seq": 9, "ids": ["q"]}', encoding="utf-8")
+    assert cli.run(["control", "state-upgrade", "--data-dir", str(tmp_path)], Config()) == 0
+    assert ReplayState(tmp_path / STATE_FILE, derive_key("wpc_testkey")).last_seq == 9
+    assert cli.run(["control", "state-reset", "--data-dir", str(tmp_path)], Config()) == 1
+    assert (tmp_path / STATE_FILE).exists()
+    assert cli.run(["control", "state-reset", "--yes", "--last-seq", "5", "--data-dir", str(tmp_path)], Config()) == 0
+    assert ReplayState(tmp_path / STATE_FILE, derive_key("wpc_testkey")).last_seq == 5
+    assert d.load_settings({"HOSTWATCH_CONTROL_URL": "https://o.test", "HOSTWATCH_CONTROL_KEY": "wpc_a",
+                            "HOSTWATCH_CONTROL_STATE_KEY": "other"}).state_secret == "other"
+
+
+def test_the_windows_check_refuses_a_writable_folder_and_a_callback_allow_entry(monkeypatch, tmp_path, signer):
+    fake = _FakeWin32Security()
+    p = _windows_load(monkeypatch, tmp_path, signer, fake)
+    real = fake.GetFileSecurity
+    bad = _FakeWin32Security(aces=[(0, 0x1F01FF, "S-1-5-18"), (0, 0x2, "S-1-1-0")])
+
+    def per_path(path, info):
+        return (bad.GetFileSecurity if str(path) == str(p.parent) else real)(path, info)
+
+    monkeypatch.setattr(fake, "GetFileSecurity", per_path)
+    with pytest.raises(cfgmod.ConfigError, match="folder .*S-1-1-0") as info:
+        cfgmod.load(p)
+    assert "icacls" in str(info.value)
+    monkeypatch.setattr(fake, "GetFileSecurity", real)
+    callback = _FakeWin32Security(aces=[(0, 0x1F01FF, "S-1-5-18"), (9, 0x2, "S-1-1-0")])
+    with pytest.raises(cfgmod.ConfigError, match="DACL .*S-1-1-0") as info:
+        cfgmod.load(_windows_load(monkeypatch, tmp_path, signer, callback))
+    assert str(p) in str(info.value)

@@ -316,6 +316,19 @@ pattern; `host.reboot` runs `shutdown.exe /r /t <delay_s>` and `shutdown.exe /a`
 executors are tested only with a fake pipe client and a fake runner. The test vector is in
 `tests/fixtures/control_vector.json`.
 
+Upgrading and key rotation (replay state). The replay state file `control-state.json` in the data folder is
+versioned. A file written by a build before the checksum was added has no `v`, `gen` or `mac`, and the daemon
+refuses every command (`state_unavailable`) and logs the file path until the operator upgrades it. Stop the
+service and run `python -m hostwatch control state-upgrade` once (same environment or `control.env` as the
+service); it keeps the saved sequence number and command ids. The checksum is keyed from
+`HOSTWATCH_CONTROL_STATE_KEY` when that is set and from `HOSTWATCH_CONTROL_KEY` otherwise. If you rotate the
+control key without a separate state key, the state fails its checksum; either set `HOSTWATCH_CONTROL_STATE_KEY`
+to the old control key value before rotating, or as a last resort run `python -m hostwatch control state-reset
+--yes --last-seq N`, which deletes the replay history and starts from the sequence number you give. The same
+reset is the way back for a host that was offline while Observe's sequence moved more than 1000 ahead
+(`seq_jump_too_large`); pick N close to the current Observe sequence. Without `--last-seq` the first command after a
+reset may set any sequence number, because there is no baseline to bound it.
+
 The daemon is started with `python -m hostwatch control run`. Every 5 seconds it asks Observe for this host's
 commands (`GET /api/v1/control/commands?host=`, bearer `wpc_` key), handles them one at a time in `seq` order,
 and posts each result to `POST /api/v1/control/results`. A refused command is not run and its result carries
