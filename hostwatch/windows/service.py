@@ -38,7 +38,7 @@ import httpx
 
 from ..agent import Agent, observe_tls_verify
 from ..config import Config
-from ..events.winevent import WinEventReader
+from ..events.winevent import BackgroundWinEvent, WinEventReader
 from . import WindowsSeam, real_seam
 
 SERVICE_NAME = "hostwatch-agent"
@@ -80,7 +80,9 @@ def build_agent(cfg: Config, seam: WindowsSeam | None = None) -> Agent:
     agent = WindowsAgent(cfg, seam, platform="windows")
     for name in LINUX_ONLY_EVENT_SOURCES:
         agent.event_sources.pop(name, None)
-    agent.event_sources["winevent"] = WinEventReader(seam, cfg.data_dir, markers=agent.outbox).read
+    # The Event Log query spawns PowerShell, so it runs on a worker thread and never holds the loop.
+    agent.event_sources["winevent"] = BackgroundWinEvent(
+        WinEventReader(seam, cfg.data_dir, markers=agent.outbox)).read
     return agent
 
 

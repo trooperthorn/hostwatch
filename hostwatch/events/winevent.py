@@ -29,9 +29,10 @@ import json
 import logging
 import math
 import os
+import threading
 import time
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any, Callable, NamedTuple
 
 from ..outbox import Markers
 from ..model import Event, SourceStatus
@@ -189,6 +190,14 @@ def save_bookmark(state_dir: Path, ts: float) -> None:
     os.replace(tmp, state_dir / BOOKMARK_FILE)
 
 
+class _Plan(NamedTuple):
+    now: float
+    bookmark: float | None
+    done: set[str]
+    corrupt: bool
+    since: float
+
+
 class WinEventReader:
     def __init__(self, seam: WindowsSeam, data_dir: Path, clock: Callable[[], float] = time.time,
                  markers: Markers | None = None) -> None:
@@ -232,7 +241,9 @@ class WinEventReader:
         self.markers.stage(KEYS_MARKER, json.dumps(sorted(keys)[-boot.MAX_CLASSIFIED:]))
         self.markers.stage(BOOKMARK_MARKER, json.dumps(mark))
 
-    def read(self) -> tuple[SourceStatus, list[Event]]:
+    def prepare(self) -> "_Plan":
+        """The state a read starts from: the bookmark, the keys already classified and the time the
+        log is asked from. It is cheap and runs on the calling thread."""
         now = self.clock()
         bookmark, done = self._load_state()
         corrupt = False
@@ -243,11 +254,31 @@ class WinEventReader:
                 self._warned_bookmark = True
             bookmark, corrupt = None, True
         since = bookmark if bookmark is not None else now - FIRST_RUN_LOOKBACK_S
+        return _Plan(now, bookmark, done, corrupt, since)
+
+    def fetch(self, since: float) -> list[dict[str, Any]]:
+        """The blocking half of a read: ask the log for its records. It may take a PowerShell spawn
+        (a few hundred milliseconds), so the agent runs it on a worker thread."""
+        return self.seam.events.read(LOG_NAME, READ_IDS, since, MAX_EVENTS, oldest_first=True)
+
+    def read(self) -> tuple[SourceStatus, list[Event]]:
+        plan = self.prepare()
         try:
-            raw = self.seam.events.read(LOG_NAME, READ_IDS, since, MAX_EVENTS, oldest_first=True)
+            raw = self.fetch(plan.since)
         except SeamError as exc:
-            return SourceStatus(source=SOURCE, available=False,
-                                reason=f"cannot read the {LOG_NAME} event log: {exc}"), []
+            return self.unavailable(exc), []
+        return self.process(plan, raw)
+
+    @staticmethod
+    def unavailable(exc: Exception) -> SourceStatus:
+        return SourceStatus(source=SOURCE, available=False,
+                            reason=f"cannot read the {LOG_NAME} event log: {exc}")
+
+    def process(self, plan: "_Plan", raw: list[dict[str, Any]]) -> tuple[SourceStatus, list[Event]]:
+        """Turn the records of one fetch into events and stage the new bookmark. Runs on the
+        calling thread, so the staged state stays tied to the events it produced."""
+        now = self.clock()
+        bookmark, done, corrupt, since = plan.bookmark, plan.done, plan.corrupt, plan.since
         capped = len(raw) >= MAX_EVENTS
         records = sorted((r for r in raw if _valid(r)), key=lambda r: r["time"])
         skipped = len(raw) - len(records)
@@ -276,3 +307,47 @@ class WinEventReader:
             self._save_state(mark, done | new_keys)
         reason = f"{skipped} record(s) skipped because they were malformed" if skipped else ""
         return SourceStatus(source=SOURCE, available=True, reason=reason), events
+
+
+class BackgroundWinEvent:
+    """Runs the blocking Event Log query on a worker thread so a PowerShell spawn never delays the
+    agent loop. Each call to read() returns at once: it processes the result of a finished worker
+    (on the calling thread, so the bookmark stays tied to the events it produced) and starts a new
+    worker when none is running. A result fetched from a bookmark that has since moved, because the
+    cycle that staged it failed and was discarded, is dropped and fetched again."""
+
+    def __init__(self, reader: WinEventReader) -> None:
+        self.reader = reader
+        self._thread: threading.Thread | None = None
+        self._result: dict[str, Any] = {}
+        self._plan: _Plan | None = None
+        self._last = SourceStatus(source=SOURCE, available=False,
+                                  reason="first Windows event log read in progress", pending=True)
+
+    def _work(self, since: float, result: dict[str, Any]) -> None:
+        try:
+            result["raw"] = self.reader.fetch(since)
+        except SeamError as exc:
+            result["error"] = exc
+        except Exception as exc:  # the thread must always finish with a result
+            result["error"] = SeamError(f"{type(exc).__name__}: {exc}")
+
+    def read(self) -> tuple[SourceStatus, list[Event]]:
+        events: list[Event] = []
+        thread = self._thread
+        if thread is not None:
+            if thread.is_alive():
+                return self._last, []
+            self._thread = None
+            plan, result = self._plan, self._result
+            current = self.reader.prepare()
+            if plan is not None and "raw" in result and (current.bookmark, current.corrupt) == (plan.bookmark, plan.corrupt):
+                self._last, events = self.reader.process(plan, result["raw"])
+            elif "error" in result:
+                self._last = self.reader.unavailable(result["error"])
+        plan = self.reader.prepare()
+        self._plan, self._result = plan, {}
+        self._thread = threading.Thread(target=self._work, args=(plan.since, self._result),
+                                        name="winevent-reader", daemon=True)
+        self._thread.start()
+        return self._last, events

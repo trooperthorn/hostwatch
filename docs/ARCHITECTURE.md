@@ -198,10 +198,16 @@ only after a 2xx answer:
   the `dead_letters` table with the status and the problem text (the last 1000 are kept), and the
   next request is sent.
 * Everything else (a network error, 401, 403, 404, 408, 429 and every 5xx) leaves the request
-  queued. The loop waits before the next attempt, doubling from 5 s up to 5 min and never less than
-  a `Retry-After` the answer gave (also capped at 5 min), while collection continues. A 401 or 403
+  queued. The loop waits before the next attempt while collection continues. With no `Retry-After` the
+  wait doubles from 5 s up to 5 min. With one, the wait is exactly that long (capped at 5 min) and does
+  not climb. A pass that got at least one request accepted before it failed starts the back-off again,
+  because Observe is up and this is a limit, not an outage. Under Observe's ingest limit (120 requests a
+  minute per key) a queue therefore drains at the limit rate: the loop wakes when the delayed delivery
+  is due, sends what the bucket allows and waits the stated seconds. A 401 or 403
   logs that the key or the host binding is wrong. The `outbox` status reports how long delivery has
   been stalled and how many requests are kept.
+  `hostwatch/__init__.py` holds the `httpx` and `httpcore` loggers at WARNING, so the one INFO line httpx
+  writes per request does not fill the log of an agent that sends several requests a minute.
 
 The credential is added when a request is sent and is never written to the outbox. Observe answers a
 repeated `Idempotency-Key` with a 200 and stores nothing, so a request sent twice because an answer
@@ -376,6 +382,17 @@ when no marker exists.
 ## Durable outbox
 
 Commit cost is kept low in three ways. `stage` ignores a value equal to the current one, so a source that restates unchanged progress (the Windows event log bookmark, the journal cursor) causes no marker-only commit. `flush` acknowledges delivered requests without committing and commits at the end of the pass, also when the pass fails, and after every 50 acknowledgements during a long drain, so a normal pass costs one fsync and a crash repeats at most 50 requests; a crash before a commit repeats requests under the same `Idempotency-Key`. Pstore records are cached (see pstore ingestion).
+
+Draining a backlog is made fast in two ways. Before each delivery pass `Outbox.coalesce_metrics` joins runs of neighbouring metrics requests that share an encoding into one request, up to Observe's limits (5000 points, 1 MiB as sent, and the inflated and ratio limits, checked after encoding; a run that does not fit is halved). The joined body holds the same `resourceMetrics` entries in the same order (protobuf bodies are concatenated, JSON lists are joined), so Observe decodes the same points. The first row of a run keeps its place and takes the joined body, the others are removed, in one transaction, with a new `Idempotency-Key` (`hw-m-` plus a hash of the keys it replaces) that is stored with the body, so a resend after a failure sends the same bytes under the same key. A request whose send had no clear answer (a timeout, a refusal) is never joined into another, so Observe is not given the same points twice under two keys. Log requests are not joined. A joined request that Observe refuses for good dead-letters all its points together. The agent skips the join when a stop was requested.
+
+Measured with in-process tests on a fake clock (`tests/test_drain_and_windows.py`; the old figures come from a model of the old loop, which restarted its back-off only after a fully successful pass), under Observe's limit of 120 requests a minute as a token bucket:
+
+| Measure | Before | After |
+|---|---|---|
+| 552 queued log requests, time to drain (ideal 276 s) | 615 s | 216 s |
+| 6 h of readings (720 entries of 40 points), requests sent | 720 | 6 (JSON with gzip, 203592 bytes in all) |
+
+The model is the same on Linux and Windows, because the delivery code is shared; the figures do not depend on the platform.
 
 Measured on the development host (Windows) with `scripts/bench_io.py`, which anyone can re-run. Its outbox scenario is one minute of work: twelve event passes restating one marker (restaged every pass by the old Windows code only), three tier entries, five queued requests and one delivery pass. Commits come from the SQLite statement trace. Write calls and bytes come from the process I/O counters. The script was run only on Windows for this change, so the Linux marker row shows the same outbox code with the journal cursor key, on the Windows file system; run the script on a Linux host for its own byte figures.
 
@@ -845,7 +862,12 @@ once and replaced by the seven day lookback. A 6006 record closes its shutdown g
 more than two minutes later, so a clean shutdown followed by a crash is two events. The first read looks back
 seven days. A log that cannot be
 read makes the source unavailable with the reason. `build_agent` registers this reader as the `winevent` event
-source. See `UNVERIFIED.md` for the unconfirmed record shapes.
+source, wrapped in `BackgroundWinEvent`. The Event Log query is a PowerShell spawn of a few hundred milliseconds
+(236 ms measured for one `Get-WinEvent` call), so it runs on a worker thread, as the journal read does on Linux:
+each event cycle collects a finished result, processes it and stages the bookmark on the loop thread, and starts the
+next query, so the loop never waits on PowerShell. The first cycle reports the source as pending. A result fetched
+from a bookmark that has since moved, because the cycle that staged it failed, is dropped and fetched again. The CIM
+queries of the Windows collectors already run on collector worker threads, so no PowerShell runs on the main loop. See `UNVERIFIED.md` for the unconfirmed record shapes.
 
 ## Collector and platform notes
 

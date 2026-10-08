@@ -424,12 +424,12 @@ def test_overflow_is_reported_as_outbox_source_status(tmp_path):
 @pytest.mark.parametrize("code", [400, 409, 413, 415, 422])
 def test_a_status_that_can_never_succeed_dead_letters_the_request_and_the_next_is_sent(tmp_path, code, caplog):
     agent = Agent(make_cfg(tmp_path))
-    agent.outbox.enqueue(requests_for("bad", n_points=1), "bad")
-    agent.outbox.enqueue(requests_for("good", n_points=1), "good")
+    agent.outbox.enqueue(requests_for("bad", n_records=1), "bad")
+    agent.outbox.enqueue(requests_for("good", n_records=1), "good")
     observe = FakeObserve(answers=[code, 200])
     with caplog.at_level(logging.ERROR, logger="hostwatch.outbox"), observe.client() as client:
         agent.flush(client)
-    assert [r.headers["idempotency-key"] for r in observe.posts] == ["hw-bad-m0", "hw-good-m0"]
+    assert [r.headers["idempotency-key"] for r in observe.posts] == ["hw-bad-l0", "hw-good-l0"]
     assert agent.outbox.depth() == 0 and agent.outbox.dead_letter_count() == 1
     assert any(str(code) in r.getMessage() for r in caplog.records)
     agent._outbox_status()
@@ -472,7 +472,7 @@ def test_dead_letter_table_is_capped(tmp_path, monkeypatch):
 def test_a_row_with_undecodable_headers_is_dead_lettered_and_later_rows_deliver(tmp_path):
     agent = Agent(make_cfg(tmp_path))
     for n in range(3):
-        agent.outbox.enqueue(requests_for(f"e{n}", n_points=1), f"e{n}")
+        agent.outbox.enqueue(requests_for(f"e{n}", n_records=1), f"e{n}")
     db = sqlite3.connect(tmp_path / "data/outbox.db")
     db.execute("UPDATE requests SET headers='{not json' WHERE entry_id='e0'")
     db.commit()
@@ -480,7 +480,7 @@ def test_a_row_with_undecodable_headers_is_dead_lettered_and_later_rows_deliver(
     observe = FakeObserve()
     with observe.client() as client:
         agent.flush(client)
-    assert [r.headers["idempotency-key"] for r in observe.posts] == ["hw-e1-m0", "hw-e2-m0"]
+    assert [r.headers["idempotency-key"] for r in observe.posts] == ["hw-e1-l0", "hw-e2-l0"]
     assert agent.outbox.depth() == 0 and agent.outbox.dead_letter_count() == 1
     row = sqlite3.connect(tmp_path / "data/outbox.db").execute(
         "SELECT entry_id, status, error FROM dead_letters").fetchone()

@@ -211,6 +211,12 @@ class Agent:
         self._reported: dict[str, bool] = {}
         self._flush_failures = 0
         self._next_flush = 0.0
+        # Requests acknowledged by the delivery pass in progress, so a pass that failed after making
+        # progress does not climb the back-off.
+        self._pass_acked = 0
+        # The request whose send has no clear answer yet. It is never joined into a larger request,
+        # because Observe may already hold it under its own Idempotency-Key.
+        self._attempt_seq: int | None = None
         # Monotonic time of the first failed delivery of the current stall.
         self._stall_since: float | None = None
         self._stopped = threading.Event()
@@ -820,6 +826,8 @@ class Agent:
         wait = min(tiers.EVENT_POLL_S, self.schedule.seconds_until_next(now), self._next_events - now)
         if self._tier_runs:
             wait = min(wait, TIER_GRACE_S)  # a tier is waiting on its collectors
+        if self._next_flush > now:
+            wait = min(wait, self._next_flush - now)  # a delayed delivery is due again then
         return max(0.1, wait)
 
     # -- delivery ----------------------------------------------------------------------------
@@ -853,6 +861,14 @@ class Agent:
 
     def _send_queued(self, client: httpx.Client, deadline: float | None, honour_stop: bool) -> None:
         unflushed = 0
+        self._pass_acked = 0
+        # A backlog of readings goes out as a few large requests instead of one per cycle.
+        exclude = frozenset() if self._attempt_seq is None else frozenset({self._attempt_seq})
+        try:
+            if not (honour_stop and self._stop.is_set()):
+                self.outbox.coalesce_metrics(exclude)
+        except Exception:
+            log.warning("could not join queued metrics requests; sending them as they are", exc_info=True)
         while (req := self.outbox.peek()) is not None:
             if honour_stop and self._stop.is_set():
                 return
@@ -864,9 +880,11 @@ class Agent:
                 timeout = min(timeout, remaining)
             headers = {**req.headers, "Authorization": f"Bearer {self.cfg.ingest_key}",
                        "User-Agent": f"hostwatch/{__version__}"}
+            self._attempt_seq = req.seq
             r = client.post(self.cfg.observe_url + req.path, content=req.body, headers=headers, timeout=timeout)
             if r.status_code in DEAD_LETTER_STATUSES:
                 self.outbox.dead_letter(req.seq, r.status_code, _problem_text(r))
+                self._attempt_seq = None
                 continue
             if r.is_success:
                 if r.status_code == 200:
@@ -883,6 +901,8 @@ class Agent:
                         log.warning("Observe accepted %s request %s but rejected %d item(s): %s",
                                     req.signal, req.entry_id, rejected, message or "no reason given")
                 self.outbox.ack(req.seq, commit=False)
+                self._attempt_seq = None
+                self._pass_acked += 1
                 unflushed += 1
                 if unflushed >= ACK_COMMIT_EVERY:
                     self.outbox.commit_acks()
@@ -899,12 +919,17 @@ class Agent:
         try:
             self.flush(client)
         except Exception as exc:
+            if self._pass_acked:
+                # Observe took requests in this pass, so it is up and this is a limit, not an outage:
+                # start the back-off again instead of climbing it across a drain.
+                self._flush_failures = 0
             self._flush_failures += 1
             if self._stall_since is None:
                 self._stall_since = self._clock()
             wait = self._backoff(self._flush_failures)
-            if isinstance(exc, DeliveryError):
-                wait = min(max(wait, exc.retry_after), MAX_BACKOFF_S)
+            if isinstance(exc, DeliveryError) and exc.retry_after > 0:
+                # Observe named the wait, so wait that long and no longer.
+                wait = min(exc.retry_after, MAX_BACKOFF_S)
             self._next_flush = self._clock() + wait
             log.warning("delivery failed (%s); %d request(s) queued, next attempt in %.0fs", exc,
                         self.outbox.depth(), wait)

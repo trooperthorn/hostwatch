@@ -378,6 +378,54 @@ def build_logs_requests(entry_id: str, resource: dict[str, Attr], records: Itera
     return BuiltRequests(requests, len(every) - len(good), quarantined)
 
 
+# -- merging queued metrics requests ----------------------------------------------------------
+
+MERGED_KEY_PREFIX = "hw-m-"
+
+
+def can_merge(a_headers: dict[str, str], b_headers: dict[str, str]) -> bool:
+    """True when two queued metrics requests share an encoding, so their bodies can be joined."""
+    return (a_headers.get("Content-Type") == b_headers.get("Content-Type")
+            and a_headers.get("Content-Encoding") == b_headers.get("Content-Encoding"))
+
+
+def merged_key(keys: Sequence[str]) -> str:
+    """The Idempotency-Key of a request made by joining the requests that carried `keys`. It
+    depends only on those keys in order, so joining the same requests again gives the same key."""
+    digest = hashlib.sha256(",".join(keys).encode("utf-8")).hexdigest()[:40]
+    return f"{MERGED_KEY_PREFIX}{digest}"
+
+
+def merge_metrics(parts: Sequence[tuple[dict[str, str], bytes, int]]) -> OtlpRequest:
+    """One metrics request holding every data point of `parts`, each a (headers, body, count) of a
+    request built by build_metrics_requests. The result carries exactly the same resourceMetrics
+    entries in the same order, so a receiver decodes the same points. Protobuf bodies are joined by
+    concatenation, which protobuf defines as merging repeated fields; JSON bodies by joining their
+    resourceMetrics lists. Raises OtlpError when the joined request would exceed Observe's limits
+    or the parts differ in encoding."""
+    first = parts[0][0]
+    if any(not can_merge(first, h) for h, _, _ in parts[1:]):
+        raise OtlpError("requests with different encodings cannot be merged")
+    count = sum(c for _, _, c in parts)
+    if count > MAX_POINTS:
+        raise OtlpError(f"{count} points exceed the {MAX_POINTS} allowed per request")
+    compress = first.get("Content-Encoding") == "gzip"
+    raws = [gzip.decompress(b) if compress else b for _, b, _ in parts]
+    if first.get("Content-Type") == PROTOBUF:
+        raw = b"".join(raws)
+    else:
+        merged: list[Any] = []
+        for chunk in raws:
+            merged.extend(json.loads(chunk)["resourceMetrics"])
+        raw = to_json({"resourceMetrics": merged})
+    wire = _gzip(raw) if compress else raw
+    if not _within_limits(raw, wire, compress):
+        raise OtlpError("the merged request exceeds the size limits")
+    headers = {k: v for k, v in first.items() if k != "Idempotency-Key"}
+    headers["Idempotency-Key"] = merged_key([h.get("Idempotency-Key", "") for h, _, _ in parts])
+    return OtlpRequest("metrics", METRICS_PATH, headers, wire, count, len(raw))
+
+
 # -- responses ------------------------------------------------------------------------------
 
 def _read_varint(data: bytes, pos: int) -> tuple[int, int]:

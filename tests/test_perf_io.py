@@ -98,7 +98,7 @@ def test_pstore_cache_forgets_deleted_records_and_returns_independent_events(tmp
 def test_a_delivery_pass_commits_its_acknowledgements_once(tmp_path):
     agent = Agent(make_cfg(tmp_path))
     for i in range(5):
-        agent.outbox.enqueue(requests_for(f"e{i}", n_points=1), f"e{i}")
+        agent.outbox.enqueue(requests_for(f"e{i}", n_records=1), f"e{i}")
     seen = statements(agent.outbox._db)
     with FakeObserve(answers=[200] * 5).client() as client:
         agent.flush(client)
@@ -111,7 +111,7 @@ def test_a_delivery_pass_commits_its_acknowledgements_once(tmp_path):
 def test_acknowledgements_are_durable_when_a_later_request_fails(tmp_path):
     agent = Agent(make_cfg(tmp_path))
     for i in range(3):
-        agent.outbox.enqueue(requests_for(f"e{i}", n_points=1), f"e{i}")
+        agent.outbox.enqueue(requests_for(f"e{i}", n_records=1), f"e{i}")
     with FakeObserve(answers=[200, 503]).client() as client:
         with pytest.raises(agent_mod.DeliveryError):
             agent.flush(client)
@@ -218,7 +218,7 @@ def test_protobuf_stays_available_and_decodes_to_the_same_points():
 def test_a_failed_ack_commit_does_not_hide_the_delivery_error(tmp_path, monkeypatch):
     agent = Agent(make_cfg(tmp_path))
     for i in range(2):
-        agent.outbox.enqueue(requests_for(f"e{i}", n_points=1), f"e{i}")
+        agent.outbox.enqueue(requests_for(f"e{i}", n_records=1), f"e{i}")
 
     def broken():
         raise sqlite3.OperationalError("database is locked")
@@ -256,7 +256,7 @@ def test_a_long_drain_commits_its_acknowledgements_in_bounded_batches(tmp_path, 
     monkeypatch.setattr(agent_mod, "ACK_COMMIT_EVERY", 2)
     agent = Agent(make_cfg(tmp_path))
     for i in range(5):
-        agent.outbox.enqueue(requests_for(f"e{i}", n_points=1), f"e{i}")
+        agent.outbox.enqueue(requests_for(f"e{i}", n_records=1), f"e{i}")
     commits = []
     real = agent.outbox.commit_acks
     monkeypatch.setattr(agent.outbox, "commit_acks", lambda: (commits.append(1), real())[1])

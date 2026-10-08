@@ -44,6 +44,12 @@ def poll(agent) -> None:
     assert agent._guard("poll", lambda: agent.run_tier(tiers.AVAILABILITY)) is True
 
 
+def settle_winevent(agent) -> None:
+    """Wait for the Event Log worker that the first read started, then read its result."""
+    agent.event_sources["winevent"].__self__._thread.join(5)
+    assert event_cycle(agent) is True
+
+
 def test_one_cycle_reaches_observe_as_otlp_with_the_windows_resource(tmp_path):
     import time
     now = time.time()
@@ -51,6 +57,7 @@ def test_one_cycle_reaches_observe_as_otlp_with_the_windows_resource(tmp_path):
     agent = svc.build_agent(agent_cfg(tmp_path), seam([kp41(now - 3600), bc1001(now - 3500)]))
     agent.detect()
     poll(agent)
+    settle_winevent(agent)
     with observe.client() as client:
         agent.flush(client)
     assert {r.headers["authorization"] for r in observe.posts} == {f"Bearer {KEY}"}
@@ -400,7 +407,8 @@ def test_stop_during_a_slow_send_returns_within_the_bound_and_keeps_the_batch(tm
     started = time.monotonic()
     assert host.flush_outbox(bound_s=0.4) is False
     assert time.monotonic() - started < 2.0
-    assert host.agent.outbox.depth() == 3
+    # The final flush joins the three queued readings into one request, which stays queued.
+    assert host.agent.outbox.depth() == 1
     assert client.timeouts and all(t <= 0.4 for t in client.timeouts)
 
 

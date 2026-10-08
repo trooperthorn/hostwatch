@@ -26,7 +26,9 @@ model is in `docs/THREAT-MODEL.md`.
 * **Sends OTLP only.** `POST /v1/metrics` and `POST /v1/logs`, JSON by default (protobuf with
   `HOSTWATCH_OTLP_FORMAT=protobuf`), gzip, an `Idempotency-Key` per request and a bearer ingest key.
   A partial success is acknowledged and counted. A request Observe can never accept is
-  dead-lettered; everything else waits and is retried with backoff.
+  dead-lettered; everything else waits and is retried with backoff, or for the `Retry-After` Observe
+  names. A backlog of readings is joined into a few large requests within Observe's limits, so it
+  drains at Observe's rate limit.
 * **Keeps a durable outbox.** Encoded requests wait in `outbox.db` until Observe answers 2xx, bounded
   in count, size and age. A restart replays each request once with the same key.
 * **Reports what it cannot read.** A missing or unreadable source is unavailable with a reason,

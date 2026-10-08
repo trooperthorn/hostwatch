@@ -59,6 +59,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Protocol
 
+from . import otlp
 from .otlp import OtlpRequest
 from .privfile import ensure_private
 
@@ -354,6 +355,73 @@ class Outbox:
             if row is None:
                 return
             self._drop(*row)
+
+    @_recovering
+    def coalesce_metrics(self, exclude: frozenset[int] = frozenset()) -> int:
+        """Join queued metrics requests that are next to each other into fewer, larger ones, within
+        Observe's limits (5000 points and 1 MiB as sent per request), so a long backlog goes out in a
+        few requests instead of one per cycle. The first row of a run keeps its place in the queue and
+        takes the joined body, the others are removed, all in one transaction. The joined request has
+        a new Idempotency-Key derived from the keys it replaces, and it is stored, so a resend after a
+        failure sends the same bytes under the same key. Rows in `exclude` (a request whose send did
+        not get a clear answer) are never joined, so a request Observe may already hold is not sent
+        again inside a different body. Returns the number of rows removed."""
+        with self._lock:
+            rows = self._db.execute(
+                "SELECT seq, headers, count, LENGTH(body) FROM requests WHERE signal='metrics' ORDER BY seq"
+            ).fetchall()
+            if len(rows) < 2:
+                return 0
+            runs: list[list[tuple[int, dict[str, str], int]]] = []
+            run: list[tuple[int, dict[str, str], int]] = []
+            points = size = 0
+            for seq, raw_headers, count, length in rows:
+                try:
+                    headers = json.loads(raw_headers)
+                    if not isinstance(headers, dict):
+                        raise ValueError
+                except ValueError:
+                    headers = None
+                fits = (headers is not None and seq not in exclude and run
+                        and otlp.can_merge(run[0][1], headers)
+                        and points + count <= otlp.MAX_POINTS and size + length <= otlp.MAX_BODY_BYTES)
+                if fits:
+                    run.append((seq, headers, count))
+                    points, size = points + count, size + length
+                    continue
+                if len(run) > 1:
+                    runs.append(run)
+                if headers is None or seq in exclude:
+                    run, points, size = [], 0, 0
+                else:
+                    run, points, size = [(seq, headers, count)], count, length
+            if len(run) > 1:
+                runs.append(run)
+            removed = 0
+            with self._db:
+                for group in runs:
+                    removed += self._join(group)
+            return removed
+
+    def _join(self, group: list[tuple[int, dict[str, str], int]]) -> int:
+        """Join one run of rows. A run that does not fit once encoded is halved and each half tried,
+        so a pair of rows that cannot be joined is simply left as it is."""
+        if len(group) < 2:
+            return 0
+        marks = ",".join("?" * len(group))
+        bodies = {seq: bytes(body) for seq, body in self._db.execute(
+            f"SELECT seq, body FROM requests WHERE seq IN ({marks})", [g[0] for g in group])}
+        try:
+            joined = otlp.merge_metrics([(h, bodies[seq], c) for seq, h, c in group])
+        except (otlp.OtlpError, ValueError, KeyError, OSError, EOFError):
+            mid = len(group) // 2
+            return self._join(group[:mid]) + self._join(group[mid:])
+        head = group[0][0]
+        self._db.execute("UPDATE requests SET headers=?, body=?, count=? WHERE seq=?",
+                         (json.dumps(joined.headers, sort_keys=True), joined.body, joined.count, head))
+        self._db.execute(f"DELETE FROM requests WHERE seq IN ({','.join('?' * (len(group) - 1))})",
+                         [g[0] for g in group[1:]])
+        return len(group) - 1
 
     @_recovering
     def depth(self) -> int:
