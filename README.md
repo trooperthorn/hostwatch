@@ -380,8 +380,7 @@ The container image installs its runtime dependencies from `requirements.lock`, 
 `==` and at least one SHA-256 hash. The Dockerfile runs
 `pip install --require-hashes --no-cache-dir -r requirements.lock` and then installs hostwatch itself with
 `--no-deps`, so a substituted package fails the build. The runtime dependencies are now `httpx`, `pydantic`
-and `websockets`; the lock still lists the packages of the retired hub until it is regenerated (see
-`UNVERIFIED.md`). Regenerate it after changing the dependencies in `pyproject.toml`:
+and `websockets`, and the lock holds only them and what they pull in. Regenerate it after changing the dependencies in `pyproject.toml`:
 
 ```
 uv pip compile pyproject.toml --generate-hashes --universal --python-version 3.12 -o requirements.lock
