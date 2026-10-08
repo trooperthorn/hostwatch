@@ -1215,3 +1215,26 @@ def test_machine_names_are_looked_up_once_until_the_host_name_changes_or_a_refre
     ident.refresh_machine_names()
     ident.machine_names()
     assert calls["fqdn"] == 3
+
+
+INSTALLERS = [DEPLOY / "windows" / "install.ps1", DEPLOY / "windows" / "install-control.ps1"]
+
+
+@pytest.mark.parametrize("script", INSTALLERS, ids=lambda p: p.name)
+def test_installers_lock_the_data_folder_owner_and_acl_and_refuse_a_foreign_owner(script):
+    """Static check only: the scripts are never run. Both must go through Protect-DataDir."""
+    text = script.read_text(encoding="utf-8")
+    assert re.search(r"^Protect-DataDir \$DataDir$", text, re.M)
+    body = text[text.index("function Protect-DataDir"):]
+    body = body[:body.index("\n}\n")]
+    assert "GetOwner([Security.Principal.SecurityIdentifier])" in body
+    assert re.search(r"-notcontains \$owner\) \{\s*throw .*not SYSTEM or Administrators", body, re.S)
+    assert "'/setowner', $SidAdmins" in body
+    assert "'/inheritance:r', '/grant:r'" in body and "${SidSystem}:(OI)(CI)F" in body and "${SidAdmins}:(OI)(CI)F" in body
+    assert "'/remove'" in body and "still grants access" in body
+    assert "$SidSystem = '*S-1-5-18'" in text and "$SidAdmins = '*S-1-5-32-544'" in text
+    # the owner check comes before any change to the folder
+    assert body.index("throw") < body.index("/setowner")
+    # nothing outside the function sets the data folder ACL directly any more
+    outside = text.replace(body, "")
+    assert not re.search(r"icacls\.exe' @\(\$DataDir", outside)

@@ -292,10 +292,13 @@ on POSIX refuses a file that group or others can write. The daemon also refuses 
 `control.toml` is not this machine's own name (full or short name, any case, or COMPUTERNAME on Windows),
 unless `machine_id` in `control.toml` matches `/etc/machine-id` or the Windows MachineGuid. The same check
 runs before every command (the machine names are looked up once and cached) and a failure is reported as `refused` with reason `wrong_machine`. A scheduled reboot is reported `done` only when the host boot id changed since it was scheduled; a restart of the daemon alone leaves it pending. A missing `control.toml` stops the daemon with a message naming the path. It then checks
-each signed command in this order: signature, host, expiry with 30 seconds of skew, id unseen, seq above the
-persisted one, and the local allowlist. Every refusal has a reason code, listed in
-`hostwatch/control/verify.py`. The replay state is written atomically and a corrupt state file refuses every
-command. The Linux executors are in `hostwatch/control/actions_linux.py`: `fan.set_floor` and `fan.set_mode`
+each signed command in this order: signature, host, expiry with 30 seconds of skew, the issue-time limits (expiry at most 900 seconds after issue,
+not issued in the future, not older than 600 seconds), id unseen, seq above the
+persisted one and at most 1000 above it, and the local allowlist. Every refusal has a reason code, listed in
+`hostwatch/control/verify.py`. The replay state is written atomically with a keyed checksum and a second anchor file, so a corrupt, edited or
+restored-older state file refuses every
+command. On Windows `control.toml` must also have a DACL that gives write access only to SYSTEM and Administrators,
+and the installers refuse a data folder owned by another account and lock it to SYSTEM and Administrators. The Linux executors are in `hostwatch/control/actions_linux.py`: `fan.set_floor` and `fan.set_mode`
 write `/etc/thermalctl/overrides.toml` atomically with mode 0600, run `thermalctl check-config` with
 `--overrides` on it, put the previous file back if the check fails, then reload thermalctl with
 `systemctl kill -s HUP` (floor) or restart it (mode); `service.restart` runs `systemctl restart <unit>` or

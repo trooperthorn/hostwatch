@@ -529,11 +529,25 @@ files are described in the section after the executors. Modules:
 - `signing.py` builds canonical JSON (sorted keys, no spaces, UTF-8 without ASCII escaping) and verifies the Ed25519
   signature, sent as base64 beside the command, against the pinned key written as `ed25519:` plus base64. The
   `cryptography` import happens only inside the check, and win32 modules are never imported.
-- `state.py` keeps the highest executed seq and the last 1000 ids in one JSON file, written to a temporary name,
-  flushed and renamed. A corrupt file is an error, never an empty state.
-- `verify.py` runs the checks in order and returns a `Decision` with a reason code on refusal. A command is recorded
+- `state.py` keeps the highest executed seq, a generation number and the last 1000 ids in one JSON file, written to
+  a temporary name, flushed and renamed. The file carries an HMAC-SHA256 checksum keyed from the control key, and a
+  second file (`control-state.json.anchor`) repeats the generation with its own checksum. The state is written
+  first and the anchor second. A state older than the anchor (a restored backup), a checksum mismatch, a missing
+  anchor, a state with no checksum and a state missing beside its anchor are all errors, never an empty state; only a
+  folder with neither file is a fresh start. Restoring both files together is not detectable on the host. Changing
+  the control key invalidates the checksum, so rotating it needs the two state files removed on purpose.
+- `verify.py` runs the checks in order and returns a `Decision` with a reason code on refusal. After the expiry
+  check it refuses a command whose expiry is more than 900 s after issue (`expiry_too_long`), whose `issued_at` is
+  more than 30 s in the future (`issued_in_future`) or more than 600 s plus skew in the past (`issued_too_old`),
+  and, after the replay checks, one whose seq is more than 1000 above the persisted one (`seq_jump_too_large`), so
+  one signed command cannot pin the counter. A command is recorded
   only after the allowlist accepts it, and before it is handed back, so a crash cannot run it twice. A refusal by
   the allowlist uses no seq. A state file that cannot be read or written refuses everything (fail closed).
+- `config.py` checks `control.toml` on Windows (when pywin32 is importable) for the owner and for the DACL: an
+  empty DACL, or an allow entry that grants write, delete or permission changes to anyone but SYSTEM and
+  Administrators, is refused. `install.ps1` and `install-control.ps1` run `Protect-DataDir` on the data folder: it
+  stops when the folder exists and is owned by another account, then sets the owner and ACL to SYSTEM and
+  Administrators and removes every other entry. These scripts are checked statically and have not been run.
 
 Parameters are matched exactly, so executors never see a field the allowlist did not check.
 

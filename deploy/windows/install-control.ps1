@@ -50,6 +50,34 @@ function Invoke-Native([string]$File, [string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$File failed with exit code $LASTEXITCODE" }
 }
 
+# The data folder holds the settings files, the allowlist and the replay state, so only SYSTEM and
+# Administrators may own it or have any access to it. A folder owned by anyone else is not trusted:
+# that account could have planted files or links before this script ran, so the script stops.
+function Protect-DataDir([string]$Path) {
+    $trusted = @('S-1-5-18', 'S-1-5-32-544')
+    $existed = Test-Path -LiteralPath $Path
+    if ($existed) {
+        $owner = (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($trusted -notcontains $owner) {
+            throw "$Path is owned by $owner, not SYSTEM or Administrators. Refusing to continue; inspect it, then remove or re-own it."
+        }
+    } else {
+        New-Item -ItemType Directory -Force -Path $Path | Out-Null
+    }
+    Invoke-Native 'icacls.exe' @($Path, '/setowner', $SidAdmins)
+    Invoke-Native 'icacls.exe' @($Path, '/inheritance:r', '/grant:r', "${SidSystem}:(OI)(CI)F", "${SidAdmins}:(OI)(CI)F")
+    foreach ($rule in (Get-Acl -LiteralPath $Path).Access) {
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($trusted -notcontains $sid) {
+            Invoke-Native 'icacls.exe' @($Path, '/remove', "*$sid")
+        }
+    }
+    $left = (Get-Acl -LiteralPath $Path).Access | ForEach-Object {
+        $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } |
+        Where-Object { $trusted -notcontains $_ }
+    if ($left) { throw "$Path still grants access to $($left -join ', ') after locking it." }
+}
+
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -63,7 +91,7 @@ if (-not $ConfigFile -and -not (Test-Path $ConfigPath)) {
 Write-Host 'This will:'
 Write-Host "  - create a virtual environment in $Venv and install hostwatch with the windows and control extras"
 Write-Host "  - write $EnvFile and lock $ConfigPath so only SYSTEM and Administrators can read or change them"
-Write-Host "  - leave the ACL of $DataDir alone if it already exists (it is shared with the agent); lock it only when this script creates it"
+Write-Host "  - set the owner and ACL of $DataDir to SYSTEM and Administrators only, and stop if another account owns it"
 Write-Host "  - register the $ServiceName service as LocalSystem, start it on boot, and restart it after a failure"
 Write-Host "  - let $ObserveUrl ask this host to run actions that control.toml allows"
 if ($DryRun) { Write-Host 'Dry run: nothing was changed.'; return }
@@ -82,13 +110,7 @@ Invoke-Native $VenvPython @('-m', 'pip', 'install', "$SourcePath[windows,control
 Invoke-Native $VenvPython @((Join-Path $Venv 'Scripts\pywin32_postinstall.py'), '-install')
 
 Step 'Locking the allowlist and writing the protected settings file'
-$dataDirExisted = Test-Path -LiteralPath $DataDir
-New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-if ($dataDirExisted) {
-    Write-Host "  $DataDir already exists and is shared with the agent, so its ACL is left as it is."
-} else {
-    Invoke-Native 'icacls.exe' @($DataDir, '/inheritance:r', '/grant:r', "${SidSystem}:(OI)(CI)F", "${SidAdmins}:(OI)(CI)F")
-}
+Protect-DataDir $DataDir
 if ($ConfigFile) { Copy-Item -LiteralPath $ConfigFile -Destination $ConfigPath -Force }
 Invoke-Native 'icacls.exe' @($ConfigPath, '/inheritance:r', '/grant:r', "${SidSystem}:F", "${SidAdmins}:F")
 if (Test-Path $EnvFile) { Remove-Item -LiteralPath $EnvFile -Force }

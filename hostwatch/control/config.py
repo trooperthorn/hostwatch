@@ -4,7 +4,8 @@ The file is the authority on what this host will do. On POSIX the loader refuses
 is not root-owned or that group or others can write, and a file in a directory that group or
 others can write, because anyone who could edit it could widen the allowlist or swap the pinned
 key. That check is enforced. On Windows the loader checks the owner (SYSTEM or Administrators)
-only when pywin32 is installed; the install script is expected to lock the file, and that is
+and the DACL (no allow entry that grants write, delete or permission changes to anyone else, and no
+empty DACL) only when pywin32 is installed; the install script locks the file, and that is
 advisory until verified on a host (see UNVERIFIED.md).
 """
 
@@ -184,6 +185,35 @@ def _windows_owner_sid(path: Path) -> str | None:
         raise OSError(f"cannot read the owner of {path}: {detail}") from exc
 
 
+# Rights that let a principal change the file or its permissions: FILE_WRITE_DATA, FILE_APPEND_DATA,
+# FILE_WRITE_EA, FILE_WRITE_ATTRIBUTES, DELETE, WRITE_DAC, WRITE_OWNER, GENERIC_WRITE, GENERIC_ALL.
+WINDOWS_WRITE_MASK = 0x2 | 0x4 | 0x10 | 0x100 | 0x10000 | 0x40000 | 0x80000 | 0x40000000 | 0x10000000
+
+
+def _windows_dacl_problem(path: Path) -> str | None:
+    """Why the DACL of a file is unsafe, or None when it is fine or cannot be read (no pywin32)."""
+    try:
+        import win32security  # type: ignore[import-not-found]
+    except ImportError:
+        return None
+    try:
+        desc = win32security.GetFileSecurity(str(path), win32security.DACL_SECURITY_INFORMATION)
+        dacl = desc.GetSecurityDescriptorDacl()
+        if dacl is None:
+            return "has no DACL, so everyone can change it"
+        for i in range(dacl.GetAceCount()):
+            (ace_type, _flags), mask, sid = dacl.GetAce(i)
+            if ace_type != win32security.ACCESS_ALLOWED_ACE_TYPE:
+                continue
+            text = win32security.ConvertSidToStringSid(sid)
+            if text not in WINDOWS_TRUSTED_SIDS and mask & WINDOWS_WRITE_MASK:
+                return f"lets {text} change it"
+    except Exception as exc:
+        detail = exc.args[2] if len(exc.args) >= 3 and exc.args[2] else str(exc)
+        raise OSError(f"cannot read the DACL of {path}: {detail}") from exc
+    return None
+
+
 def check_permissions(path: Path) -> None:
     """Refuse a file that is not root-owned, that group or others can write, or whose directory
     group or others can write. POSIX is enforced. Windows checks the owner when pywin32 is present
@@ -192,6 +222,10 @@ def check_permissions(path: Path) -> None:
         sid = _windows_owner_sid(path)
         if sid is not None and sid not in WINDOWS_TRUSTED_SIDS:
             raise ConfigError(f"{path} is owned by {sid}, not SYSTEM or Administrators; refusing to use it")
+        problem = _windows_dacl_problem(path)
+        if problem:
+            raise ConfigError(f"the DACL of {path} {problem}; refusing to use it. "
+                              "Fix it with: icacls /inheritance:r /grant:r *S-1-5-18:F *S-1-5-32-544:F")
         return
     st = path.stat()
     if st.st_uid not in TRUSTED_UIDS:

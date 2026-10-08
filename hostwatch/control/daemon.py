@@ -56,7 +56,7 @@ from .actions_linux import ActionResult
 from .outbox import OUTBOX_FILE, ResultOutbox
 from .redact import redact
 from .signing import SigningUnavailable
-from .state import STATE_FILE
+from .state import STATE_FILE, derive_key
 from .verify import REPLAYED_ID, CommandVerifier
 
 log = logging.getLogger("hostwatch.control")
@@ -469,7 +469,8 @@ def build_daemon(settings: Settings, *, client: httpx.Client | None = None, acti
     if wrong:
         raise SettingsError(wrong)
     settings.data_dir.mkdir(parents=True, exist_ok=True)
-    verifier = CommandVerifier(config, settings.data_dir / STATE_FILE, clock=clock)
+    verifier = CommandVerifier(config, settings.data_dir / STATE_FILE, clock=clock,
+                               state_key=derive_key(settings.key))
     if verifier.state is None:
         log.error("the replay state is unusable (%s); every command will be refused until it is fixed",
                   verifier.state_error)

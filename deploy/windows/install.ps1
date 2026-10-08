@@ -45,6 +45,34 @@ function Invoke-Native([string]$File, [string[]]$Arguments) {
     if ($LASTEXITCODE -ne 0) { throw "$File failed with exit code $LASTEXITCODE" }
 }
 
+# The data folder holds the settings files, the allowlist and the replay state, so only SYSTEM and
+# Administrators may own it or have any access to it. A folder owned by anyone else is not trusted:
+# that account could have planted files or links before this script ran, so the script stops.
+function Protect-DataDir([string]$Path) {
+    $trusted = @('S-1-5-18', 'S-1-5-32-544')
+    $existed = Test-Path -LiteralPath $Path
+    if ($existed) {
+        $owner = (Get-Acl -LiteralPath $Path).GetOwner([Security.Principal.SecurityIdentifier]).Value
+        if ($trusted -notcontains $owner) {
+            throw "$Path is owned by $owner, not SYSTEM or Administrators. Refusing to continue; inspect it, then remove or re-own it."
+        }
+    } else {
+        New-Item -ItemType Directory -Force -Path $Path | Out-Null
+    }
+    Invoke-Native 'icacls.exe' @($Path, '/setowner', $SidAdmins)
+    Invoke-Native 'icacls.exe' @($Path, '/inheritance:r', '/grant:r', "${SidSystem}:(OI)(CI)F", "${SidAdmins}:(OI)(CI)F")
+    foreach ($rule in (Get-Acl -LiteralPath $Path).Access) {
+        $sid = $rule.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value
+        if ($trusted -notcontains $sid) {
+            Invoke-Native 'icacls.exe' @($Path, '/remove', "*$sid")
+        }
+    }
+    $left = (Get-Acl -LiteralPath $Path).Access | ForEach-Object {
+        $_.IdentityReference.Translate([Security.Principal.SecurityIdentifier]).Value } |
+        Where-Object { $trusted -notcontains $_ }
+    if ($left) { throw "$Path still grants access to $($left -join ', ') after locking it." }
+}
+
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
 $isAdmin = (New-Object Security.Principal.WindowsPrincipal($identity)).IsInRole(
     [Security.Principal.WindowsBuiltInRole]::Administrator)
@@ -74,8 +102,7 @@ Invoke-Native $VenvPython @('-m', 'pip', 'install', "$SourcePath[windows]")
 Invoke-Native $VenvPython @((Join-Path $Venv 'Scripts\pywin32_postinstall.py'), '-install')
 
 Step 'Writing the protected settings file'
-New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
-Invoke-Native 'icacls.exe' @($DataDir, '/inheritance:r', '/grant:r', "${SidSystem}:(OI)(CI)F", "${SidAdmins}:(OI)(CI)F")
+Protect-DataDir $DataDir
 if (Test-Path $EnvFile) { Remove-Item -LiteralPath $EnvFile -Force }
 New-Item -ItemType File -Path $EnvFile | Out-Null
 Invoke-Native 'icacls.exe' @($EnvFile, '/inheritance:r', '/grant:r', "${SidSystem}:F", "${SidAdmins}:F")

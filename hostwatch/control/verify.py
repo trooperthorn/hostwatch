@@ -1,7 +1,9 @@
 """The ordered checks that decide whether a signed command may run.
 
-Order, as in docs/CONTROL.md: signature, host, expiry with 30 s of clock skew, id unseen,
-seq higher than the persisted one, then the local allowlist. The first failure is the
+Order, as in docs/CONTROL.md: signature, host, expiry with 30 s of clock skew, the issue-time
+and lifetime limits (expiry no more than 900 s after issue, issue time not in the future and not
+older than 600 s), id unseen, seq higher than the persisted one and no more than 1000 above it,
+then the local allowlist. The first failure is the
 refusal and carries a stable reason code. Only a command that passes every check is recorded
 in the replay state, and it is recorded before it is returned, so a crash during execution
 cannot let the same command run twice (at most once, never at least once). A command refused
@@ -24,6 +26,10 @@ from .signing import verify_signature
 from .state import ReplayState, StateError
 
 SKEW_S = 30
+# Limits that a valid signature cannot widen. A signed command is only useful for a short window.
+MAX_VALIDITY_S = 900
+MAX_AGE_S = 600
+MAX_SEQ_JUMP = 1000
 VERSION = 1
 
 # Reason codes. Every refusal uses exactly one of these.
@@ -33,6 +39,10 @@ WRONG_HOST = "wrong_host"
 EXPIRED = "expired"
 REPLAYED_ID = "replayed_id"
 STALE_SEQ = "stale_seq"
+EXPIRY_TOO_LONG = "expiry_too_long"
+ISSUED_IN_FUTURE = "issued_in_future"
+ISSUED_TOO_OLD = "issued_too_old"
+SEQ_JUMP_TOO_LARGE = "seq_jump_too_large"
 UNKNOWN_ACTION = "unknown_action"
 BAD_PARAMS = "bad_params"
 ACTION_NOT_ENABLED = "action_not_enabled"
@@ -132,12 +142,12 @@ def check_allowlist(config: ControlConfig, command: dict) -> Decision:
 
 class CommandVerifier:
     def __init__(self, config: ControlConfig, state_path: str | Path,
-                 clock: Callable[[], float] = time.time):
+                 clock: Callable[[], float] = time.time, state_key: bytes | None = None):
         self.config, self.clock = config, clock
         self.state: ReplayState | None = None
         self.state_error = ""
         try:
-            self.state = ReplayState(state_path)
+            self.state = ReplayState(state_path, state_key)
         except StateError as exc:
             self.state_error = str(exc)
 
@@ -153,6 +163,13 @@ class CommandVerifier:
             return _refuse(WRONG_HOST, f"command is for {command['host']!r}")
         if self.clock() > command["expires_at"] + SKEW_S:
             return _refuse(EXPIRED, f"expired at {command['expires_at']}")
+        now = self.clock()
+        if command["expires_at"] - command["issued_at"] > MAX_VALIDITY_S:
+            return _refuse(EXPIRY_TOO_LONG, f"expiry is more than {MAX_VALIDITY_S} s after issue")
+        if command["issued_at"] > now + SKEW_S:
+            return _refuse(ISSUED_IN_FUTURE, f"issued_at {command['issued_at']} is in the future")
+        if now - command["issued_at"] > MAX_AGE_S + SKEW_S:
+            return _refuse(ISSUED_TOO_OLD, f"issued_at {command['issued_at']} is more than {MAX_AGE_S} s old")
         state = self.state
         if state is None:
             return _refuse(STATE_UNAVAILABLE, self.state_error)
@@ -160,6 +177,8 @@ class CommandVerifier:
             return _refuse(REPLAYED_ID, f"id {command['id']} was already used")
         if not state.seq_ok(command["seq"]):
             return _refuse(STALE_SEQ, f"seq {command['seq']} is not above {state.last_seq}")
+        if state.last_seq is not None and command["seq"] - state.last_seq > MAX_SEQ_JUMP:
+            return _refuse(SEQ_JUMP_TOO_LARGE, f"seq {command['seq']} is more than {MAX_SEQ_JUMP} above {state.last_seq}")
         decision = check_allowlist(self.config, command)
         if not decision:
             return decision

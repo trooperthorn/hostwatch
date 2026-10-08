@@ -258,7 +258,7 @@ def test_state_file_is_written_atomically_without_leftovers(make, signer):
     assert run(make(), signer, seq=7).ok
     data = json.loads(make.state_path.read_text(encoding="utf-8"))
     assert data["last_seq"] == 7 and data["ids"] == ["id-1"]
-    assert [p.name for p in make.state_path.parent.iterdir()] == [STATE_FILE]
+    assert sorted(p.name for p in make.state_path.parent.iterdir()) == [STATE_FILE, STATE_FILE + ".anchor"]
 
 
 def test_state_keeps_only_recent_ids(tmp_path):
@@ -535,17 +535,34 @@ def test_an_allowlist_holding_two_different_key_names_with_different_keys_is_ref
 class _FakeWin32Security:
     """Stands in for pywin32 so the Windows owner path runs without it being installed."""
     OWNER_SECURITY_INFORMATION = 1
+    DACL_SECURITY_INFORMATION = 4
+    ACCESS_ALLOWED_ACE_TYPE = 0
+    ACCESS_DENIED_ACE_TYPE = 1
 
     class error(Exception):  # pywintypes.error is not an OSError
         pass
 
-    def __init__(self, owner="S-1-5-32-544"):
+    class Dacl:
+        def __init__(self, aces):
+            self.aces = aces
+
+        def GetAceCount(self):
+            return len(self.aces)
+
+        def GetAce(self, i):
+            return self.aces[i]
+
+    def __init__(self, owner="S-1-5-32-544", aces=(), dacl="default"):
         self.owner = owner
+        # Each entry is (ace_type, mask, sid). The default DACL is only SYSTEM and Administrators.
+        entries = aces or [(0, 0x1F01FF, "S-1-5-18"), (0, 0x1F01FF, "S-1-5-32-544")]
+        self._dacl = None if dacl is None else self.Dacl([((t, 0), m, sid) for t, m, sid in entries])
 
     def GetFileSecurity(self, path, info):
         if not os.path.exists(str(path)):
             raise self.error(2, "GetFileSecurity", "The system cannot find the file specified.")
-        return type("Desc", (), {"GetSecurityDescriptorOwner": lambda desc: self.owner})()
+        return type("Desc", (), {"GetSecurityDescriptorOwner": lambda desc: self.owner,
+                                 "GetSecurityDescriptorDacl": lambda desc: self._dacl})()
 
     def ConvertSidToStringSid(self, sid):
         return sid
@@ -567,6 +584,53 @@ def test_a_pywin32_failure_reading_the_owner_is_a_config_error(monkeypatch, tmp_
     monkeypatch.setattr(fake, "GetFileSecurity", lambda path, info: (_ for _ in ()).throw(
         fake.error(5, "GetFileSecurity", "Access is denied.")))
     with pytest.raises(cfgmod.ConfigError, match="cannot read .*Access is denied"):
+        cfgmod.load(p)
+
+
+def _windows_load(monkeypatch, tmp_path, signer, fake):
+    p = write_cfg(tmp_path, signer)
+    monkeypatch.setattr(cfgmod.os, "name", "nt")
+    monkeypatch.setitem(sys.modules, "win32security", fake)
+    monkeypatch.setattr(cfgmod, "WINDOWS_TRUSTED_SIDS", ("S-1-5-18", "S-1-5-32-544"))
+    return p
+
+
+@pytest.mark.parametrize("sid,mask", [
+    ("S-1-1-0", 0x2),            # Everyone, write data
+    ("S-1-5-32-545", 0x10000),   # Users, delete
+    ("S-1-5-11", 0x40000),       # Authenticated Users, change permissions
+    ("S-1-5-21-1-2-3-1001", 0x10000000),  # a user with GENERIC_ALL
+])
+def test_windows_dacl_that_lets_another_principal_write_is_refused(monkeypatch, tmp_path, signer, sid, mask):
+    fake = _FakeWin32Security(aces=[(0, 0x1F01FF, "S-1-5-18"), (0, mask, sid)])
+    p = _windows_load(monkeypatch, tmp_path, signer, fake)
+    with pytest.raises(cfgmod.ConfigError, match="DACL .*" + sid):
+        cfgmod.load(p)
+
+
+def test_windows_dacl_with_read_only_access_for_others_or_denies_is_accepted(monkeypatch, tmp_path, signer):
+    fake = _FakeWin32Security(aces=[(0, 0x1F01FF, "S-1-5-18"), (0, 0x120089, "S-1-1-0"), (1, 0x2, "S-1-1-0")])
+    cfgmod.load(_windows_load(monkeypatch, tmp_path, signer, fake))
+
+
+def test_windows_null_dacl_is_refused(monkeypatch, tmp_path, signer):
+    p = _windows_load(monkeypatch, tmp_path, signer, _FakeWin32Security(dacl=None))
+    with pytest.raises(cfgmod.ConfigError, match="no DACL"):
+        cfgmod.load(p)
+
+
+def test_windows_dacl_read_failure_is_a_config_error(monkeypatch, tmp_path, signer):
+    fake = _FakeWin32Security()
+    p = _windows_load(monkeypatch, tmp_path, signer, fake)
+    real = fake.GetFileSecurity
+
+    def get(path, info):
+        if info == fake.DACL_SECURITY_INFORMATION:
+            raise fake.error(5, "GetFileSecurity", "Access is denied.")
+        return real(path, info)
+
+    monkeypatch.setattr(fake, "GetFileSecurity", get)
+    with pytest.raises(cfgmod.ConfigError, match="cannot read the DACL .*Access is denied"):
         cfgmod.load(p)
 
 
@@ -620,3 +684,116 @@ def test_an_unsearchable_directory_is_a_cannot_read_error_not_a_raw_permission_e
     monkeypatch.setattr(type(p), "stat", denied)
     with pytest.raises(cfgmod.ConfigError, match="cannot read .*Permission denied"):
         cfgmod.load(p)
+
+
+# --- signed command limits and replay-state protection (slice h5) -----------------------------
+
+def test_expiry_more_than_the_window_after_issue_is_refused(make, signer):
+    edge = run(make(), signer, issued_at=NOW - 10, expires_at=NOW - 10 + v.MAX_VALIDITY_S)
+    assert edge.ok
+    d = run(make(), signer, id="id-2", seq=2, issued_at=NOW - 10, expires_at=NOW - 10 + v.MAX_VALIDITY_S + 1)
+    assert (d.ok, d.reason) == (False, v.EXPIRY_TOO_LONG)
+
+
+def test_issued_in_the_future_is_refused(make, signer):
+    d = run(make(), signer, issued_at=NOW + v.SKEW_S + 1, expires_at=NOW + 200)
+    assert (d.ok, d.reason) == (False, v.ISSUED_IN_FUTURE)
+    assert run(make(), signer, issued_at=NOW + v.SKEW_S, expires_at=NOW + 200).ok
+
+
+def test_issued_too_long_ago_is_refused_even_if_not_yet_expired(make, signer):
+    old = NOW - v.MAX_AGE_S - v.SKEW_S - 1
+    d = run(make(), signer, issued_at=old, expires_at=old + v.MAX_VALIDITY_S)
+    assert (d.ok, d.reason) == (False, v.ISSUED_TOO_OLD)
+    edge = NOW - v.MAX_AGE_S - v.SKEW_S
+    assert run(make(), signer, issued_at=edge, expires_at=edge + v.MAX_VALIDITY_S).ok
+
+
+def test_a_seq_jump_above_the_bound_is_refused_and_does_not_move_the_counter(make, signer):
+    verifier = make()
+    assert run(verifier, signer, id="a", seq=5).ok
+    d = run(verifier, signer, id="b", seq=5 + v.MAX_SEQ_JUMP + 1)
+    assert (d.ok, d.reason) == (False, v.SEQ_JUMP_TOO_LARGE)
+    assert verifier.state.last_seq == 5
+    assert run(verifier, signer, id="c", seq=5 + v.MAX_SEQ_JUMP).ok
+
+
+def _record(path, n, key=None):
+    state = ReplayState(path, key)
+    for i in range(n):
+        state.record(f"id-{i}", i + 1)
+    return state
+
+
+def test_restored_older_state_file_is_refused(tmp_path):
+    path = tmp_path / STATE_FILE
+    state = _record(path, 2)
+    old = path.read_bytes()
+    state.record("id-9", 9)
+    path.write_bytes(old)
+    with pytest.raises(StateError, match="older than the anchor"):
+        ReplayState(path)
+
+
+def test_restored_older_state_makes_the_verifier_refuse_everything(make, signer):
+    verifier = make()
+    assert run(verifier, signer, id="a", seq=1).ok
+    old = make.state_path.read_bytes()
+    assert run(verifier, signer, id="b", seq=2).ok
+    make.state_path.write_bytes(old)
+    d = run(make(), signer, id="a2", seq=3)
+    assert (d.ok, d.reason) == (False, v.STATE_UNAVAILABLE)
+
+
+def test_state_checksum_rejects_edits_and_a_wrong_key(tmp_path):
+    path = tmp_path / STATE_FILE
+    _record(path, 2, key=b"k1")
+    data = json.loads(path.read_text(encoding="utf-8"))
+    data["last_seq"] = 0
+    path.write_text(json.dumps(data), encoding="utf-8")
+    with pytest.raises(StateError, match="checksum"):
+        ReplayState(path, b"k1")
+    other = tmp_path / "other" / STATE_FILE
+    _record(other, 1, key=b"k1")
+    with pytest.raises(StateError, match="checksum"):
+        ReplayState(other, b"k2")
+
+
+def test_state_without_checksum_or_anchor_fails_closed(tmp_path):
+    path = tmp_path / STATE_FILE
+    path.write_text('{"last_seq": 3, "ids": ["x"]}', encoding="utf-8")
+    with pytest.raises(StateError):
+        ReplayState(path)
+    path.unlink()
+    _record(path, 1)
+    (tmp_path / (STATE_FILE + ".anchor")).unlink()
+    with pytest.raises(StateError, match="anchor"):
+        ReplayState(path)
+
+
+def test_deleted_state_beside_an_anchor_fails_closed(tmp_path):
+    path = tmp_path / STATE_FILE
+    _record(path, 1)
+    path.unlink()
+    with pytest.raises(StateError, match="missing"):
+        ReplayState(path)
+
+
+def test_state_one_generation_ahead_of_the_anchor_after_a_crash_is_accepted(tmp_path):
+    path = tmp_path / STATE_FILE
+    state = _record(path, 1)
+    anchor_path = tmp_path / (STATE_FILE + ".anchor")
+    anchor = anchor_path.read_bytes()
+    state.record("id-x", 5)
+    anchor_path.write_bytes(anchor)
+    assert ReplayState(path).last_seq == 5
+
+
+def test_a_forged_anchor_for_the_same_generation_is_refused(tmp_path):
+    path = tmp_path / STATE_FILE
+    _record(path, 1)
+    anchor_path = tmp_path / (STATE_FILE + ".anchor")
+    gen = json.loads(anchor_path.read_text(encoding="utf-8"))["gen"]
+    anchor_path.write_text(json.dumps({"gen": gen, "mac": "0" * 64}), encoding="utf-8")
+    with pytest.raises(StateError, match="does not match"):
+        ReplayState(path)
