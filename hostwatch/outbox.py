@@ -267,8 +267,11 @@ class Outbox:
         """Stage a value. A value equal to the current one (staged, else durable) is not staged,
         so a source that reports its unchanged state on every pass causes no marker-only commit."""
         with self._lock:
-            if self.get(key) == value:
-                return
+            try:
+                if self.get(key) == value:
+                    return
+            except sqlite3.DatabaseError:
+                pass  # cannot compare, so stage it: a redundant commit is better than a failed read
             self._staged[key] = value
 
     def _write_staged(self) -> None:
@@ -387,7 +390,10 @@ class Outbox:
     def ack(self, seq: int, commit: bool = True) -> None:
         """Remove a delivered request. Called only after a 2xx answer. With commit=False the
         removal is visible to this connection at once but is made durable by the next
-        commit_acks (or any other write), so a delivery pass commits once for all its requests."""
+        commit_acks (or any other write), so a delivery pass commits once for all its requests.
+        Another write on this connection during the pass (an enqueue, a dead letter) commits the
+        pending removals with it. If that write fails and rolls back, the removals are undone and
+        those requests are sent again, which Idempotency-Key makes safe."""
         with self._lock:
             self._db.execute("DELETE FROM requests WHERE seq=?", (seq,))
             self._acks_pending = True

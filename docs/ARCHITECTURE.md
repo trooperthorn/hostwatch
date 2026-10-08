@@ -230,8 +230,8 @@ collector plus `events.json`, so Observe can reuse them. The scheduler and the s
 `ExportLogsServiceRequest` bodies. The encoder is hand written, so the agent gains no runtime
 dependency. A request is built as an OTLP JSON tree and the protobuf bytes are written from the same
 tree with a small field table, so the two encodings cannot drift apart; JSON is the default and
-protobuf is an option (`HOSTWATCH_OTLP_FORMAT=protobuf`). JSON with gzip encodes about 2.6 times faster than
-protobuf and is as small on the wire (795 against 891 bytes for 40 points), and Observe accepts both. Gzip is optional and uses a zero timestamp so a body is reproducible. Limits match
+protobuf is an option (`HOSTWATCH_OTLP_FORMAT=protobuf`). JSON with gzip encodes in about half the CPU time of
+protobuf with gzip and is no larger on the wire (measured figures are in the table under the durable outbox), and Observe accepts both. Without gzip (`HOSTWATCH_OTLP_GZIP=0`) JSON bodies are larger than protobuf, so a host that turns gzip off should also set `HOSTWATCH_OTLP_FORMAT=protobuf`, or the outbox byte cap will drop data sooner during an outage. Gzip is optional and uses a zero timestamp so a body is reproducible. Limits match
 Observe's ingest: 1 MiB on the wire, 4 MiB inflated, an inflate ratio under 100, 5000 points or 500
 log records per request, 64 resource attributes, 32 attributes per point or record, keys up to 128
 characters and string values up to 1024. A set of points or records that does not fit is split into several requests,
@@ -377,18 +377,18 @@ when no marker exists.
 
 Commit cost is kept low in three ways. `stage` ignores a value equal to the current one, so a source that restates unchanged progress (the Windows event log bookmark, the journal cursor) causes no marker-only commit. `flush` acknowledges delivered requests without committing and commits once at the end of the pass, also when the pass fails, so a pass costs one fsync; a crash before that commit repeats requests under the same `Idempotency-Key`. Pstore records are cached (see pstore ingestion).
 
-Measured on the development host with a scratch script (8 pstore files of 256 KiB, twelve event passes
-and three tier entries in a minute, one delivery pass), before and after this change:
+Measured on the development host (Windows) with `scripts/bench_io.py`, which anyone can re-run. Its outbox scenario is one minute of work: twelve event passes restating one marker, three tier entries, five queued requests and one delivery pass. Commits come from the SQLite statement trace. Write calls and bytes come from the process I/O counters. The script was run only on Windows for this change, so the Linux marker row shows the same outbox code with the journal cursor key, on the Windows file system; run the script on a Linux host for its own byte figures.
 
 | Measure | Before | After |
 |---|---|---|
-| pstore CPU per minute (12 reads of 8 records) | 499 ms | 3.3 ms |
-| Commits per minute (event passes restating one marker, three entries, one delivery pass) | 21 | 4 |
-| Twelve unchanged-marker passes, wall time | 74 ms | 0.6 ms |
-| Encode 120 points, CPU (gzip) | protobuf 0.58 ms, 694 bytes | json 0.30 ms, 553 bytes |
+| pstore CPU, 12 reads of 8 records of 256 KiB | 1000 ms | 109 ms (the first read is a full read) |
+| Outbox minute, Linux marker (journal cursor): commits, write calls, bytes | 28, 360, 637872 | 9, 122, 217916 |
+| Outbox minute, Windows marker (event log bookmark): commits, write calls, bytes | 28, 360, 637872 | 9, 122, 217916 |
+| Encode 120 points, CPU (gzip) | protobuf 1.09 ms, 700 bytes | json 0.55 ms, 556 bytes |
 
-The October audit measured one marker-only commit at about 14 write calls and 24.5 KiB on Linux, so
-the avoided commits are the main disk saving. The same points decode from both encodings (tested).
+The figures vary from run to run; the ratios are what matter. The two marker rows match because the outbox treats every marker the same way. The same points decode from both encodings (tested).
+
+A pass holds an open write transaction from its first acknowledgement until its end. A crash or kill during the pass repeats the requests of that pass under the same `Idempotency-Key`. Another write on the connection during the pass (an enqueue, a dead letter) commits the pending acknowledgements with it; if that write fails and rolls back, they are undone and those requests are sent again.
 
 `hostwatch/outbox.py` keeps `outbox.db` (SQLite, synchronous FULL) in the data directory. It holds
 encoded OTLP requests, after every string has been cleaned (an unpaired surrogate or a control

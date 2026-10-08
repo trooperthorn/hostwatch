@@ -11,7 +11,9 @@ record layout are not confirmed on hardware; see UNVERIFIED.md.
 
 A caller that reads the directory repeatedly passes a cache dict. A record whose name, size and
 modification time are unchanged since the last read reuses its event without reading or hashing
-the file again, so a directory of large records costs a stat per file and not a full read per pass.
+the file again, so a directory of large records costs a stat per file and not a full read per pass. A record
+rewritten with the same size and modification time inside one process lifetime is not noticed until
+restart; on real pstore a new record follows a crash and reboot, which restarts the process.
 """
 
 from __future__ import annotations

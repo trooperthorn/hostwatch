@@ -201,3 +201,42 @@ def test_protobuf_stays_available_and_decodes_to_the_same_points():
     assert values(tree_json) == values(tree_pb) and len(values(tree_json)) == 40
     logs = otlp.build_logs_requests("e", RES, [rec(i) for i in range(3)], fmt="json").requests
     assert logs[0].headers["Content-Type"] == "application/json"
+
+
+# -- failure paths of the single commit -------------------------------------------------------
+
+def test_a_failed_ack_commit_does_not_hide_the_delivery_error(tmp_path, monkeypatch):
+    agent = Agent(make_cfg(tmp_path))
+    for i in range(2):
+        agent.outbox.enqueue(requests_for(f"e{i}", n_points=1), f"e{i}")
+
+    def broken():
+        raise sqlite3.OperationalError("database is locked")
+
+    monkeypatch.setattr(agent.outbox, "commit_acks", broken)
+    with FakeObserve(answers=[200, 503]).client() as client:
+        with pytest.raises(agent_mod.DeliveryError):
+            agent.flush(client)
+
+
+def test_a_dead_letter_during_a_pass_commits_the_pending_acknowledgements(tmp_path):
+    box = Outbox(tmp_path / "outbox.db")
+    for i in range(3):
+        box.enqueue(requests_for(f"e{i}", n_points=1), f"e{i}")
+    box.ack(box.peek().seq, commit=False)
+    box.dead_letter(box.peek().seq, 400, "bad")
+    other = sqlite3.connect(tmp_path / "outbox.db")
+    assert other.execute("SELECT COUNT(*) FROM requests").fetchone()[0] == 1
+    box.commit_acks()
+    assert box.depth() == 1
+
+
+def test_stage_survives_an_unreadable_marker_lookup(tmp_path, monkeypatch):
+    box = Outbox(tmp_path / "outbox.db")
+
+    def broken(key):
+        raise sqlite3.OperationalError("disk I/O error")
+
+    monkeypatch.setattr(box, "get", broken)
+    box.stage("k", "v")
+    assert box._staged == {"k": "v"}

@@ -838,8 +838,15 @@ class Agent:
         self.outbox.prune()
         try:
             self._send_queued(client, deadline, honour_stop)
-        finally:
-            self.outbox.commit_acks()
+        except BaseException:
+            # The delivery error (and its Retry-After) must reach the caller, so a failed commit here
+            # is logged and the acknowledgements are sent again next pass under the same key.
+            try:
+                self.outbox.commit_acks()
+            except Exception:
+                log.warning("could not commit acknowledgements after a failed delivery pass", exc_info=True)
+            raise
+        self.outbox.commit_acks()
 
     def _send_queued(self, client: httpx.Client, deadline: float | None, honour_stop: bool) -> None:
         while (req := self.outbox.peek()) is not None:

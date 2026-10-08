@@ -103,8 +103,8 @@ class Config:
     observe_url: str = field(default_factory=lambda: (
         _env("HOSTWATCH_OBSERVE_URL", "").strip() or _env("HOSTWATCH_HUB_URL", "").strip()).rstrip("/"))
     ingest_key: str = field(default_factory=lambda: Secret(_env("HOSTWATCH_INGEST_KEY", "")), repr=False)
-    # json with gzip is the default: it costs about 2.6 times less CPU to encode than protobuf and is as
-    # small on the wire. protobuf stays available.
+    # json with gzip is the default: it costs about half the CPU to encode of protobuf and is no larger
+    # on the wire (scripts/bench_io.py reproduces the figures). protobuf stays available.
     otlp_format: str = field(default_factory=lambda: _env("HOSTWATCH_OTLP_FORMAT", "json").strip().lower())
     otlp_gzip: bool = field(default_factory=lambda: parse_bool("HOSTWATCH_OTLP_GZIP", "1"))
     scrutiny_url: str = field(default_factory=lambda: _env("HOSTWATCH_SCRUTINY_URL", ""))
