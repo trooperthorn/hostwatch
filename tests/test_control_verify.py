@@ -445,10 +445,13 @@ def test_group_or_other_writable_directory_is_refused(monkeypatch, tmp_path, mod
 
 
 def test_windows_owner_must_be_system_or_administrators(monkeypatch):
+    # The path is made before os.name is switched: on Linux, Path() would then try to build a
+    # WindowsPath, which cannot exist there. The DACL check is stubbed so only the owner is tested.
+    p = Path("C:/ProgramData/hostwatch/control.toml")
+    monkeypatch.setattr(cfgmod, "_windows_dacl_problem", lambda path: None)
     monkeypatch.setattr(cfgmod.os, "name", "nt")
     # The suite adds the test user to the trusted list; this test is about the production list.
     monkeypatch.setattr(cfgmod, "WINDOWS_TRUSTED_SIDS", ("S-1-5-18", "S-1-5-32-544"))
-    p = Path("C:/ProgramData/hostwatch/control.toml")
     monkeypatch.setattr(cfgmod, "_windows_owner_sid", lambda path: "S-1-5-21-1-2-3-1001")
     with pytest.raises(cfgmod.ConfigError, match="SYSTEM or Administrators"):
         cfgmod.check_permissions(p)
