@@ -78,7 +78,11 @@ def pstore_cpu(tmp: Path) -> None:
         print(f"pstore, 12 reads of 8 records, {label}: {(time.process_time() - start) * 1000:.1f} ms CPU")
 
 
-def outbox_minute(tmp: Path, marker: str, new_style: bool) -> tuple[int, int, int]:
+def outbox_minute(tmp: Path, marker: str, new_style: bool, *,
+                  restaged_before: bool) -> tuple[int, int, int]:
+    """One minute of outbox work. restaged_before says whether the old code restaged an unchanged
+    marker on every pass: true for the Windows event log bookmark, false for the Linux journal
+    cursor, which was already staged only when it changed, so on Linux only ack batching differs."""
     box = Outbox(tmp / f"outbox-{marker}-{new_style}.db")
     box.stage(marker, "v0")
     box.enqueue([], "seed")
@@ -86,7 +90,7 @@ def outbox_minute(tmp: Path, marker: str, new_style: bool) -> tuple[int, int, in
     box._db.set_trace_callback(lambda sql: statements.append(sql.strip().split(None, 1)[0].upper()) if sql.strip() else None)
     calls0, bytes0 = io_counters()
     for i in range(12):
-        if new_style:
+        if new_style or not restaged_before:
             box.stage(marker, "v0")
         else:
             box._staged[marker] = "v0"  # the old behaviour: restaged on every pass
@@ -107,10 +111,10 @@ def outbox_minute(tmp: Path, marker: str, new_style: bool) -> tuple[int, int, in
 
 
 def outbox_numbers(tmp: Path) -> None:
-    for platform, marker in (("Linux marker (journal cursor)", CURSOR_MARKER),
-                             ("Windows marker (event log bookmark)", BOOKMARK_MARKER)):
+    for platform, marker, restaged in (("Linux marker (journal cursor)", CURSOR_MARKER, False),
+                                       ("Windows marker (event log bookmark)", BOOKMARK_MARKER, True)):
         for new_style in (False, True):
-            commits, calls, size = outbox_minute(tmp, marker, new_style)
+            commits, calls, size = outbox_minute(tmp, marker, new_style, restaged_before=restaged)
             print(f"outbox minute, {platform}, {'after' if new_style else 'before'}: "
                   f"{commits} commits, {calls} write calls, {size} bytes written")
 

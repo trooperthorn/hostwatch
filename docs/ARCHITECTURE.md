@@ -377,16 +377,16 @@ when no marker exists.
 
 Commit cost is kept low in three ways. `stage` ignores a value equal to the current one, so a source that restates unchanged progress (the Windows event log bookmark, the journal cursor) causes no marker-only commit. `flush` acknowledges delivered requests without committing and commits at the end of the pass, also when the pass fails, and after every 50 acknowledgements during a long drain, so a normal pass costs one fsync and a crash repeats at most 50 requests; a crash before a commit repeats requests under the same `Idempotency-Key`. Pstore records are cached (see pstore ingestion).
 
-Measured on the development host (Windows) with `scripts/bench_io.py`, which anyone can re-run. Its outbox scenario is one minute of work: twelve event passes restating one marker, three tier entries, five queued requests and one delivery pass. Commits come from the SQLite statement trace. Write calls and bytes come from the process I/O counters. The script was run only on Windows for this change, so the Linux marker row shows the same outbox code with the journal cursor key, on the Windows file system; run the script on a Linux host for its own byte figures.
+Measured on the development host (Windows) with `scripts/bench_io.py`, which anyone can re-run. Its outbox scenario is one minute of work: twelve event passes restating one marker (restaged every pass by the old Windows code only), three tier entries, five queued requests and one delivery pass. Commits come from the SQLite statement trace. Write calls and bytes come from the process I/O counters. The script was run only on Windows for this change, so the Linux marker row shows the same outbox code with the journal cursor key, on the Windows file system; run the script on a Linux host for its own byte figures.
 
 | Measure | Before | After |
 |---|---|---|
 | pstore CPU, 12 reads of 8 records of 256 KiB | 1000 ms | 109 ms (the first read is a full read) |
-| Outbox minute, Linux marker (journal cursor): commits, write calls, bytes | 28, 360, 637872 | 9, 122, 217916 |
+| Outbox minute, Linux marker (journal cursor): commits, write calls, bytes | 16, 192, 336384 | 9, 122, 217916 |
 | Outbox minute, Windows marker (event log bookmark): commits, write calls, bytes | 28, 360, 637872 | 9, 122, 217916 |
 | Encode 120 points, CPU (gzip) | protobuf 1.09 ms, 700 bytes | json 0.55 ms, 556 bytes |
 
-The figures vary from run to run; the ratios are what matter. The two marker rows match because the outbox treats every marker the same way. The same points decode from both encodings (tested).
+The figures vary from run to run; the ratios are what matter. On Linux the journal cursor was already staged only when it changed, so the Linux saving comes from acknowledgement batching alone; the Windows saving also removes a marker-only commit on every event pass. A real journal cursor moves whenever any entry is written, so on a busy host the Linux marker commits more often than this model shows. The same points decode from both encodings (tested).
 
 A pass holds an open write transaction from its first acknowledgement until its end. A crash or kill during the pass repeats the requests of that pass under the same `Idempotency-Key`. Another write on the connection during the pass (an enqueue, a dead letter) commits the pending acknowledgements with it; if that write fails and rolls back, they are undone and those requests are sent again.
 
