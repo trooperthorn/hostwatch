@@ -34,6 +34,8 @@ import threading
 import time
 from pathlib import Path
 
+from ..privfile import ensure_private
+
 log = logging.getLogger("hostwatch.control.outbox")
 
 OUTBOX_FILE = "control-outbox.db"
@@ -90,6 +92,10 @@ class ResultOutbox:
             self._db = self._open()
 
     def _open(self) -> sqlite3.Connection:
+        try:
+            ensure_private(self.path)
+        except OSError as exc:
+            log.warning("cannot set mode 0600 on %s: %s", self.path, exc)
         db = sqlite3.connect(self.path, check_same_thread=False)
         try:
             db.execute("PRAGMA synchronous=FULL")

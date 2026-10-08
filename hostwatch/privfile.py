@@ -1,6 +1,7 @@
 """Private files for the agent's data directory.
 
-On POSIX the outbox, the boot heartbeat and the liveness marker are created with mode 0600, so
+On POSIX the outbox, the control result outbox, the boot heartbeat, the pstore classification list,
+the journal cursor and the liveness marker are created with mode 0600, so
 another local account cannot read queued telemetry or the host's boot history. On Windows the
 data directory's ACL is the control and these helpers do nothing beyond opening the file.
 """

@@ -34,6 +34,7 @@ def _agent_platform_is_not_the_test_host(request, monkeypatch):
 
 def pytest_configure(config):
     config.addinivalue_line("markers", "real_platform: use the real detect_platform instead of the Linux stand-in")
+    config.addinivalue_line("markers", "real_dacl: keep the real DACL check of control.toml instead of the injected one")
 
 
 def trust_the_test_user_as_control_file_owner(monkeypatch, probe):
@@ -59,3 +60,16 @@ def _control_file_owner_is_the_test_user(monkeypatch, tmp_path_factory):
     it as the current user, so that user is trusted here by adding to the trusted list. The owner check
     itself is untouched, and the owner tests set the trusted list back to the production value."""
     trust_the_test_user_as_control_file_owner(monkeypatch, tmp_path_factory.getbasetemp())
+
+
+@pytest.fixture(autouse=True)
+def _control_file_dacl_check_is_injected(request, monkeypatch):
+    """Files that tests create inherit whatever DACL the temp folder has, which on a real Windows
+    machine can include entries for other principals. With pywin32 importable that would make every
+    control test fail on the host's own folder layout, so the DACL check is replaced here by one that
+    finds no problem. The check in hostwatch.control.config is untouched, and a test that is about the
+    DACL check carries the real_dacl marker, which leaves it in place."""
+    if request.node.get_closest_marker("real_dacl"):
+        return
+    import hostwatch.control.config as control_config
+    monkeypatch.setattr(control_config, "_windows_dacl_problem", lambda path: None)

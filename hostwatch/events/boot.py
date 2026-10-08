@@ -123,7 +123,7 @@ def load_classified(data_dir: Path) -> set[str]:
 def save_classified(data_dir: Path, keys: set[str]) -> None:
     data_dir.mkdir(parents=True, exist_ok=True)
     tmp = data_dir / (CLASSIFIED_FILE + ".tmp")
-    tmp.write_text(json.dumps(sorted(keys)[-MAX_CLASSIFIED:]), encoding="utf-8")
+    write_private(tmp, json.dumps(sorted(keys)[-MAX_CLASSIFIED:]))
     os.replace(tmp, data_dir / CLASSIFIED_FILE)
 
 

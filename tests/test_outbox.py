@@ -912,3 +912,24 @@ def test_data_files_are_created_private(tmp_path):
         os.umask(previous)
     for name in ("outbox.db", "agent.alive", "heartbeat.json"):
         assert stat.S_IMODE(os.stat(cfg.data_dir / name).st_mode) == 0o600, name
+
+
+@pytest.mark.skipif(not hasattr(__import__("os"), "fchmod") or __import__("os").name != "posix",
+                    reason="file modes are POSIX only")
+def test_control_outbox_classified_list_and_journal_cursor_are_created_private(tmp_path):
+    import os
+    import stat
+    from hostwatch.control.outbox import OUTBOX_FILE, ResultOutbox
+    from hostwatch.events import boot
+    from hostwatch.events.journal import CURSOR_FILE
+
+    previous = os.umask(0o022)
+    try:
+        ResultOutbox(tmp_path / "control" / OUTBOX_FILE).close()
+        boot.save_classified(tmp_path, {"a", "b"})
+        watcher = JournalWatcher(tmp_path / "journal", tmp_path)
+        watcher._save_cursor("s=1;i=2")
+    finally:
+        os.umask(previous)
+    for path in (tmp_path / "control" / OUTBOX_FILE, tmp_path / boot.CLASSIFIED_FILE, tmp_path / CURSOR_FILE):
+        assert stat.S_IMODE(os.stat(path).st_mode) == 0o600, path.name

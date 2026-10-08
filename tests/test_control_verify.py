@@ -446,6 +446,8 @@ def test_group_or_other_writable_directory_is_refused(monkeypatch, tmp_path, mod
 
 def test_windows_owner_must_be_system_or_administrators(monkeypatch):
     monkeypatch.setattr(cfgmod.os, "name", "nt")
+    # The suite adds the test user to the trusted list; this test is about the production list.
+    monkeypatch.setattr(cfgmod, "WINDOWS_TRUSTED_SIDS", ("S-1-5-18", "S-1-5-32-544"))
     p = Path("C:/ProgramData/hostwatch/control.toml")
     monkeypatch.setattr(cfgmod, "_windows_owner_sid", lambda path: "S-1-5-21-1-2-3-1001")
     with pytest.raises(cfgmod.ConfigError, match="SYSTEM or Administrators"):
@@ -601,6 +603,7 @@ def _windows_load(monkeypatch, tmp_path, signer, fake):
     ("S-1-5-11", 0x40000),       # Authenticated Users, change permissions
     ("S-1-5-21-1-2-3-1001", 0x10000000),  # a user with GENERIC_ALL
 ])
+@pytest.mark.real_dacl
 def test_windows_dacl_that_lets_another_principal_write_is_refused(monkeypatch, tmp_path, signer, sid, mask):
     fake = _FakeWin32Security(aces=[(0, 0x1F01FF, "S-1-5-18"), (0, mask, sid)])
     p = _windows_load(monkeypatch, tmp_path, signer, fake)
@@ -608,17 +611,20 @@ def test_windows_dacl_that_lets_another_principal_write_is_refused(monkeypatch, 
         cfgmod.load(p)
 
 
+@pytest.mark.real_dacl
 def test_windows_dacl_with_read_only_access_for_others_or_denies_is_accepted(monkeypatch, tmp_path, signer):
     fake = _FakeWin32Security(aces=[(0, 0x1F01FF, "S-1-5-18"), (0, 0x120089, "S-1-1-0"), (1, 0x2, "S-1-1-0")])
     cfgmod.load(_windows_load(monkeypatch, tmp_path, signer, fake))
 
 
+@pytest.mark.real_dacl
 def test_windows_null_dacl_is_refused(monkeypatch, tmp_path, signer):
     p = _windows_load(monkeypatch, tmp_path, signer, _FakeWin32Security(dacl=None))
     with pytest.raises(cfgmod.ConfigError, match="no DACL"):
         cfgmod.load(p)
 
 
+@pytest.mark.real_dacl
 def test_windows_dacl_read_failure_is_a_config_error(monkeypatch, tmp_path, signer):
     fake = _FakeWin32Security()
     p = _windows_load(monkeypatch, tmp_path, signer, fake)
@@ -896,6 +902,7 @@ def test_the_cli_runs_the_state_tools(tmp_path, monkeypatch, capsys):
                             "HOSTWATCH_CONTROL_STATE_KEY": "other"}).state_secret == "other"
 
 
+@pytest.mark.real_dacl
 def test_the_windows_check_refuses_a_writable_folder_and_a_callback_allow_entry(monkeypatch, tmp_path, signer):
     fake = _FakeWin32Security()
     p = _windows_load(monkeypatch, tmp_path, signer, fake)

@@ -433,8 +433,9 @@ under the same key. The old `batches` table of earlier versions is dropped when 
   more on the fresh file. Each recovery also queues an `observe.source.change` log for the
   `outbox` source, so Observe is told, not only the agent log. Locked or I/O errors are not
   treated as corruption: the file is left alone and the error is raised.
-* **File modes.** On POSIX `outbox.db`, `heartbeat.json` and `agent.alive` are created with mode
-  0600 (`hostwatch/privfile.py`). On Windows the data directory ACL is the control.
+* **File modes.** On POSIX `outbox.db`, `control-outbox.db`, `heartbeat.json`, `agent.alive`,
+  `pstore_classified.json` and `journal.cursor` are created with mode 0600 (`hostwatch/privfile.py`).
+  On Windows the data directory ACL is the control.
 * **Guarded work.** Each tier run and each event read runs inside a guard. An exception is logged,
   markers staged by that unit are discarded so nothing is skipped, the threshold state is restored,
   the journal reader is rewound, the source `agent` is reported unavailable with the reason, and the
@@ -587,7 +588,10 @@ files are described in the section after the executors. Modules:
   the allowlist uses no seq. A state file that cannot be read or written refuses everything (fail closed).
 - `config.py` checks `control.toml` on Windows (when pywin32 is importable) for the owner and for the DACL: an
   empty DACL, or an allow entry that grants write, delete or permission changes to anyone but SYSTEM and
-  Administrators, is refused. `install.ps1` and `install-control.ps1` run `Protect-DataDir` on the data folder: it
+  Administrators, is refused. The test suite passes with pywin32 importable and without it: `tests/conftest.py`
+  trusts the test user's own SID as owner and replaces the DACL check with one that finds no problem, because a
+  temp folder on a real Windows machine can carry entries for other principals. The production function is not
+  weakened, and tests marked `real_dacl` keep it and show that a permissive DACL is still refused. `install.ps1` and `install-control.ps1` run `Protect-DataDir` on the data folder: it
   stops when the folder exists and is owned by another account, then sets the owner and ACL to SYSTEM and
   Administrators and removes every other entry. These scripts are checked statically and have not been run.
 

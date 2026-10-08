@@ -30,6 +30,7 @@ from pathlib import Path
 
 from ..outbox import Markers
 from ..model import Event, SourceStatus
+from ..privfile import write_private
 
 SOURCE = "journal"
 CURSOR_FILE = "journal.cursor"
@@ -412,7 +413,7 @@ class JournalWatcher:
             return
         self.cursor_path.parent.mkdir(parents=True, exist_ok=True)
         tmp = self.cursor_path.with_suffix(".tmp")
-        tmp.write_text(cursor, encoding="utf-8")
+        write_private(tmp, cursor)
         tmp.replace(self.cursor_path)
 
     def choose_directory(self) -> Path:
