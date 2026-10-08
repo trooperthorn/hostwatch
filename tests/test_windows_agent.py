@@ -407,8 +407,8 @@ def test_stop_during_a_slow_send_returns_within_the_bound_and_keeps_the_batch(tm
     started = time.monotonic()
     assert host.flush_outbox(bound_s=0.4) is False
     assert time.monotonic() - started < 2.0
-    # The final flush joins the three queued readings into one request, which stays queued.
-    assert host.agent.outbox.depth() == 1
+    # The final flush does not join requests, so the three stay as they were queued.
+    assert host.agent.outbox.depth() == 3
     assert client.timeouts and all(t <= 0.4 for t in client.timeouts)
 
 

@@ -214,6 +214,123 @@ def test_a_request_with_no_clear_answer_is_never_joined_into_another(tmp_path):
     assert agent.outbox.peek().headers["Idempotency-Key"] == "hw-e0-m0"
 
 
+def keys_queued(box: Outbox) -> list[str]:
+    out = []
+    while (req := box.peek()) is not None:
+        out.append(req.headers["Idempotency-Key"])
+        box.ack(req.seq)
+    return out
+
+
+def test_a_restart_never_joins_a_request_the_old_process_may_have_sent(tmp_path):
+    path = tmp_path / "outbox.db"
+    box = Outbox(path)
+    for i in range(3):
+        box.enqueue(backlog_requests(i), f"e{i}")
+    box.close()
+    box = Outbox(path)  # a new process: it cannot know which of these were sent
+    assert box.coalesce_metrics() == 0
+    box.enqueue(backlog_requests(3), "e3")
+    box.enqueue(backlog_requests(4), "e4")
+    assert box.coalesce_metrics() == 1  # only rows queued after the restart may join
+    keys = keys_queued(box)
+    assert keys[:3] == ["hw-e0-m0", "hw-e1-m0", "hw-e2-m0"] and len(keys) == 4
+    assert keys[3].startswith(otlp.MERGED_KEY_PREFIX)
+
+
+def test_a_rolled_back_acknowledgement_is_replayed_under_the_same_key_after_a_restart(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    for i in range(4):
+        agent.outbox.enqueue(backlog_requests(i), f"e{i}")
+    agent.outbox.coalesce_metrics()
+    assert agent.outbox.depth() == 1
+    key = agent.outbox.peek().headers["Idempotency-Key"]
+    agent.outbox.note_attempt(agent.outbox.peek().seq)
+    agent.outbox.ack(agent.outbox.peek().seq, commit=False)  # Observe accepted it; the crash undoes the DELETE
+    agent.outbox._db.rollback()
+    agent.outbox.close()
+    box = Outbox(tmp_path / "data/outbox.db")
+    box.enqueue(backlog_requests(9), "e9")
+    box.coalesce_metrics()
+    assert box.peek().headers["Idempotency-Key"] == key
+    assert box.depth() == 2
+
+
+def test_a_timed_out_request_is_not_joined_after_a_log_request_is_sent_later(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    agent.outbox.enqueue(backlog_requests(0), "e0")
+    observe = FakeObserve(answers=[httpx.ReadTimeout("slow")])
+    with observe.client() as client, pytest.raises(httpx.ReadTimeout):
+        agent.flush(client)
+    # A log request arrives and is refused with a 429, so it is the last request sent.
+    agent.outbox.enqueue(requests_for("l1", n_records=1), "l1")
+    agent.outbox.enqueue(backlog_requests(2), "e2")
+    agent.outbox.enqueue(backlog_requests(3), "e3")
+    with FakeObserve(answers=[429]).client() as client, pytest.raises(agent_mod.DeliveryError):
+        agent.flush(client)
+    with FakeObserve(answers=[429]).client() as client, pytest.raises(agent_mod.DeliveryError):
+        agent.flush(client)
+    metrics = [q for q in iter_queue(agent.outbox) if q.signal == "metrics"]
+    assert metrics[0].headers["Idempotency-Key"] == "hw-e0-m0"
+    assert len(metrics) == 2  # e2 and e3 joined, e0 was left alone
+
+
+def iter_queue(box: Outbox):
+    import sqlite3
+    rows = sqlite3.connect(box._path).execute("SELECT seq FROM requests ORDER BY seq").fetchall()
+    out = []
+    while (req := box.peek()) is not None and len(out) < len(rows):
+        out.append(req)
+        box.ack(req.seq, commit=False)
+    box._db.rollback()
+    return out
+
+
+def test_joining_does_not_drop_a_recent_reading_when_the_oldest_is_six_hours_old(tmp_path):
+    now = {"t": 1_700_000_000.0}
+    box = Outbox(tmp_path / "outbox.db", clock=lambda: now["t"])
+    for i in range(4):  # one reading every 30 minutes, 40 points each
+        box.enqueue(backlog_requests(i), f"e{i}")
+        now["t"] += 1800.0
+    assert box.coalesce_metrics() == 3
+    now["t"] += 6 * 3600.0 - 4 * 1800.0 + 60.0  # the first reading is now just over 6 h old
+    box.prune()
+    assert box.depth() == 1 and box.dropped_points_total() == 0  # the newest reading is 4.5 h old
+    now["t"] += 4 * 3600.0
+    box.prune()
+    assert box.depth() == 0 and box.dropped_points_total() == 160
+
+
+def test_a_refused_joined_metrics_request_is_dead_lettered_whole(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    for i in range(3):
+        agent.outbox.enqueue(backlog_requests(i), f"e{i}")
+    with FakeObserve(answers=[400]).client() as client:
+        agent.flush(client)
+    assert agent.outbox.depth() == 0 and agent.outbox.dead_letter_count() == 1
+
+
+def test_the_final_flush_does_not_join_requests(tmp_path):
+    agent = Agent(make_cfg(tmp_path))
+    for i in range(3):
+        agent.outbox.enqueue(backlog_requests(i), f"e{i}")
+    observe = FakeObserve()
+    with observe.client() as client:
+        agent.flush(client, honour_stop=False)
+    assert [r.headers["idempotency-key"] for r in observe.posts] == ["hw-e0-m0", "hw-e1-m0", "hw-e2-m0"]
+
+
+def test_a_pass_with_nothing_new_does_not_scan_the_queue_again(tmp_path):
+    box = Outbox(tmp_path / "outbox.db")
+    box.enqueue(backlog_requests(0), "a")
+    box.enqueue(backlog_requests(1), "b")
+    assert box.coalesce_metrics() == 1
+    box._db.set_trace_callback(lambda sql: statements.append(sql))
+    statements: list[str] = []
+    assert box.coalesce_metrics() == 0
+    assert statements == []
+
+
 def test_requests_of_different_encodings_and_signals_are_not_joined(tmp_path):
     box = Outbox(tmp_path / "outbox.db")
     box.enqueue(backlog_requests(0, fmt="json"), "a")

@@ -18,6 +18,11 @@ request. Log requests carry events, and an event is the thing the owner most wan
 they are kept for MAX_LOGS_AGE_S and are dropped only when no metrics request is left to drop.
 Every drop is counted and reported through the agent's outbox source status.
 
+Neighbouring metrics requests are joined into larger ones (see coalesce_metrics), but never a
+request that may already have been sent: not one this process sent and has not yet acknowledged
+durably, and not one that was already queued when the file was opened. A replay after a restart
+therefore still sends each such request under its own key.
+
 Delivery sends log requests before metrics requests, each oldest first, so that after an outage the
 events leave before the backlog of readings.
 
@@ -167,6 +172,16 @@ class Outbox:
         self._staged: dict[str, str | None] = {}
         self._acks_pending = False
         self._warned_drop = 0
+        # Requests that must not be joined into another one, because Observe may already hold them
+        # under their own Idempotency-Key. `_sealed_upto` covers every row that was queued when this
+        # file was opened: an earlier process may have sent any of them (a send that timed out, or an
+        # acknowledgement that a crash rolled back), and that is not recorded. `_attempted` covers
+        # the rows this process has sent and not yet acknowledged durably. Both are memory only.
+        self._sealed_upto = 0
+        self._attempted: set[int] = set()
+        self._acked_pending: list[int] = []
+        # True when a join might now be possible. A pass with nothing new to look at skips the scan.
+        self._join_dirty = True
         try:
             self._db = self._open(path)
         except sqlite3.DatabaseError as exc:
@@ -176,6 +191,7 @@ class Outbox:
                 raise
             self._quarantine(exc)
             self._db = self._open(path)
+        self._sealed_upto = self._db.execute("SELECT COALESCE(MAX(seq), 0) FROM requests").fetchone()[0]
 
     def _quarantine(self, exc: Exception) -> None:
         path = self._path
@@ -209,6 +225,10 @@ class Outbox:
             self._quarantine(exc)
             self._db = self._open(self._path)
             self._warned_drop = 0
+            self._sealed_upto = self._db.execute("SELECT COALESCE(MAX(seq), 0) FROM requests").fetchone()[0]
+            self._attempted.clear()
+            self._acked_pending.clear()
+            self._join_dirty = True
 
     def take_incidents(self) -> list[str]:
         """Texts describing recoveries since the last call, for the agent to report to Observe."""
@@ -315,6 +335,8 @@ class Outbox:
                         "INSERT INTO requests (entry_id, signal, path, headers, body, count, created) "
                         "VALUES (?, ?, ?, ?, ?, ?, ?)",
                         (entry_id, r.signal, r.path, json.dumps(r.headers, sort_keys=True), r.body, r.count, now))
+                    if r.signal == "metrics":
+                        self._join_dirty = True
                 self._write_staged()
                 self._enforce(now)
             self._staged.clear()
@@ -335,6 +357,8 @@ class Outbox:
 
     def _drop(self, seq: int, signal: str, count: int) -> None:
         self._db.execute("DELETE FROM requests WHERE seq=?", (seq,))
+        self._attempted.discard(seq)
+        self._join_dirty = True
         self._bump("dropped_requests", 1)
         self._bump("dropped_points" if signal == "metrics" else "dropped_records", count)
         self._bump("dropped_since_drain", 1)
@@ -356,6 +380,12 @@ class Outbox:
                 return
             self._drop(*row)
 
+    def note_attempt(self, seq: int) -> None:
+        """Record that a send of this request is starting, so it is never joined into another one
+        until its acknowledgement is durable. Called by the agent before every post."""
+        with self._lock:
+            self._attempted.add(seq)
+
     @_recovering
     def coalesce_metrics(self, exclude: frozenset[int] = frozenset()) -> int:
         """Join queued metrics requests that are next to each other into fewer, larger ones, within
@@ -363,47 +393,58 @@ class Outbox:
         few requests instead of one per cycle. The first row of a run keeps its place in the queue and
         takes the joined body, the others are removed, all in one transaction. The joined request has
         a new Idempotency-Key derived from the keys it replaces, and it is stored, so a resend after a
-        failure sends the same bytes under the same key. Rows in `exclude` (a request whose send did
-        not get a clear answer) are never joined, so a request Observe may already hold is not sent
-        again inside a different body. Returns the number of rows removed."""
+        failure sends the same bytes under the same key.
+
+        A request that Observe may already hold is never joined, so Observe is not given the same
+        points under two keys. That covers `exclude`, every request this process has sent and not yet
+        acknowledged durably (see note_attempt), and every request that was already queued when the
+        outbox was opened, because an earlier process may have sent it and that is not recorded.
+
+        The joined row takes the creation time of its newest member, so the age limit never drops a
+        reading that is still inside it; the older readings in the row are kept until the newest is
+        old enough. Returns the number of rows removed. The scan is skipped when nothing was queued,
+        removed or released since the last one."""
         with self._lock:
-            rows = self._db.execute(
-                "SELECT seq, headers, count, LENGTH(body) FROM requests WHERE signal='metrics' ORDER BY seq"
-            ).fetchall()
-            if len(rows) < 2:
+            if not self._join_dirty:
                 return 0
-            runs: list[list[tuple[int, dict[str, str], int]]] = []
-            run: list[tuple[int, dict[str, str], int]] = []
+            blocked = exclude | self._attempted
+            rows = self._db.execute(
+                "SELECT seq, headers, count, LENGTH(body), created FROM requests WHERE signal='metrics' "
+                "AND seq > ? ORDER BY seq", (self._sealed_upto,)
+            ).fetchall()
+            runs: list[list[tuple[int, dict[str, str], int, float]]] = []
+            run: list[tuple[int, dict[str, str], int, float]] = []
             points = size = 0
-            for seq, raw_headers, count, length in rows:
+            for seq, raw_headers, count, length, created in rows:
                 try:
                     headers = json.loads(raw_headers)
                     if not isinstance(headers, dict):
                         raise ValueError
                 except ValueError:
                     headers = None
-                fits = (headers is not None and seq not in exclude and run
+                fits = (headers is not None and seq not in blocked and run
                         and otlp.can_merge(run[0][1], headers)
                         and points + count <= otlp.MAX_POINTS and size + length <= otlp.MAX_BODY_BYTES)
                 if fits:
-                    run.append((seq, headers, count))
+                    run.append((seq, headers, count, created))
                     points, size = points + count, size + length
                     continue
                 if len(run) > 1:
                     runs.append(run)
-                if headers is None or seq in exclude:
+                if headers is None or seq in blocked:
                     run, points, size = [], 0, 0
                 else:
-                    run, points, size = [(seq, headers, count)], count, length
+                    run, points, size = [(seq, headers, count, created)], count, length
             if len(run) > 1:
                 runs.append(run)
             removed = 0
             with self._db:
                 for group in runs:
                     removed += self._join(group)
+            self._join_dirty = False
             return removed
 
-    def _join(self, group: list[tuple[int, dict[str, str], int]]) -> int:
+    def _join(self, group: list[tuple[int, dict[str, str], int, float]]) -> int:
         """Join one run of rows. A run that does not fit once encoded is halved and each half tried,
         so a pair of rows that cannot be joined is simply left as it is."""
         if len(group) < 2:
@@ -412,13 +453,14 @@ class Outbox:
         bodies = {seq: bytes(body) for seq, body in self._db.execute(
             f"SELECT seq, body FROM requests WHERE seq IN ({marks})", [g[0] for g in group])}
         try:
-            joined = otlp.merge_metrics([(h, bodies[seq], c) for seq, h, c in group])
+            joined = otlp.merge_metrics([(h, bodies[seq], c) for seq, h, c, _ in group])
         except (otlp.OtlpError, ValueError, KeyError, OSError, EOFError):
             mid = len(group) // 2
             return self._join(group[:mid]) + self._join(group[mid:])
         head = group[0][0]
-        self._db.execute("UPDATE requests SET headers=?, body=?, count=? WHERE seq=?",
-                         (json.dumps(joined.headers, sort_keys=True), joined.body, joined.count, head))
+        self._db.execute("UPDATE requests SET headers=?, body=?, count=?, created=? WHERE seq=?",
+                         (json.dumps(joined.headers, sort_keys=True), joined.body, joined.count,
+                          max(g[3] for g in group), head))
         self._db.execute(f"DELETE FROM requests WHERE seq IN ({','.join('?' * (len(group) - 1))})",
                          [g[0] for g in group[1:]])
         return len(group) - 1
@@ -465,6 +507,8 @@ class Outbox:
         with self._lock:
             self._db.execute("DELETE FROM requests WHERE seq=?", (seq,))
             self._acks_pending = True
+            self._acked_pending.append(seq)
+            self._join_dirty = True
             if commit:
                 self.commit_acks()
 
@@ -479,6 +523,9 @@ class Outbox:
                     self._db.execute("DELETE FROM counters WHERE name='dropped_since_drain'")
                     self._warned_drop = 0
             self._acks_pending = False
+            # The removals are durable now, so these rows cannot come back after a rollback.
+            self._attempted.difference_update(self._acked_pending)
+            self._acked_pending.clear()
 
     @_recovering
     def dead_letter(self, seq: int, status: int, error: str = "") -> None:
@@ -491,6 +538,8 @@ class Outbox:
                              "VALUES (?, ?, ?, ?, ?, ?, ?)",
                              (row[0], row[1], status, time.time(), row[2], row[3], error[:500] or None))
             self._db.execute("DELETE FROM requests WHERE seq=?", (seq,))
+            self._attempted.discard(seq)
+            self._join_dirty = True
             self._db.execute("DELETE FROM dead_letters WHERE id <= (SELECT MAX(id) FROM dead_letters) - ?",
                              (MAX_DEAD_LETTERS,))
             self._trim_dead_letters()

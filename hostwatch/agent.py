@@ -214,9 +214,6 @@ class Agent:
         # Requests acknowledged by the delivery pass in progress, so a pass that failed after making
         # progress does not climb the back-off.
         self._pass_acked = 0
-        # The request whose send has no clear answer yet. It is never joined into a larger request,
-        # because Observe may already hold it under its own Idempotency-Key.
-        self._attempt_seq: int | None = None
         # Monotonic time of the first failed delivery of the current stall.
         self._stall_since: float | None = None
         self._stopped = threading.Event()
@@ -862,11 +859,13 @@ class Agent:
     def _send_queued(self, client: httpx.Client, deadline: float | None, honour_stop: bool) -> None:
         unflushed = 0
         self._pass_acked = 0
-        # A backlog of readings goes out as a few large requests instead of one per cycle.
-        exclude = frozenset() if self._attempt_seq is None else frozenset({self._attempt_seq})
+        # A backlog of readings goes out as a few large requests instead of one per cycle. The join
+        # is skipped when a stop was requested and in the final flush (honour_stop False), whose time
+        # budget the decompress, merge and compress work would otherwise not count against. The
+        # outbox itself never joins a request that has been sent (see Outbox.note_attempt).
         try:
-            if not (honour_stop and self._stop.is_set()):
-                self.outbox.coalesce_metrics(exclude)
+            if honour_stop and not self._stop.is_set():
+                self.outbox.coalesce_metrics()
         except Exception:
             log.warning("could not join queued metrics requests; sending them as they are", exc_info=True)
         while (req := self.outbox.peek()) is not None:
@@ -880,11 +879,10 @@ class Agent:
                 timeout = min(timeout, remaining)
             headers = {**req.headers, "Authorization": f"Bearer {self.cfg.ingest_key}",
                        "User-Agent": f"hostwatch/{__version__}"}
-            self._attempt_seq = req.seq
+            self.outbox.note_attempt(req.seq)
             r = client.post(self.cfg.observe_url + req.path, content=req.body, headers=headers, timeout=timeout)
             if r.status_code in DEAD_LETTER_STATUSES:
                 self.outbox.dead_letter(req.seq, r.status_code, _problem_text(r))
-                self._attempt_seq = None
                 continue
             if r.is_success:
                 if r.status_code == 200:
@@ -901,7 +899,6 @@ class Agent:
                         log.warning("Observe accepted %s request %s but rejected %d item(s): %s",
                                     req.signal, req.entry_id, rejected, message or "no reason given")
                 self.outbox.ack(req.seq, commit=False)
-                self._attempt_seq = None
                 self._pass_acked += 1
                 unflushed += 1
                 if unflushed >= ACK_COMMIT_EVERY:
