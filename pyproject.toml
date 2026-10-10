@@ -1,6 +1,6 @@
 [project]
 name = "hostwatch"
-version = "0.1.0"
+version = "0.2.0"
 description = "Host health, power, and crash agent that sends OpenTelemetry data to Observe"
 requires-python = ">=3.11"
 dependencies = [

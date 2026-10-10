@@ -18,7 +18,10 @@ cancels the reboot locally and reports `cancelled`. An id it never pulled is ign
 A result is posted as exactly the body the Observe results route validates (it refuses unknown fields):
   {"id", "state", "output", "started_at", "finished_at"}
 `state` is done, failed, refused, scheduled or cancelled. A reboot is reported `scheduled` when the timer is
-set and `done` or `failed` later for the same id. For a refusal or a failure `output` starts with the stable
+set and `done` or `failed` later for the same id. An executor may hand back a step to run after the result
+has been queued and sent (`ActionResult.after_report`); the control half of `agent.update` uses it to have
+systemd restart this daemon only once its result is on its way. Commands are handled one at a time on the one
+thread, so an update blocks the queue, and the pulls, for as long as its image pull or pip install takes. For a refusal or a failure `output` starts with the stable
 reason code from `verify.py` (for example `unit_not_allowed: ...`). The richer record (host, action, seq,
 reason) stays in the local outbox. Results are only posted for commands this host pulled. A command that was
 already executed and is pulled again is answered with its stored result, never refused as a replay.
@@ -197,6 +200,7 @@ class ControlDaemon:
         self._failures = 0
         self._pulled = False  # whether the last cycle got an answer to its pull
         self._followed: set[str] = set()  # reboots resolved or cancelled in this cycle, after the pull
+        self._after_report: list[tuple[str, Callable[[], Any]]] = []  # steps to run once a result is sent
         self.started_at = clock()  # a reboot due before this moment stays pending for BOOT_WAIT_S; only the boot id proves it done
         self._headers = {"Authorization": f"Bearer {settings.key}"}
 
@@ -313,7 +317,31 @@ class ControlDaemon:
         reason = "" if done.ok else ("action_refused" if done.status == "refused" else "action_failed")
         if done.ok and done.status == "scheduled" and command["action"] == "host.reboot":
             self.outbox.schedule(command["id"], self.clock() + self.config.reboot.delay_s, self.boot_id())
+        after = getattr(done, "after_report", None)
+        if done.ok and callable(after):
+            self._after_report.append((command["id"], after))
         return self._result(command, received, started, done.ok, done.status, reason, done.output)
+
+    def run_after_report(self) -> None:
+        """Run the steps executors asked to have run after their result was sent. A result that is still
+        queued (Observe unreachable) does not hold the step back: the outbox is durable and the restarted
+        daemon delivers it, whereas a step held back might never run."""
+        pending, self._after_report = self._after_report, []
+        for cid, step in pending:
+            if self.outbox.has(cid):
+                log.warning("the result of command %s is still queued; its follow-up step runs anyway and the "
+                            "result is delivered later from the outbox", cid)
+            try:
+                outcome = step()
+            except Exception:  # the result is already reported; the failure can only be logged
+                log.exception("the follow-up step of command %s failed", cid)
+                continue
+            code = getattr(outcome, "returncode", 0)
+            if code:
+                log.error("the follow-up step of command %s exited %s: %s", cid, code,
+                          redact(str(getattr(outcome, "output", ""))))
+            else:
+                log.info("the follow-up step of command %s ran", cid)
 
     def _replayed(self, command: dict, received: float) -> dict | None:
         """A signed command this host already accepted is pulled again, so Observe has not recorded its
@@ -425,6 +453,7 @@ class ControlDaemon:
                 self.flush()
             except DeliveryError as exc:
                 problem = exc
+            self.run_after_report()
         if problem is not None:
             raise problem
 

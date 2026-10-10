@@ -42,7 +42,10 @@ SystemCallArchitectures=native
 # on a host without thermalctl.
 # thermalctl install-override also opens its lock file under /run/thermalctl in write mode while the service
 # runs, so that directory must be writable too, or every fan action would fail with a read-only error.
-ReadWritePaths=-/etc/thermalctl -/run/thermalctl
+# agent.update for the control component runs pip as root inside the daemon's own venv, which needs the same
+# opening; the venv stays root owned, so the account itself still cannot write it. The dash lets the unit
+# start when the venv is elsewhere.
+ReadWritePaths=-/etc/thermalctl -/run/thermalctl -/opt/hostwatch-control/venv
 
 [Install]
 WantedBy=multi-user.target

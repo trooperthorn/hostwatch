@@ -23,7 +23,7 @@ from typing import Any, Protocol
 
 from ..windows import (DEFAULT_PIPE_TIMEOUT_S, MAX_FRAME_BYTES, PIPE_DIR, CommandRunner, PipeAbsentError,
                        SeamError, SubprocessRunner)
-from .actions_linux import HEADER_ID, MODES, ActionResult, _clip
+from .actions_linux import HEADER_ID, MODES, UPDATE_COMPONENTS, ActionResult, _clip
 from .config import ControlConfig, effective_reboot_delay, valid_service_name
 
 PIPE_NAME = "ThermalControlSuite.Ipc"
@@ -139,7 +139,18 @@ class WindowsActions:
             return self.service_restart(params.get("name"))
         if action == "host.reboot":
             return self.reboot()
+        if action == "agent.update":
+            return self.agent_update(params.get("component"))
         return ActionResult(False, "refused", f"unsupported action {action!r}")
+
+    def agent_update(self, component: object) -> ActionResult:
+        """Not supported here: the Windows agent and control are services installed from a source archive by
+        the scripts in deploy/windows, and there is no container to pull. The refusal says so plainly."""
+        if component not in UPDATE_COMPONENTS:
+            return ActionResult(False, "refused", "component must be agent, control or all")
+        return ActionResult(False, "refused", "agent.update is not supported on Windows; run "
+                                              "deploy/windows/install-agent.ps1 or install-control.ps1 again "
+                                              "on the host to update")
 
     def _run(self, argv: list[str]) -> tuple[int, str] | ActionResult:
         try:

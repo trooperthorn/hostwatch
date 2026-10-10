@@ -62,6 +62,14 @@ class RebootPolicy:
 
 
 @dataclass(frozen=True)
+class UpdatePolicy:
+    """The `[update]` stanza: which parts of hostwatch Observe may update on this host. A missing stanza
+    means neither, so a host that never opted in cannot be made to pull an image or run pip."""
+    agent: bool = False
+    control: bool = False
+
+
+@dataclass(frozen=True)
 class ControlConfig:
     public_key: bytes
     host: str
@@ -69,6 +77,7 @@ class ControlConfig:
     restart: tuple[str, ...] = ()
     reboot: RebootPolicy = field(default_factory=RebootPolicy)
     machine_id: str = ""
+    update: UpdatePolicy = field(default_factory=UpdatePolicy)
 
 
 def parse_public_key(text: object) -> bytes:
@@ -156,12 +165,17 @@ def parse(data: dict) -> ControlConfig:
             raise ConfigError("reboot.delay_s must not be negative")
         reboot = RebootPolicy(_bool(reboot_t, "allow", False), effective_reboot_delay(delay))
 
+    update = UpdatePolicy()
+    update_t = _table(data, "update")
+    if update_t is not None:
+        update = UpdatePolicy(_bool(update_t, "agent", False), _bool(update_t, "control", False))
+
     machine_id = data.get("machine_id", "")
     if not isinstance(machine_id, str):
         raise ConfigError("machine_id must be a string")
 
     return ControlConfig(public_key=key, host=host.strip(), fan=fan, restart=restart, reboot=reboot,
-                         machine_id=machine_id.strip())
+                         machine_id=machine_id.strip(), update=update)
 
 
 # Owners accepted for control.toml on POSIX. Tests widen this to the test user.

@@ -12,6 +12,10 @@ by the allowlist is not recorded and uses up no sequence number.
 Parameters are matched exactly: a missing, extra or wrongly typed parameter is a refusal (host.reboot
 alone tolerates a confirm_host text, which is ignored), because the executors must never see a field the allowlist did not look at. An unreadable or
 corrupt state file refuses every command (fail closed).
+
+`agent.update` takes exactly `component`, one of agent, control or all, and needs the matching flag in the
+`[update]` stanza: `agent` for the container, `control` for this daemon, both for all. The refusal names the
+flag that is false, so the owner knows which line of control.toml to change.
 """
 
 from __future__ import annotations
@@ -53,9 +57,11 @@ FLOOR_ABOVE_MAX = "floor_above_max"
 MODE_CHANGE_NOT_ALLOWED = "mode_change_not_allowed"
 UNIT_NOT_ALLOWED = "unit_not_allowed"
 REBOOT_NOT_ALLOWED = "reboot_not_allowed"
+UPDATE_NOT_ALLOWED = "update_not_allowed"
 STATE_UNAVAILABLE = "state_unavailable"
 
-ACTIONS = ("fan.set_floor", "fan.set_mode", "service.restart", "host.reboot")
+ACTIONS = ("fan.set_floor", "fan.set_mode", "service.restart", "host.reboot", "agent.update")
+UPDATE_COMPONENTS = ("agent", "control", "all")
 # Observe checks the typed host name before it signs a reboot. Older plugin builds copied it into the
 # signed params as confirm_host; it is accepted and ignored. Any other extra parameter is a refusal.
 REBOOT_IGNORED_PARAMS = frozenset({"confirm_host"})
@@ -94,6 +100,15 @@ def _shape_error(command: dict) -> str:
     return ""
 
 
+def update_refusal(config: ControlConfig, component: str) -> str:
+    """Why `[update]` does not permit this component, naming every flag that is false, or "" when it does."""
+    wanted = {"agent": ("agent",), "control": ("control",), "all": ("agent", "control")}.get(component, ())
+    missing = [name for name in wanted if not getattr(config.update, name)]
+    if not missing:
+        return ""
+    return " and ".join(f"update.{name}" for name in missing) + (" is false" if len(missing) == 1 else " are false")
+
+
 def check_allowlist(config: ControlConfig, command: dict) -> Decision:
     action, params = command["action"], command["params"]
     if action not in ACTIONS:
@@ -130,6 +145,14 @@ def check_allowlist(config: ControlConfig, command: dict) -> Decision:
             return _refuse(BAD_PARAMS, "parameters must be exactly ['name'] with a string name")
         if params["name"] not in config.restart:
             return _refuse(UNIT_NOT_ALLOWED, f"unit {params['name']!r} is not listed")
+        return Decision(True, command=command)
+
+    if action == "agent.update":
+        if set(params) != {"component"} or params["component"] not in UPDATE_COMPONENTS:
+            return _refuse(BAD_PARAMS, "parameters must be exactly ['component'] with agent, control or all")
+        missing = update_refusal(config, params["component"])
+        if missing:
+            return _refuse(UPDATE_NOT_ALLOWED, missing)
         return Decision(True, command=command)
 
     extra = set(params) - REBOOT_IGNORED_PARAMS

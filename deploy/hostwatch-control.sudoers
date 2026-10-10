@@ -1,11 +1,21 @@
 # hostwatch-control: the only commands the control account may run as root.
 # Check it with visudo -c -f, then copy it to /etc/sudoers.d/ with mode 0440.
-# Regenerate it when the restart list in control.toml changes.
+# Regenerate it when the restart list or the update flags in control.toml change.
 #
 # The thermalctl rule matches thermal-control-linux's example exactly: no arguments, so sudo refuses
 # --overrides, --config and --from, and the candidate comes on standard input. The thermalctl path,
 # every directory above it and the interpreter it points to must be root-owned and not writable by
 # any other user, or the account could replace them and gain root.
+#
+# The update rules let the account pull one fixed image and recreate the one named container.
+# The docker run rule is the only one with a wildcard: it fixes the subcommand and the name but
+# not the mounts and options, which the daemon copies from the old container. Whoever can run
+# that rule can start a root container with any mount, which is root on the host, so the rule
+# is a grant to the account and not a limit on what a container may do.
+#
+# The pip rule upgrades the daemon's own environment from the one fixed git source, and the
+# systemd-run rule restarts the daemon a few seconds later. The venv must be root-owned and not
+# writable by any other user, since pip runs as root inside it.
 
 hostwatch-control ALL=(root) NOPASSWD: /opt/thermalctl/venv/bin/thermalctl install-override
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl restart thermalctl
@@ -18,3 +28,15 @@ hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemd-run --unit=hostwatch-reb
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemd-run --unit=hostwatch-reboot --on-active=[0-9][0-9][0-9][0-9][0-9]s /usr/bin/systemctl reboot
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemd-run --unit=hostwatch-reboot --on-active=[0-9][0-9][0-9][0-9][0-9][0-9]s /usr/bin/systemctl reboot
 hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemctl stop hostwatch-reboot.timer
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/docker inspect --type container hostwatch-agent
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/docker pull ghcr.io/trooperthorn/hostwatch\:edge
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/docker image inspect ghcr.io/trooperthorn/hostwatch\:edge
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/docker rm -f hostwatch-agent-prev
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/docker stop hostwatch-agent
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/docker rename hostwatch-agent hostwatch-agent-prev
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/docker run --detach --name hostwatch-agent *
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/docker rm -f hostwatch-agent
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/docker rename hostwatch-agent-prev hostwatch-agent
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/docker start hostwatch-agent
+hostwatch-control ALL=(root) NOPASSWD: /opt/hostwatch-control/venv/bin/pip install --quiet --upgrade hostwatch\[control\] @ git+https\://github.com/trooperthorn/hostwatch.git
+hostwatch-control ALL=(root) NOPASSWD: /usr/bin/systemd-run --on-active=5 /usr/bin/systemctl restart hostwatch-control

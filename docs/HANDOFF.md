@@ -54,6 +54,7 @@ next event is captured with evidence instead of guessed at.
 | Raw hwmon values only; no guessed voltage multipliers | Board divider ratios for +12V/+5V are unknown. Calibrate against the BIOS Monitor tab, then write `/etc/sensors.d/` config. |
 | SolarWinds integration via Orion API Poller with flat JSON and 0/1/2 status codes | Matches the owner's existing UniFi API Poller pattern. |
 | Login with optional mTLS client certificates (Phase 3) | Allows YubiKey/PIV login, consistent with the owner's PKI practice. |
+| `agent.update` (2026-10-10) rebuilds the agent container from `docker inspect` and upgrades the daemon with pip, each behind its own `[update]` flag | Observe already installs both with fixed arguments, so the update copies them back rather than keeping a second copy of the installer's command line. The env file is passed by path so the ingest key never crosses the control daemon. The sudoers rules stay exact except for one `docker run --detach --name hostwatch-agent *` line, documented as a grant to the account rather than a limit. The daemon reports the control result before it schedules its own restart, so Observe never loses the report. |
 
 ## Open items carried forward
 

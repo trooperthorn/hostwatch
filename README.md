@@ -312,7 +312,37 @@ is reported as `failed` with its message and nothing changes; `service.restart` 
 digits, `_`, `.`, `-`, no `@`, no `..`, no leading dash); `host.reboot` runs `shutdown -r +N` after `delay_s`
 (rounded up to whole minutes) and can be cancelled with `shutdown -c`, which is what the local
 `hostwatch-control cancel` runs. `deploy/hostwatch-control.sudoers` is the sudo rule for exactly those
-commands. The daemon loop is in `hostwatch/control/daemon.py`. The Windows executors are in
+commands. The daemon loop is in `hostwatch/control/daemon.py`.
+
+`agent.update` (Linux only) updates hostwatch itself. Its one parameter is `component`: `agent`, `control` or
+`all`. It needs the `[update]` stanza in `control.toml` (`agent = true` lets Observe update the container,
+`control = true` the daemon; a missing stanza means neither, and `all` needs both), and a refusal names the flag
+that is false. For `agent` the daemon reads the running `hostwatch-agent` container with `docker inspect`,
+pulls `ghcr.io/trooperthorn/hostwatch:edge` (the image the Observe installer uses; a container created from any
+other image is reported failed and left alone), and when the image id changed recreates the container with the
+installer's arguments read back from inspect (restart policy, network mode, user, read-only root, tmpfs,
+capabilities, security options, extra groups, the journal gid variable and the mounts) and the env file
+`/etc/hostwatch/agent.env` given to docker by path, so the ingest key never passes through the daemon. The old
+container is renamed `hostwatch-agent-prev` while the new one starts and is put back if the new one fails to
+start or exits at once; on success it is removed. An unchanged image is reported `done` with the note `already
+current`, so a command handled twice is harmless, and a failed pull leaves the running agent untouched. The pull
+is given 10 minutes and a container start 60 seconds, after which the step is reported failed. For `control` the
+daemon runs `/opt/hostwatch-control/venv/bin/pip install --quiet --upgrade "hostwatch[control] @
+git+https://github.com/trooperthorn/hostwatch.git"` as root, records the installed version before and after
+(with the git commit when pip recorded one), reports the result, and only then runs `systemd-run --on-active=5
+systemctl restart hostwatch-control`, so the result is on its way before the daemon goes away. Without
+`systemd-run` the command is reported failed before pip runs. `all` does the container first and stops if that
+fails. The result output is JSON text: `{"component", "old_image_id", "new_image_id", "old_version",
+"new_version", "note"}` with `null` where a field does not apply; image ids are the twelve-digit short form,
+because a full digest would be masked as a secret by both this daemon's redaction and Observe's. Commands run
+one at a time on one thread, so an update blocks the queue, and the pulls, for as long as its pull or install
+takes. The sudo rules for it are rendered only when the matching flag is true: the exact `docker inspect`,
+`pull`, `image inspect`, `stop`, `rename`, `rm -f` and `start` lines for the two container names, one `docker run
+--detach --name hostwatch-agent *` line (the only wildcard, because the run arguments come from the old
+container; whoever can use it can start a root container with any mount, so it is a grant to the account, not a
+limit on containers), the exact pip line and the exact `systemd-run` line. The unit opens
+`/opt/hostwatch-control/venv` in `ReadWritePaths` for that pip run. On Windows the action is refused with a
+plain reason: the services there are updated by the installers in `deploy/windows`. The Windows executors are in
 `hostwatch/control/actions_windows.py`: `fan.set_floor` reads the fan list from the Thermal Control Suite pipe
 (`GetFans`) and sends `SetFanMapping` with the same mapping and the new `MinDutyPercent`, reporting a refusal
 from the service as `refused`; `fan.set_mode` is refused with a plain reason because the Suite pipe has no

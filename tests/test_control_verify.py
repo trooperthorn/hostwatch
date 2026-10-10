@@ -46,6 +46,10 @@ restart = ["hostwatch-agent", "docker:scrutiny"]
 [reboot]
 allow = true
 delay_s = 60
+
+[update]
+agent = true
+control = true
 """
 
 
@@ -390,6 +394,7 @@ def test_loader_reads_all_sections(tmp_path, signer):
     assert cfg.fan.headers == ("pwm1", "pwm2") and cfg.fan.min_duty_floor == 20
     assert cfg.restart == ("hostwatch-agent", "docker:scrutiny")
     assert cfg.reboot.allow and cfg.reboot.delay_s == 60
+    assert cfg.update == cfgmod.UpdatePolicy(agent=True, control=True)
 
 
 @pytest.mark.skipif(os.name != "posix", reason="POSIX file modes")
