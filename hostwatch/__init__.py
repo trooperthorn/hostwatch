@@ -2,7 +2,7 @@
 
 import logging
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 # httpx writes one INFO line per request, which is one line per delivery and per collector read.
 # Every entry point logs at INFO, so those lines are held back to WARNING here, for all of them.

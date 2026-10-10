@@ -18,7 +18,8 @@ KEY = "ed25519:" + "A" * 43 + "="
 RAW = {"observe_public_key": KEY, "host": "MediaIn-SVR",
        "fan": {"controller": "thermalctl", "headers": ["pwm1", "pwm2"], "allow_mode_change": True},
        "services": {"restart": ["hostwatch-agent", "nut-monitor", "docker:scrutiny"]},
-       "reboot": {"allow": True, "delay_s": 60}}
+       "reboot": {"allow": True, "delay_s": 60},
+       "update": {"agent": True, "control": True}}
 
 
 def config(**over):
@@ -489,7 +490,22 @@ ALLOWED = [
     re.compile(re.escape(f"{al.SYSTEMD_RUN} --unit={al.REBOOT_UNIT} --on-active=") + r"(\[0-9\]){2,6}"
                + re.escape(f"s {al.SYSTEMCTL} reboot")),
     re.compile(re.escape(f"{al.SYSTEMCTL} stop {al.REBOOT_UNIT}.timer")),
+    # agent.update: one fixed image, two fixed container names, one fixed pip spec and one fixed restart.
+    re.compile(re.escape(f"{al.DOCKER} inspect --type container {al.AGENT_CONTAINER}")),
+    re.compile(re.escape(f"{al.DOCKER} pull {al.sudoers_literal(al.AGENT_IMAGE)}")),
+    re.compile(re.escape(f"{al.DOCKER} image inspect {al.sudoers_literal(al.AGENT_IMAGE)}")),
+    re.compile(re.escape(f"{al.DOCKER} stop {al.AGENT_CONTAINER}")),
+    re.compile(re.escape(f"{al.DOCKER} start {al.AGENT_CONTAINER}")),
+    re.compile(re.escape(f"{al.DOCKER} rm -f ") + f"({al.AGENT_CONTAINER}|{al.AGENT_PREV_CONTAINER})"),
+    re.compile(re.escape(f"{al.DOCKER} rename ") + f"({al.AGENT_CONTAINER} {al.AGENT_PREV_CONTAINER}|"
+               f"{al.AGENT_PREV_CONTAINER} {al.AGENT_CONTAINER})"),
+    re.compile(re.escape(f"{al.DOCKER} run --detach --name {al.AGENT_CONTAINER} *")),
+    re.compile(re.escape(f"{al.CONTROL_PIP} " + " ".join(al.sudoers_literal(a) for a in al.PIP_INSTALL_ARGS))),
+    re.compile(re.escape(f"{al.SYSTEMD_RUN} --on-active={al.CONTROL_RESTART_DELAY_S} {al.SYSTEMCTL} restart "
+                         f"{al.CONTROL_UNIT}")),
 ]
+# The one rule that carries a wildcard: the run arguments are copied from the old container at run time.
+RUN_RULE = f"{al.DOCKER} run --detach --name {al.AGENT_CONTAINER} *"
 
 
 def _rules(text):
@@ -510,7 +526,8 @@ def test_sudoers_snippet_lists_only_allowlisted_shapes():
     assert rules
     for rule in rules:
         assert any(p.fullmatch(rule) for p in ALLOWED), rule
-        assert "," not in rule and "ALL" not in rule and "*" not in rule
+        assert "," not in rule and "ALL" not in rule
+        assert "*" not in rule or rule == RUN_RULE, rule
     assert "NOPASSWD: ALL" not in text and "SETENV" not in text
 
 
@@ -596,10 +613,11 @@ def test_thermalctl_fan_actions_are_refused_without_a_fan_section(tmp_path):
     assert runner.calls == []
 
 
-def test_the_shipped_unit_lets_install_override_open_its_lock_under_run():
+def test_the_shipped_unit_lets_install_override_open_its_lock_under_run_and_pip_write_the_venv():
     unit = (ROOT / "deploy" / "hostwatch-control.service").read_text(encoding="utf-8")
     paths = [l.removeprefix("ReadWritePaths=") for l in unit.splitlines() if l.startswith("ReadWritePaths=")]
-    assert len(paths) == 1 and "-/etc/thermalctl" in paths[0].split() and "-/run/thermalctl" in paths[0].split()
+    assert len(paths) == 1
+    assert paths[0].split() == ["-/etc/thermalctl", "-/run/thermalctl", f"-{al.CONTROL_VENV}"]
 
 
 def test_the_docs_name_the_exact_example_rule_command():

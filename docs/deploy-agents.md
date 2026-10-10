@@ -128,8 +128,17 @@ Before installing, on both platforms:
 1. In Observe, create a control key bound to this host: `--ingest-key-create HOST --ingest-key-scope wpc`. Keep the
    `wpc_` value out of files you commit.
 2. Write `control.toml` with the Observe public key (`ed25519:...`), the host name exactly as Observe knows it, and
-   the fan, services and reboot allowlist. The format is in `CONTROL.md` in the docs folder of the Observe repository. Everything
-   not listed is refused. The `host` must also be this machine's own name (full or short, any case): the daemon refuses
+   the fan, services, reboot and update allowlist. The format is in `CONTROL.md` in the docs folder of the Observe repository. Everything
+   not listed is refused. The `[update]` stanza decides whether Observe may update hostwatch itself on this host:
+
+   ```toml
+   [update]
+   agent = true     # Observe may pull the edge image and recreate the hostwatch-agent container
+   control = true   # Observe may pip-upgrade this daemon from git and restart it
+   ```
+
+   A missing stanza means neither. The `agent.update` command takes `component = "agent"`, `"control"` or `"all"`;
+   `all` needs both flags, and a refusal names the flag that is false. The `host` must also be this machine's own name (full or short, any case): the daemon refuses
    to start on any other machine, and refuses each command with reason `wrong_machine` if the name changes later. If the
    operating system name differs from the Observe name, add `machine_id = "<contents of /etc/machine-id>"` (the
    MachineGuid on Windows) and that id is checked instead. The agent logs one warning when `HOSTWATCH_HOST_NAME`
@@ -146,9 +155,16 @@ Linux (systemd), as root:
 4. Copy `deploy/hostwatch-control.env.example` to `/etc/hostwatch/control.env`, set `HOSTWATCH_CONTROL_URL` and
    `HOSTWATCH_CONTROL_KEY`, and set owner root, group `hostwatch-control`, mode 0640.
 5. Regenerate `deploy/hostwatch-control.sudoers` from your `control.toml` with `render_sudoers` in
-   `hostwatch/control/actions_linux.py` when the restart list changes, check it with `visudo -c -f`, and install it in
+   `hostwatch/control/actions_linux.py` when the restart list or the update flags change, check it with `visudo -c -f`, and install it in
    `/etc/sudoers.d/hostwatch-control` with mode 0440. It lists the only commands the account may run as root. The
-   reboot rules need `systemd-run` and `systemctl` at `/usr/bin`.
+   reboot rules need `systemd-run` and `systemctl` at `/usr/bin`. With `update.agent = true` the file gains the
+   docker lines for the fixed image `ghcr.io/trooperthorn/hostwatch:edge` and the two container names
+   `hostwatch-agent` and `hostwatch-agent-prev`, one of which (`docker run --detach --name hostwatch-agent *`)
+   carries a wildcard because the run arguments are copied from the old container; with `update.control = true`
+   it gains the exact pip line and the `systemd-run --on-active=5 /usr/bin/systemctl restart hostwatch-control`
+   line. The image tag and the pip spec are written with sudo's backslash escapes (`hostwatch\:edge`,
+   `hostwatch\[control\]`). Classic sudo (Debian, Raspberry Pi OS) parses them; sudo-rs, the default on recent
+   Ubuntu, rejects the bracket escape, so a host running sudo-rs cannot use `update.control` as rendered.
 6. Install `deploy/hostwatch-control.service` into `/etc/systemd/system/`, then `systemctl daemon-reload` and
    `systemctl enable --now hostwatch-control`. Logs are in `journalctl -u hostwatch-control`.
 
@@ -159,9 +175,20 @@ that touches thermalctl: `sudo -n /opt/thermalctl/venv/bin/thermalctl install-ov
 the text, replaces the file atomically as root and signals the service. Floor changes expire with the signed command
 (at most 900 seconds). A floor change is refused when the file holds a mode or floors without an expiry, and a mode change is refused while time-bounded floors exist, so no override outlives its purpose. Floors whose expiry has passed are dropped, not renewed. The rule matches the example in thermal-control-linux exactly, with no arguments. The thermalctl
 path, the venv's bin directory and its interpreter must be root owned and not writable by anyone else. The unit sets
-`ReadWritePaths=-/etc/thermalctl -/run/thermalctl` (the second is the lock file thermalctl opens while its service runs) because `ProtectSystem=strict` would otherwise keep `/etc` read-only for that root
-command too; the directory stays root owned, so the control account itself still cannot write it. If thermalctl refuses
+`ReadWritePaths=-/etc/thermalctl -/run/thermalctl -/opt/hostwatch-control/venv` (the second is the lock file thermalctl opens while its service runs, the third is where the control update runs pip as root) because `ProtectSystem=strict` would otherwise keep `/etc` and `/opt` read-only for those root
+commands too; the directories stay root owned, so the control account itself still cannot write them. If thermalctl refuses
 the text the command is reported failed with its message and the live overrides and the fans are untouched.
+
+`agent.update` on Linux: for the `agent` component the daemon reads the running `hostwatch-agent` container with
+`docker inspect`, pulls the edge image, and when the image id changed recreates the container with the Observe
+installer's arguments read back from inspect (the env file `/etc/hostwatch/agent.env` is passed by path, so the
+ingest key never passes through the daemon), keeping the old container as `hostwatch-agent-prev` until the new one
+runs and putting it back when the new one fails. An unchanged image is reported `done` with `already current`. The
+pull has 10 minutes and a container start 60 seconds. For `control` it runs the exact pip line as root, records the
+old and new installed versions, reports the result, and then has systemd restart the unit 5 seconds later; without
+`systemd-run` it reports failed before pip runs. The result is JSON with `component`, `old_image_id`, `new_image_id`,
+`old_version`, `new_version` and `note`. Commands run one at a time, so other commands wait while an update runs.
+On Windows the action is refused; run the installers again to update.
 
 Windows, from an elevated PowerShell (a separate service from `hostwatch-agent`):
 

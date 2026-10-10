@@ -1292,11 +1292,76 @@ def test_the_unit_makes_only_the_thermalctl_directories_writable_and_the_sudoers
     assert u["ProtectSystem"] == ["strict"]
     # The sudo children of the daemon inherit the read-only /etc, so the one directory is opened up. The dash lets
     # the unit start where thermalctl is not installed.
-    assert u["ReadWritePaths"] == ["-/etc/thermalctl -/run/thermalctl"]
+    # The control update runs pip as root inside the venv, which needs the same opening.
+    assert u["ReadWritePaths"] == ["-/etc/thermalctl -/run/thermalctl -/opt/hostwatch-control/venv"]
     assert "ProtectSystem=full" not in UNIT.read_text(encoding="utf-8")
     rules = [l.split("NOPASSWD: ", 1)[1] for l in SUDOERS.read_text(encoding="utf-8").splitlines()
              if l and not l.startswith("#")]
     assert "/opt/thermalctl/venv/bin/thermalctl install-override" in rules
     for rule in rules:
         assert not rule.startswith(("/usr/bin/tee", "/usr/bin/mv", "/usr/bin/rm")), rule
-        assert "*" not in rule and "," not in rule
+        assert "," not in rule
+        assert "*" not in rule or rule == "/usr/bin/docker run --detach --name hostwatch-agent *", rule
+
+
+# --- follow-up steps after a result is reported ------------------------------------------------
+
+def test_a_follow_up_step_runs_only_after_the_result_was_posted(env):
+    order = []
+
+    class Updater(FakeExecutor):
+        def execute(self, command):
+            self.calls.append(command)
+
+            def restart():
+                order.append(("restart", len(env.wp.results)))
+                return RunResult(0, "Running timer as unit: run-r1.timer")
+
+            return ActionResult(True, "done", "{\"component\": \"control\"}", after_report=restart)
+
+    env.wp.on_request = lambda r: order.append((r.method, r.url.path)) if r.method == "POST" else None
+    env.wp.add(env.signer, action="service.restart", params={"name": "hostwatch-agent"})
+    env.build(Updater()).cycle()
+    assert order == [("POST", d.RESULTS_PATH), ("restart", 1)]
+    assert env.wp.results[0]["state"] == "done" and env.wp.results[0]["output"] == "{\"component\": \"control\"}"
+
+
+def test_a_follow_up_step_still_runs_when_the_result_cannot_be_posted_and_the_result_is_kept(env, caplog):
+    ran = []
+
+    class Updater(FakeExecutor):
+        def execute(self, command):
+            return ActionResult(True, "done", "ok", after_report=lambda: ran.append(1) or RunResult(0, ""))
+
+    env.wp.add(env.signer, action="service.restart", params={"name": "hostwatch-agent"})
+    daemon = env.build(Updater())
+    env.wp.results_status = 503
+    with caplog.at_level(logging.WARNING, logger="hostwatch.control"):
+        with pytest.raises(d.DeliveryError):
+            daemon.cycle()
+    assert ran == [1] and daemon.outbox.depth() == 1 and "still queued" in caplog.text
+    env.wp.results_status = 200
+    daemon.cycle()
+    assert daemon.outbox.depth() == 0 and env.wp.results[0]["state"] == "done"
+
+
+def test_a_failed_action_never_runs_its_follow_up_step_and_a_failing_step_is_only_logged(env, caplog):
+    ran = []
+
+    class Updater(FakeExecutor):
+        def execute(self, command):
+            if command["id"] == "a":
+                return ActionResult(False, "failed", "pip failed", after_report=lambda: ran.append("a"))
+
+            def boom():
+                ran.append("b")
+                raise RuntimeError("systemd-run exploded")
+
+            return ActionResult(True, "done", "ok", after_report=boom)
+
+    env.wp.add(env.signer, id="a", seq=1, action="service.restart", params={"name": "hostwatch-agent"})
+    env.wp.add(env.signer, id="b", seq=2, action="service.restart", params={"name": "hostwatch-agent"})
+    with caplog.at_level(logging.ERROR, logger="hostwatch.control"):
+        env.build(Updater()).cycle()
+    assert ran == ["b"] and "follow-up step of command b failed" in caplog.text
+    assert {r["id"]: r["state"] for r in env.wp.results} == {"a": "failed", "b": "done"}
